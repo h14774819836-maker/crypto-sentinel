@@ -1,0 +1,77 @@
+@echo off
+chcp 65001 >nul 2>&1
+title Crypto Sentinel
+
+cd /d "%~dp0"
+
+echo.
+echo  ╔══════════════════════════════════╗
+echo  ║    Crypto Sentinel V0.2         ║
+echo  ║    AI 加密货币分析系统           ║
+echo  ╚══════════════════════════════════╝
+echo.
+
+REM --- Check Python ---
+python -c "import sys; raise SystemExit(0 if sys.version_info >= (3,11) else 1)" 2>nul
+if errorlevel 1 (
+    echo [ERROR] Python 3.11+ is required.
+    echo         Download from https://www.python.org/downloads/
+    pause
+    exit /b 1
+)
+
+REM --- Setup venv (first run only) ---
+if not exist ".venv\Scripts\python.exe" (
+    echo [SETUP] Creating virtual environment...
+    python -m venv .venv
+    if errorlevel 1 (
+        echo [ERROR] Failed to create venv
+        pause
+        exit /b 1
+    )
+)
+
+call ".venv\Scripts\activate.bat"
+
+REM --- Install/update dependencies (skip if marker file is fresh) ---
+set "MARKER=.venv\.deps_installed"
+set "NEEDS_INSTALL=0"
+
+if not exist "%MARKER%" set "NEEDS_INSTALL=1"
+if "%NEEDS_INSTALL%"=="0" (
+    REM Reinstall if pyproject.toml is newer than marker
+    for %%A in (pyproject.toml) do set "PYPROJECT_TIME=%%~tA"
+    for %%A in (%MARKER%) do set "MARKER_TIME=%%~tA"
+)
+
+if "%NEEDS_INSTALL%"=="1" (
+    echo [SETUP] Installing dependencies...
+    python -m pip install --quiet -e .[dev]
+    if errorlevel 1 (
+        echo [ERROR] pip install failed
+        pause
+        exit /b 1
+    )
+    echo. > "%MARKER%"
+    echo [SETUP] Dependencies installed.
+) else (
+    echo [OK] Dependencies already installed.
+)
+
+REM --- Create .env if missing ---
+if not exist ".env" (
+    copy /Y ".env.example" ".env" >nul
+    echo [SETUP] Created .env from .env.example
+    echo         Please edit .env to add your DEEPSEEK_API_KEY
+    echo.
+)
+
+REM --- Launch ---
+echo.
+echo [START] Launching Crypto Sentinel...
+echo         Dashboard: http://127.0.0.1:8000
+echo         Press Ctrl+C to stop
+echo.
+
+python -m app.cli up --open-browser --db-init --backfill-days 1
+exit /b %errorlevel%

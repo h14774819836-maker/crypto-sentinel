@@ -1,0 +1,500 @@
+{% extends "base.html" %}
+
+{% set page_main_max = 'max-w-[1560px]' %}
+
+{% block title %}Crypto Sentinel - LLM Debug Console{% endblock %}
+
+{% block content %}
+<div id="toast"
+  class="hidden fixed top-4 right-4 z-[100] max-w-md glass-panel border px-4 py-3 rounded-xl shadow-xl text-sm"></div>
+<div class="mb-8 flex flex-col lg:flex-row lg:justify-between lg:items-end gap-4">
+  <div>
+    <div
+      class="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-accent/10 border border-accent/20 text-accent text-xs font-semibold mb-3">
+      <i data-lucide="terminal-square" class="w-3 h-3"></i><span>Developer Tools</span>
+    </div>
+    <h2
+      class="text-3xl md:text-4xl font-bold tracking-tight mb-2 text-transparent bg-clip-text bg-gradient-to-r from-white to-gray-400">
+      LLM 调试层</h2>
+    <p class="text-muted-foreground text-sm md:text-base">统一管理 DeepSeek / OpenRouter / Ark 模型分工、任务路由、热更新状态与调用日志。</p>
+  </div>
+  <div class="flex flex-wrap gap-2">
+    <button onclick="pingLLM('telegram_chat')" id="btn-ping-telegram_chat"
+      class="btn btn-secondary border border-white/10 text-xs hover:bg-primary/20 hover:text-primary"><i
+        data-lucide="message-circle" class="w-4 h-4 mr-1"></i>检测聊天配置</button>
+    <button onclick="pingLLM('market')" id="btn-ping-market"
+      class="btn btn-secondary border border-white/10 text-xs hover:bg-primary/20 hover:text-primary"><i
+        data-lucide="activity" class="w-4 h-4 mr-1"></i>检测市场配置</button>
+    <button onclick="pingLLM('youtube')" id="btn-ping-youtube"
+      class="btn btn-secondary border border-white/10 text-xs hover:bg-primary/20 hover:text-primary" {% if not
+      youtube_enabled %}disabled{% endif %}><i data-lucide="youtube" class="w-4 h-4 mr-1"></i>检测YouTube配置</button>
+  </div>
+</div>
+<section class="card glass-panel mb-6">
+  <details class="group">
+    <summary
+      class="card-header bg-white/[0.02] border-b border-white/5 flex items-center justify-between gap-3 flex-wrap cursor-pointer select-none list-none [&::-webkit-details-marker]:hidden">
+      <h3 class="card-title flex items-center gap-2"><i data-lucide="key" class="w-5 h-5 text-accent"></i><span>Provider
+          密钥配置</span></h3>
+      <div class="flex items-center gap-3">
+        <span class="text-xs text-muted-foreground hidden md:inline">通常设置一次即可，点击展开修改</span>
+        <i data-lucide="chevron-down"
+          class="w-4 h-4 text-muted-foreground transition-transform group-open:rotate-180"></i>
+      </div>
+    </summary>
+    <div class="p-4">
+      <form id="llm-keys-form" class="space-y-3">
+        <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
+          <div class="space-y-1"><label
+              class="text-xs font-semibold text-muted-foreground uppercase tracking-wider">DeepSeek Key</label><input
+              type="text" id="chk-deepseek-key" placeholder="sk-..."
+              class="w-full bg-black/40 border border-white/10 rounded-lg px-3 py-1.5 text-sm"></div>
+          <div class="space-y-1"><label
+              class="text-xs font-semibold text-muted-foreground uppercase tracking-wider">OpenRouter Key</label><input
+              type="text" id="chk-openrouter-key" placeholder="sk-or-v1-..."
+              class="w-full bg-black/40 border border-white/10 rounded-lg px-3 py-1.5 text-sm"></div>
+          <div class="space-y-1"><label class="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Ark
+              Key</label><input type="text" id="chk-ark-key" placeholder="ark-..."
+              class="w-full bg-black/40 border border-white/10 rounded-lg px-3 py-1.5 text-sm"></div>
+          <div class="space-y-1"><label
+              class="text-xs font-semibold text-muted-foreground uppercase tracking-wider">OpenAI-Compatible
+              Key</label><input type="text" id="chk-openai-key" placeholder="sk-..."
+              class="w-full bg-black/40 border border-white/10 rounded-lg px-3 py-1.5 text-sm"></div>
+        </div>
+        <div class="pt-3 border-t border-white/5 flex justify-end"><button type="submit"
+            class="btn btn-primary px-6 border-transparent shadow-[0_0_15px_rgba(99,102,241,0.2)]"><i data-lucide="save"
+              class="w-4 h-4 mr-2"></i>保存并立即应用</button></div>
+      </form>
+    </div>
+  </details>
+</section>
+<section class="card glass-panel mb-6">
+  <div class="card-header bg-white/[0.02] border-b border-white/5 flex items-center justify-between gap-3 flex-wrap">
+    <h3 class="card-title flex items-center gap-2"><i data-lucide="settings-2"
+        class="w-5 h-5 text-accent"></i><span>任务分工与渠道配置</span></h3>
+    <div id="task-tabs" class="flex border border-white/10 rounded-lg overflow-hidden text-xs"></div>
+  </div>
+  <div class="p-4 relative">
+    <div id="config-loading"
+      class="absolute inset-0 z-10 bg-background/80 flex items-center justify-center backdrop-blur-sm hidden"><i
+        data-lucide="loader-2" class="w-6 h-6 animate-spin text-primary"></i></div>
+    <div class="grid grid-cols-1 xl:grid-cols-[1.1fr_0.9fr] gap-4 mb-4">
+      <div class="rounded-xl border border-white/10 bg-black/20 p-4">
+        <div class="text-xs text-muted-foreground mb-2">当前摘要</div>
+        <div id="task-summary" class="space-y-2 text-sm"></div>
+      </div>
+      <div class="rounded-xl border border-white/10 bg-black/20 p-4">
+        <div class="text-xs text-muted-foreground mb-3">模型分类筛选 / 高阶 / 均衡 / 省钱</div>
+        <div id="model-tier-buttons" class="flex flex-wrap gap-2"></div>
+      </div>
+    </div>
+    <div class="mb-6 rounded-xl border border-white/10 bg-black/20 p-4">
+      <div class="flex items-center justify-between gap-3 flex-wrap mb-3">
+        <div class="text-xs text-muted-foreground">点击模型卡片自动填充配置，无需手动输入</div>
+        <div class="text-xs text-muted-foreground" id="provider-hint-inline"></div>
+      </div>
+      <div id="model-catalog-cards" class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3"></div>
+    </div>
+    <form id="llm-config-form" class="space-y-4">
+      <details id="advanced-settings-panel" class="rounded-xl border border-white/10 bg-black/20 p-4">
+        <summary class="cursor-pointer text-xs font-semibold uppercase tracking-wider text-muted-foreground">高级参数（可覆盖预设）
+        </summary>
+        <div class="mt-4 grid grid-cols-1 md:grid-cols-2 gap-6">
+          <div class="space-y-2"><label
+              class="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Provider（渠道）</label><select
+              id="cfg-provider" class="w-full bg-black/40 border border-white/10 rounded-lg px-4 py-2 text-sm">
+              <option value="deepseek">DeepSeek（官方）</option>
+              <option value="openrouter">OpenRouter</option>
+              <option value="ark">Ark（火山引擎）</option>
+              <option value="openai_compatible">OpenAI 兼容</option>
+            </select>
+            <p id="provider-hint" class="text-xs text-muted-foreground leading-relaxed"></p>
+          </div>
+          <div class="space-y-2"><label
+              class="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Model（模型ID，点击上方卡片选择）</label><input
+              type="text" id="cfg-model" placeholder="请点击上方模型卡片选择" readonly
+              class="w-full bg-black/40 border border-white/10 rounded-lg px-4 py-2 text-sm cursor-pointer"></div>
+          <div class="space-y-2"><label
+              class="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Base
+              URL（留空自动填充）</label><input type="text" id="cfg-base-url" placeholder="按 Provider 自动预设" readonly
+              class="w-full bg-black/40 border border-white/10 rounded-lg px-4 py-2 text-sm"></div>
+          <div class="space-y-2"><label class="text-xs font-semibold text-muted-foreground uppercase tracking-wider">API
+              Key（使用上方默认密钥）</label><input type="text" id="cfg-api-key" placeholder="默认使用 Provider 默认密钥" readonly
+              disabled
+              class="w-full bg-black/40 border border-white/10 rounded-lg px-4 py-2 text-sm opacity-60 cursor-not-allowed">
+          </div>
+          <div class="space-y-2"><label
+              class="text-xs font-semibold text-muted-foreground uppercase tracking-wider">思考模式</label><select
+              id="cfg-reasoning" class="w-full bg-black/40 border border-white/10 rounded-lg px-4 py-2 text-sm">
+              <option value="auto">auto（自动）</option>
+              <option value="true">true（强制）</option>
+              <option value="false">false（关闭）</option>
+            </select></div>
+          <div class="space-y-2"><label
+              class="text-xs font-semibold text-muted-foreground uppercase tracking-wider">思考程度（Reasoning
+              Effort）</label><select id="cfg-reasoning-effort"
+              class="w-full bg-black/40 border border-white/10 rounded-lg px-4 py-2 text-sm">
+              <option value="">Default（默认）</option>
+              <option value="low">low（低）</option>
+              <option value="medium">medium（中）</option>
+              <option value="high">high（高）</option>
+            </select></div>
+          <div class="space-y-2"><label
+              class="text-xs font-semibold text-muted-foreground uppercase tracking-wider">启用状态</label><select
+              id="cfg-enabled" class="w-full bg-black/40 border border-white/10 rounded-lg px-4 py-2 text-sm">
+              <option value="true">启用</option>
+              <option value="false">停用</option>
+            </select></div>
+          <div class="space-y-2"><label
+              class="text-xs font-semibold text-muted-foreground uppercase tracking-wider">并发数</label><input
+              type="number" min="1" max="64" id="cfg-max-concurrency"
+              class="w-full bg-black/40 border border-white/10 rounded-lg px-4 py-2 text-sm"></div>
+          <div class="space-y-2"><label
+              class="text-xs font-semibold text-muted-foreground uppercase tracking-wider">重试次数</label><input
+              type="number" min="0" max="16" id="cfg-max-retries"
+              class="w-full bg-black/40 border border-white/10 rounded-lg px-4 py-2 text-sm"></div>
+          <div class="space-y-2 md:col-span-2"><label
+              class="text-xs font-semibold text-muted-foreground uppercase tracking-wider">HTTP Referer（OpenRouter
+              可选）</label><input type="text" id="cfg-http-referer" placeholder="可选，https://your-site.example"
+              class="w-full bg-black/40 border border-white/10 rounded-lg px-4 py-2 text-sm"></div>
+          <div class="space-y-2 md:col-span-2"><label
+              class="text-xs font-semibold text-muted-foreground uppercase tracking-wider">X-Title（OpenRouter
+              可选）</label><input type="text" id="cfg-x-title" placeholder="可选，Crypto Sentinel"
+              class="w-full bg-black/40 border border-white/10 rounded-lg px-4 py-2 text-sm"></div>
+        </div>
+        <div id="field-hints-panel"
+          class="mt-4 rounded-xl border border-white/10 bg-black/20 p-4 text-xs text-muted-foreground leading-relaxed">
+        </div>
+      </details>
+      <div class="pt-4 border-t border-white/5 flex justify-end"><button type="submit"
+          class="btn btn-primary px-6 border-transparent shadow-[0_0_15px_rgba(99,102,241,0.2)]"><i data-lucide="save"
+            class="w-4 h-4 mr-2"></i>保存配置并立即应用</button></div>
+    </form>
+  </div>
+</section>
+<section class="card glass-panel mb-6">
+  <div class="card-header bg-white/[0.02] border-b border-white/5 flex items-center justify-between gap-3 flex-wrap">
+    <h3 class="card-title flex items-center gap-2"><i data-lucide="git-branch"
+        class="w-5 h-5 text-accent"></i><span>任务路由配置（任务 -> Profile）</span></h3>
+    <div class="text-xs text-muted-foreground">直接修改任务分工，不用手改JSON</div>
+  </div>
+  <div class="p-4">
+    <form id="routing-form" class="space-y-4">
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-6" id="routing-grid"></div>
+      <div class="pt-4 border-t border-white/5 flex justify-end"><button type="submit"
+          class="btn btn-primary px-6 border-transparent shadow-[0_0_15px_rgba(99,102,241,0.2)]"><i data-lucide="save"
+            class="w-4 h-4 mr-2"></i>保存路由并立即应用</button></div>
+    </form>
+  </div>
+</section>
+<section class="mb-6">
+  <div class="card glass-panel mb-4">
+    <div
+      class="card-header bg-white/[0.02] border-b border-white/5 flex items-center justify-between gap-3 flex-wrap py-2.5 px-4">
+      <h3 class="card-title flex items-center gap-2 text-sm"><i data-lucide="refresh-cw"
+          class="w-4 h-4 text-accent"></i><span>热更新状态</span></h3><button onclick="refreshStatusAndLogs()"
+        class="btn btn-secondary border border-white/10 text-xs h-7"><i data-lucide="refresh-cw"
+          class="w-3.5 h-3.5 mr-1"></i>刷新</button>
+    </div>
+    <div class="p-3" id="hot-reload-panel">
+      <div class="text-sm text-muted-foreground">正在加载热更新状态...</div>
+    </div>
+  </div>
+  <div class="grid grid-cols-2 xl:grid-cols-4 gap-4" id="status-panels">
+    <div class="animate-pulse glass-panel p-4 h-36 rounded-xl border border-white/5"></div>
+    <div class="animate-pulse glass-panel p-4 h-36 rounded-xl border border-white/5"></div>
+    <div class="animate-pulse glass-panel p-4 h-36 rounded-xl border border-white/5"></div>
+    <div class="animate-pulse glass-panel p-4 h-36 rounded-xl border border-white/5"></div>
+  </div>
+</section>
+<section id="llm-logs-panel" class="card glass-panel">
+  <div class="card-header bg-white/[0.02] flex justify-between gap-3 flex-wrap">
+    <h3 class="card-title flex items-center gap-2"><i data-lucide="server-crash"
+        class="w-5 h-5 text-accent"></i><span>近期大模型调用日志</span></h3>
+    <div class="flex gap-2"><select id="task-filter"
+        class="bg-black/40 border border-white/10 rounded px-3 py-1 text-sm">
+        <option value="">全部任务</option>
+        <option value="telegram_chat">聊天（Telegram）</option>
+        <option value="market">市场分析</option>
+        <option value="youtube">YouTube</option>
+        <option value="selfcheck">自检</option>
+      </select><button onclick="fetchLLMLogs()" class="btn btn-secondary border border-white/10 text-xs"><i
+          data-lucide="list-restart" class="w-4 h-4 mr-1"></i>刷新日志</button></div>
+  </div>
+  <div class="table-wrapper">
+    <table id="logs-table">
+      <thead>
+        <tr>
+          <th>时间</th>
+          <th>任务</th>
+          <th>提供商 / 模型</th>
+          <th>耗时</th>
+          <th>状态</th>
+          <th>Token（输入 / 输出）</th>
+          <th class="w-1/3">错误摘要</th>
+        </tr>
+      </thead>
+      <tbody id="logs-body">
+        <tr>
+          <td colspan="7" class="text-center text-muted-foreground py-8"><i data-lucide="loader-2"
+              class="w-5 h-5 animate-spin mx-auto mb-2"></i>正在加载日志...</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <div id="logs-more" class="px-6 pb-6 pt-3 flex items-center justify-end hidden"></div>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  lucide.createIcons();
+  const TASK_LABELS = { telegram_chat: '聊天（Telegram）', market: '市场分析', youtube: 'YouTube', selfcheck: '自检', general: '通用默认' };
+  const pageState = { llmConfigData: null, llmStatusData: null, currentTask: 'telegram_chat', pendingTaskForm: {}, workerHotReloadState: null, llmLogItems: [], currentModelTier: 'balanced' }; const ui = window.SentinelUI || null;
+  document.addEventListener('DOMContentLoaded', async () => { bindEvents(); await Promise.all([fetchLLMConfig(), fetchLLMStatus(), fetchLLMLogs()]); setInterval(fetchLLMStatus, 8000); });
+  function bindEvents() { document.getElementById('llm-keys-form').addEventListener('submit', saveCommonKeysAndApply); document.getElementById('llm-config-form').addEventListener('submit', saveTaskConfigAndApply); document.getElementById('routing-form').addEventListener('submit', saveTaskRoutingAndApply); document.getElementById('task-filter').addEventListener('change', fetchLLMLogs);['cfg-provider', 'cfg-model', 'cfg-reasoning', 'cfg-reasoning-effort', 'cfg-enabled', 'cfg-base-url', 'cfg-api-key', 'cfg-max-concurrency', 'cfg-max-retries', 'cfg-http-referer', 'cfg-x-title'].forEach(id => document.getElementById(id).addEventListener('change', () => { applyAutoTaskFormFields(); syncFormToPending(); renderTaskSummary(); renderProviderHints(); renderModelCatalogCards(); })); }
+  function esc(v) { return String(v ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\"/g, '&quot;').replace(/'/g, '&#39;'); }
+  function attr(v) { return esc(v).replace(/`/g, '&#96;'); }
+  function toast(msg, type = 'info') { if (ui && ui.showToast) { ui.showToast(msg, type); return; } const e = document.getElementById('toast'); e.className = `fixed top-4 right-4 z-[100] max-w-md glass-panel border px-4 py-3 rounded-xl shadow-xl text-sm ${type === 'error' ? 'border-red-400/30 text-red-200' : type === 'success' ? 'border-emerald-400/30 text-emerald-200' : 'border-white/10 text-foreground'}`; e.textContent = msg; e.classList.remove('hidden'); clearTimeout(e._t); e._t = setTimeout(() => e.classList.add('hidden'), 4500); }
+  function setLoading(v) { document.getElementById('config-loading').classList.toggle('hidden', !v); }
+  function fmtTime(v) { if (!v) return '-'; try { return new Date(v).toLocaleString('zh-CN', { hour12: false }); } catch { return String(v); } }
+  function pretty(o) { try { return JSON.stringify(o || {}, null, 2); } catch { return String(o ?? ''); } }
+  function providerDefaultBaseUrl(provider) { if (provider === 'deepseek') return 'https://api.deepseek.com'; if (provider === 'openrouter') return 'https://openrouter.ai/api/v1'; if (provider === 'ark') return 'https://ark.cn-beijing.volces.com/api/v3'; return ''; }
+  function applyAutoTaskFormFields() { const p = document.getElementById('cfg-provider').value; const b = document.getElementById('cfg-base-url'); const m = document.getElementById('cfg-model'); const k = document.getElementById('cfg-api-key'); const auto = providerDefaultBaseUrl(p); if (p === 'deepseek' || p === 'openrouter' || p === 'ark') { b.value = auto; b.readOnly = true; b.placeholder = '已按 Provider 自动预设'; } else { b.readOnly = false; if (!b.value) b.value = auto; b.placeholder = 'OpenAI兼容通道请填写上游Base URL'; } m.readOnly = true; m.placeholder = '请点击上方推荐模型按钮选择'; if (k) { k.value = ''; k.readOnly = true; k.disabled = true; } }
+  async function fetchLLMConfig() { try { const r = await fetch('/api/llm/config?_ts=' + Date.now(), { cache: 'no-store' }); const d = await r.json(); if (!d.ok) throw new Error(d.error || '加载配置失败'); pageState.llmConfigData = d; document.getElementById('chk-deepseek-key').value = d.common_keys?.deepseek || ''; document.getElementById('chk-openrouter-key').value = d.common_keys?.openrouter || ''; document.getElementById('chk-ark-key').value = d.common_keys?.ark || ''; document.getElementById('chk-openai-key').value = d.common_keys?.openai || ''; renderTaskTabs(); ensureTask(); hydratePending(pageState.currentTask); renderTaskEditor(); renderRoutingForm(); } catch (e) { console.error(e); toast(`加载配置失败：${e.message || e}`, 'error'); } }
+  async function fetchLLMStatus() { try { const r = await fetch('/api/llm/status?_ts=' + Date.now(), { cache: 'no-store' }); const d = await r.json(); if (!d.ok) throw new Error(d.error || '加载状态失败'); pageState.llmStatusData = d; pageState.workerHotReloadState = d.hot_reload || null; renderHotReloadPanel(); renderStatusCards(); } catch (e) { console.error(e); } }
+  async function fetchLLMLogs() {
+    const t = document.getElementById('task-filter').value;
+    const url = t ? `/api/llm/calls?task=${encodeURIComponent(t)}` : '/api/llm/calls';
+    const body = document.getElementById('logs-body');
+    const panel = document.getElementById('llm-logs-panel');
+    const more = document.getElementById('logs-more');
+    let loadingTimer = null;
+    if (ui && ui.clearError && panel) ui.clearError(panel);
+    loadingTimer = setTimeout(() => {
+      if (body) {
+        body.innerHTML = '<tr><td colspan="7" class="text-center text-muted-foreground py-8"><i data-lucide="loader-2" class="w-5 h-5 animate-spin mx-auto mb-2"></i>Loading logs...</td></tr>';
+        if (more) more.classList.add('hidden');
+        lucide.createIcons();
+      }
+    }, 300);
+    try {
+      const r = await fetch(url, { cache: 'no-store' });
+      const d = await r.json();
+      if (!d.ok) throw new Error(d.error || 'Failed to load logs');
+      pageState.llmLogItems = Array.isArray(d.items) ? d.items : [];
+      renderLogsTable(pageState.llmLogItems);
+    } catch (e) {
+      console.error(e);
+      pageState.llmLogItems = [];
+      if (body) {
+        body.innerHTML = `<tr><td colspan="7" class="text-center text-red-300 py-8">Failed to load logs: ${esc(e.message || e)}</td></tr>`;
+      }
+      if (more) more.classList.add('hidden');
+      if (ui && ui.showPanelError) {
+        ui.showPanelError('llm-logs-panel', `Failed to load logs: ${e.message || e}`, { retryAction: fetchLLMLogs, retryLabel: 'Retry' });
+      }
+    } finally {
+      clearTimeout(loadingTimer);
+      lucide.createIcons();
+      if (ui && ui.bootPage) ui.bootPage();
+    }
+  }
+  async function refreshStatusAndLogs() { await Promise.all([fetchLLMStatus(), fetchLLMLogs()]); }
+  function ensureTask() { const order = pageState.llmConfigData?.ui_meta?.task_order || ['telegram_chat', 'market', 'youtube', 'selfcheck']; if (!order.includes(pageState.currentTask)) pageState.currentTask = order[0]; }
+  function renderTaskTabs() { const wrap = document.getElementById('task-tabs'); const labels = pageState.llmConfigData?.ui_meta?.task_labels || TASK_LABELS; const order = pageState.llmConfigData?.ui_meta?.task_order || ['telegram_chat', 'market', 'youtube', 'selfcheck']; wrap.innerHTML = order.map((t, i) => { const a = t === pageState.currentTask; const c = a ? 'px-4 py-2 bg-primary/20 text-primary font-medium' : 'px-4 py-2 hover:bg-white/5 text-muted-foreground'; const b = i < order.length - 1 ? ' border-r border-white/10' : ''; return `<button type="button" data-task-tab="${t}" class="${c}${b}">${esc(labels[t] || t)}</button>`; }).join(''); wrap.querySelectorAll('[data-task-tab]').forEach(btn => btn.addEventListener('click', () => { pageState.currentTask = btn.dataset.taskTab; hydratePending(pageState.currentTask); renderTaskTabs(); renderTaskEditor(); })); }
+  function taskPayload(task) { return pageState.llmConfigData?.tasks?.[task] || null; }
+  function normBool(v) { if (typeof v === 'string') return v === 'false' ? 'false' : 'true'; return v ? 'true' : 'false'; }
+  function optimisticResolvedFromPending(task = pageState.currentTask) { const p = taskPayload(task); const f = pageState.pendingTaskForm?.[task]; if (!p || !f) return; const autoBase = (f.provider === 'deepseek' || f.provider === 'openrouter' || f.provider === 'ark') ? providerDefaultBaseUrl(f.provider) : (f.base_url || ''); p.resolved = { ...(p.resolved || {}), provider: f.provider, model: f.model || '', base_url: autoBase || '', use_reasoning: f.use_reasoning || 'auto', reasoning_effort: f.reasoning_effort || '', enabled: f.enabled !== 'false', max_concurrency: parseInt(f.max_concurrency || '2', 10), max_retries: parseInt(f.max_retries || '3', 10), http_referer: f.http_referer || '', x_title: f.x_title || '' }; }
+  function hydratePending(task) { const p = taskPayload(task); if (!p) return; const e = p.editable_profile || {}; const r = p.resolved || {}; const provider = e.provider ?? r.provider ?? 'deepseek'; let baseUrl = e.base_url ?? ''; if (!baseUrl && (provider === 'deepseek' || provider === 'openrouter' || provider === 'ark')) baseUrl = providerDefaultBaseUrl(provider); pageState.pendingTaskForm[task] = { provider: provider, model: e.model ?? r.model ?? '', base_url: baseUrl, api_key: '', use_reasoning: e.use_reasoning ?? r.use_reasoning ?? 'auto', reasoning_effort: e.reasoning_effort ?? r.reasoning_effort ?? '', enabled: normBool(e.enabled ?? r.enabled ?? true), max_concurrency: String(e.max_concurrency ?? r.max_concurrency ?? 2), max_retries: String(e.max_retries ?? r.max_retries ?? 3), http_referer: e.http_referer ?? r.http_referer ?? '', x_title: e.x_title ?? r.x_title ?? '' }; }
+  function pending(task = pageState.currentTask) { if (!pageState.pendingTaskForm[task]) hydratePending(task); return pageState.pendingTaskForm[task] || {}; }
+  function setv(id, v) { const e = document.getElementById(id); if (e) e.value = v ?? ''; }
+  function renderTaskEditor() { const f = pending(); setv('cfg-provider', f.provider); setv('cfg-model', f.model); setv('cfg-base-url', f.base_url); setv('cfg-api-key', f.api_key); setv('cfg-reasoning', f.use_reasoning || 'auto'); setv('cfg-reasoning-effort', f.reasoning_effort || ''); setv('cfg-enabled', f.enabled || 'true'); setv('cfg-max-concurrency', f.max_concurrency || '2'); setv('cfg-max-retries', f.max_retries || '3'); setv('cfg-http-referer', f.http_referer || ''); setv('cfg-x-title', f.x_title || ''); applyAutoTaskFormFields(); syncFormToPending(); renderTaskSummary(); renderTierButtons(); renderProviderHints(); renderModelCatalogCards(); renderFieldHints(); lucide.createIcons(); }
+  function syncFormToPending() { const provider = document.getElementById('cfg-provider').value; const baseInput = document.getElementById('cfg-base-url'); if ((provider === 'deepseek' || provider === 'openrouter' || provider === 'ark') && baseInput) baseInput.value = providerDefaultBaseUrl(provider); pageState.pendingTaskForm[pageState.currentTask] = { provider: provider, model: document.getElementById('cfg-model').value, base_url: baseInput.value, api_key: '', use_reasoning: document.getElementById('cfg-reasoning').value, reasoning_effort: document.getElementById('cfg-reasoning-effort').value, enabled: document.getElementById('cfg-enabled').value, max_concurrency: document.getElementById('cfg-max-concurrency').value, max_retries: document.getElementById('cfg-max-retries').value, http_referer: document.getElementById('cfg-http-referer').value, x_title: document.getElementById('cfg-x-title').value }; }
+  function renderTaskSummary() { const t = pageState.currentTask; const labels = pageState.llmConfigData?.ui_meta?.task_labels || TASK_LABELS; const p = taskPayload(t) || {}; const r = p.resolved || {}; const f = pending(t); const providerLabels = pageState.llmConfigData?.provider_labels || {}; document.getElementById('task-summary').innerHTML = `<div class="flex items-center justify-between gap-3 flex-wrap"><div><div class="text-base font-semibold">${esc(labels[t] || t)}</div><div class="text-xs text-muted-foreground mt-1">任务路由 profile：<span class="font-mono text-foreground">${esc(p.routed_profile || '-')}</span></div></div><span class="badge ${f.enabled === 'false' ? 'badge-neutral' : 'badge-success'} px-2 py-0.5">${f.enabled === 'false' ? '已停用' : '已启用'}</span></div><div class="grid grid-cols-1 md:grid-cols-2 gap-3 mt-3"><div class="rounded-lg border border-white/5 bg-black/20 p-3"><div class="text-xs text-muted-foreground mb-1">当前生效（已解析，保存后更新）</div><div class="font-medium">${esc(providerLabels[r.provider] || r.provider || '-')}</div><div class="font-mono text-xs mt-1 break-all">${esc(r.model || '-')}</div><div class="text-xs text-muted-foreground mt-1 break-all">${esc(r.base_url || '-')}</div><div class="text-[10px] text-muted-foreground mt-1">思考：${esc(r.use_reasoning)} | 程度：${esc(r.reasoning_effort || 'default')}</div></div><div class="rounded-lg border border-white/5 bg-black/20 p-3"><div class="text-xs text-muted-foreground mb-1">当前编辑态（未保存，点保存后生效）</div><div class="font-medium">${esc(providerLabels[f.provider] || f.provider || '-')}</div><div class="font-mono text-xs mt-1 break-all">${esc(f.model || '-')}</div><div class="text-xs text-muted-foreground mt-1">思考：${esc(f.use_reasoning || 'auto')} | 程度：${esc(f.reasoning_effort || 'default')} ｜ 并发 ${esc(f.max_concurrency || '-')} ｜ 重试 ${esc(f.max_retries || '-')}</div></div></div>`; }
+  function renderTierButtons() {
+    const wrap = document.getElementById('model-tier-buttons');
+    if (!wrap) return;
+    const TIER_LABELS = { premium: '高阶', balanced: '均衡', cheap: '省钱' };
+    const tiers = ['premium', 'balanced', 'cheap'];
+    const modelTiers = pageState.llmConfigData?.model_tiers || {};
+    wrap.innerHTML = tiers.map(tier => {
+      const count = (modelTiers[tier] || []).length;
+      const active = pageState.currentModelTier === tier;
+      const cls = active
+        ? 'px-4 py-2 rounded-lg border border-primary/40 bg-primary/20 text-primary font-semibold text-sm cursor-pointer transition-colors'
+        : 'px-4 py-2 rounded-lg border border-white/10 bg-black/20 hover:bg-white/5 text-muted-foreground text-sm cursor-pointer transition-colors';
+      return `<button type="button" data-tier-filter="${tier}" class="${cls}">${esc(TIER_LABELS[tier] || tier)}（${count}）</button>`;
+    }).join('');
+    wrap.querySelectorAll('[data-tier-filter]').forEach(b => b.addEventListener('click', () => {
+      pageState.currentModelTier = b.dataset.tierFilter;
+      renderTierButtons();
+      renderModelCatalogCards();
+    }));
+  }
+  function renderModelCatalogCards() {
+    const wrap = document.getElementById('model-catalog-cards');
+    if (!wrap) return;
+    const catalog = pageState.llmConfigData?.model_catalog || [];
+    const tier = pageState.currentModelTier || 'balanced';
+    const filtered = catalog.filter(item => (item.tier || 'balanced') === tier);
+    const f = pending();
+    const currentModel = f.model || '';
+    if (!filtered.length) {
+      wrap.innerHTML = '<div class="text-xs text-muted-foreground col-span-full">该分类暂无可用模型</div>';
+      return;
+    }
+    const providerLabels = pageState.llmConfigData?.provider_labels || {};
+    wrap.innerHTML = filtered.map(item => {
+      const selected = item.id === currentModel;
+      const borderCls = selected ? 'border-primary/50 bg-primary/10 ring-1 ring-primary/30' : 'border-white/10 bg-black/20 hover:bg-white/5 hover:border-white/20';
+      return `<button type="button" data-catalog-model="${attr(item.id)}" data-catalog-provider="${attr(item.provider || '')}" class="text-left rounded-xl border ${borderCls} p-3 cursor-pointer transition-all">`
+        + `<div class="flex items-center justify-between gap-2 mb-1">`
+        + `<div class="text-sm font-semibold text-foreground">${esc(item.label || item.id)}</div>`
+        + (selected ? '<span class="text-[10px] px-1.5 py-0.5 rounded bg-primary/20 text-primary font-semibold">当前</span>' : '')
+        + `</div>`
+        + `<div class="text-[11px] text-muted-foreground font-mono mb-1">${esc(item.id)}</div>`
+        + `<div class="text-[11px] text-muted-foreground">${esc(providerLabels[item.provider] || item.provider || '-')} · ${esc(item.description || '')}</div>`
+        + `</button>`;
+    }).join('');
+    wrap.querySelectorAll('[data-catalog-model]').forEach(b => b.addEventListener('click', () => {
+      const modelId = b.dataset.catalogModel;
+      const provider = b.dataset.catalogProvider;
+      const item = catalog.find(c => c.id === modelId);
+      const defaults = item?.defaults || {};
+      document.getElementById('cfg-model').value = modelId;
+      if (provider) document.getElementById('cfg-provider').value = provider;
+      if (defaults.use_reasoning) document.getElementById('cfg-reasoning').value = defaults.use_reasoning;
+      if (defaults.max_concurrency) document.getElementById('cfg-max-concurrency').value = String(defaults.max_concurrency);
+      if (defaults.max_retries) document.getElementById('cfg-max-retries').value = String(defaults.max_retries);
+      applyAutoTaskFormFields();
+      syncFormToPending();
+      renderTaskSummary();
+      renderProviderHints();
+      renderModelCatalogCards();
+      toast(`已选择模型：${item?.label || modelId}（未保存）`);
+    }));
+  }
+  function applyTier(task, tierId) { const t = pageState.llmConfigData?.model_presets?.tier_templates?.[tierId]; if (!t) return; const cur = { ...pending(task) }; const m = { ...cur, ...(t.config || {}) }; if (tierId === 'cheap_deepseek') { if (task === 'telegram_chat' || task === 'selfcheck') m.use_reasoning = 'false'; if (task === 'market') m.use_reasoning = 'auto'; if (!m.model) m.model = 'deepseek-chat'; } if ((tierId || '').includes('openrouter')) { m.http_referer = m.http_referer || cur.http_referer || ''; m.x_title = m.x_title || cur.x_title || 'Crypto Sentinel'; } if ((tierId || '').includes('ark')) { if (!m.model) m.model = 'doubao-seed-2-0-pro-260215'; if (task === 'market' && m.use_reasoning === 'false') m.use_reasoning = 'auto'; } pageState.pendingTaskForm[task] = { ...m, enabled: normBool(m.enabled ?? true), max_concurrency: String(m.max_concurrency ?? cur.max_concurrency ?? 2), max_retries: String(m.max_retries ?? cur.max_retries ?? 3) }; renderTaskEditor(); toast(`已填充模板：${t.label}（未保存）`); }
+  function renderProviderHints() { const f = pending(); const p = f.provider || 'deepseek'; const model = String(f.model || '').toLowerCase(); const reasoning = f.use_reasoning || 'auto'; let hint = ''; let inline = ''; if (p === 'deepseek') { const reasoner = model.includes('reasoner') || model.includes('r1'); hint = reasoner ? 'DeepSeek 推理类模型建议 use_reasoning=true 或 auto；Base URL 已自动预设，任务内 API Key 覆盖已关闭。' : 'DeepSeek Chat 适合低成本快速响应；Telegram 聊天通常建议 use_reasoning=false 或 auto。Base URL 已自动预设，任务内 API Key 覆盖已关闭。'; inline = `DeepSeek｜思考模式：${reasoning}`; } else if (p === 'openrouter') { hint = 'OpenRouter 建议优先选择 Gemini / GPT / Claude 等先进模型。Base URL 已自动预设，任务内 API Key 覆盖已关闭（默认使用上方 Provider 默认密钥）。思考模式是否生效取决于具体上游模型兼容性。'; inline = 'OpenRouter｜优先 Gemini / GPT / Claude｜Base URL自动预设'; } else if (p === 'ark') { hint = 'Ark 默认走 Responses API，推荐模型：doubao-seed-2-0-pro-260215（豆包2.0）。该模型温度/TopP由服务端固定，页面主要调试思考模式、并发和重试。'; inline = `Ark｜豆包2.0｜思考模式：${reasoning}`; } else { hint = 'OpenAI 兼容通道请确认 Base URL 与模型 ID 对应正确。'; inline = 'OpenAI 兼容通道'; } document.getElementById('provider-hint').textContent = hint; document.getElementById('provider-hint-inline').textContent = inline; }
+  function renderRecommendedModels() {/* deprecated: replaced by renderModelCatalogCards */ }
+  function renderFieldHints() { const h = pageState.llmConfigData?.field_hints || {}; document.getElementById('field-hints-panel').innerHTML = [h.use_reasoning, h.base_url_override, h.api_key_override, h.openrouter_headers].filter(Boolean).map(x => `<div>• ${esc(x)}</div>`).join('') || '<div>暂无字段提示</div>'; }
+  function renderRoutingForm() { const wrap = document.getElementById('routing-grid'); const routing = pageState.llmConfigData?.task_routing || {}; const profiles = Object.keys(pageState.llmConfigData?.profiles || {}).sort(); const labels = pageState.llmConfigData?.ui_meta?.task_labels || TASK_LABELS; const tasks = ['telegram_chat', 'market', 'youtube', 'selfcheck']; wrap.innerHTML = tasks.map(t => `<div class="space-y-2"><label class="text-xs font-semibold text-muted-foreground uppercase tracking-wider">${esc(labels[t] || t)}</label><select data-routing-task="${t}" class="w-full bg-black/40 border border-white/10 rounded-lg px-4 py-2 text-sm">${profiles.map(p => `<option value="${attr(p)}" ${p === (routing[t] || t) ? 'selected' : ''}>${esc(p)}</option>`).join('')}</select></div>`).join(''); }
+  async function saveCommonKeysAndApply(e) {
+    e.preventDefault();
+    const submitter = e.submitter || e.target.querySelector('button[type="submit"]');
+    const payload = { task: 'common_keys', apply_now: true, keys: { deepseek: document.getElementById('chk-deepseek-key').value, openrouter: document.getElementById('chk-openrouter-key').value, ark: document.getElementById('chk-ark-key').value, openai: document.getElementById('chk-openai-key').value } };
+    if (ui && ui.withButtonLoading && submitter) return ui.withButtonLoading(submitter, () => postConfigAndRefresh(payload), { text: 'Saving...' });
+    await postConfigAndRefresh(payload);
+  }
+  async function saveTaskConfigAndApply(e) {
+    e.preventDefault();
+    syncFormToPending();
+    const f = pending();
+    const submitter = e.submitter || e.target.querySelector('button[type="submit"]');
+    const keepManualBase = f.provider === 'openai_compatible';
+    const payload = { task: pageState.currentTask, apply_now: true, config: { provider: f.provider, model: f.model, base_url: keepManualBase ? f.base_url : '', api_key: '', use_reasoning: f.use_reasoning || 'auto', reasoning_effort: f.reasoning_effort || '', enabled: f.enabled === 'true', max_concurrency: parseInt(f.max_concurrency || '2', 10), max_retries: parseInt(f.max_retries || '3', 10), http_referer: f.http_referer, x_title: f.x_title } };
+    if (ui && ui.withButtonLoading && submitter) return ui.withButtonLoading(submitter, () => postConfigAndRefresh(payload), { text: 'Saving...' });
+    await postConfigAndRefresh(payload);
+  }
+  async function saveTaskRoutingAndApply(e) {
+    e.preventDefault();
+    const routing = {};
+    const submitter = e.submitter || e.target.querySelector('button[type="submit"]');
+    document.querySelectorAll('[data-routing-task]').forEach(el => routing[el.dataset.routingTask] = el.value);
+    const payload = { task: 'routing', apply_now: true, routing };
+    if (ui && ui.withButtonLoading && submitter) return ui.withButtonLoading(submitter, () => postConfigAndRefresh(payload), { text: 'Saving...' });
+    await postConfigAndRefresh(payload);
+  }
+  async function postConfigAndRefresh(payload) { setLoading(true); try { const r = await fetch('/api/llm/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }); const d = await r.json(); if (!d.ok) throw new Error(d.error || '保存失败'); if (['telegram_chat', 'market', 'youtube', 'selfcheck', 'default'].includes(String(payload?.task || ''))) { optimisticResolvedFromPending(pageState.currentTask); renderTaskSummary(); } toast(d.message || '保存成功', 'success'); await fetchLLMConfig(); await Promise.all([fetchLLMStatus(), fetchLLMLogs()]); } catch (e) { console.error(e); toast(`保存失败：${e.message || e}`, 'error'); } finally { setLoading(false); } }
+  function renderHotReloadPanel() { const s = pageState.workerHotReloadState || {}; const statusCls = s.worker_ack_status === 'ok' ? 'text-emerald-300' : s.worker_ack_status === 'error' ? 'text-red-300' : 'text-muted-foreground'; document.getElementById('hot-reload-panel').innerHTML = `<div class="flex flex-wrap items-center gap-x-6 gap-y-1 text-xs"><span class="text-muted-foreground">Signal Rev: <span class="font-mono text-foreground">${esc(s.signal_revision || '-')}</span></span><span class="text-muted-foreground">Worker ACK: <span class="font-mono text-foreground">${esc(s.worker_ack_revision || '-')}</span></span><span class="text-muted-foreground">ACK状态: <span class="${statusCls}">${esc(s.worker_ack_status || '未确认')}</span></span><span class="text-muted-foreground">最后应用: <span class="font-mono text-foreground">${esc(s.worker_ack_applied_at || '-')}</span></span></div>`; }
+  function renderStatusCards() { const d = pageState.llmStatusData; if (!d) return; const wrap = document.getElementById('status-panels');['telegram_chat', 'market', 'youtube', 'selfcheck'].forEach(() => { }); wrap.innerHTML = ['telegram_chat', 'market', 'youtube', 'selfcheck'].map(t => statusCard(t, d[t] || {})).join(''); lucide.createIcons(); }
+  function statusCard(task, cfg) { const st = cfg.stats_1h || { total: 0, ok: 0, rate_limited: 0, error: 0, avg_duration: 0 }; const err = Number(st.rate_limited || 0) + Number(st.error || 0); const badge = cfg.enabled ? '<span class="badge badge-success px-1.5 py-0.5 text-[10px]">启用</span>' : '<span class="badge badge-neutral px-1.5 py-0.5 text-[10px]">停用</span>'; return `<div class="card glass-panel border border-white/5 relative overflow-hidden group"><div class="absolute right-0 top-0 w-20 h-20 bg-primary/5 rounded-full blur-[30px] pointer-events-none group-hover:bg-primary/10"></div><div class="p-3"><div class="flex justify-between items-start mb-2 gap-2"><div class="min-w-0"><h3 class="text-sm font-bold text-foreground flex items-center gap-1.5 flex-wrap">${esc(TASK_LABELS[task] || task)} ${badge}</h3><p class="text-[10px] text-muted-foreground font-mono mt-0.5 truncate">${esc(cfg.provider || '-')} • ${esc(cfg.model || '-')}</p></div></div><div class="grid grid-cols-2 gap-2 mt-2"><div class="bg-black/20 rounded p-2 border border-white/5"><div class="text-[9px] text-muted-foreground mb-0.5">1h调用</div><div class="text-base font-bold">${esc(st.total || 0)}</div></div><div class="bg-black/20 rounded p-2 border border-white/5"><div class="text-[9px] text-muted-foreground mb-0.5">成功</div><div class="text-base font-bold text-emerald-400">${esc(st.ok || 0)}</div></div><div class="bg-black/20 rounded p-2 border border-white/5"><div class="text-[9px] text-muted-foreground mb-0.5">异常</div><div class="text-base font-bold ${err > 0 ? 'text-yellow-400' : 'text-foreground'}">${esc(err)}</div></div><div class="bg-black/20 rounded p-2 border border-white/5"><div class="text-[9px] text-muted-foreground mb-0.5">延迟</div><div class="text-base font-bold mono">${esc(st.avg_duration || 0)}ms</div></div></div></div></div>`; }
+  function renderLogsTable(items) {
+    const body = document.getElementById('logs-body');
+    const more = document.getElementById('logs-more');
+    const rows = Array.isArray(items) ? items : [];
+    const emptyHtml = '<tr><td colspan="7" class="text-center text-muted-foreground py-8">No records</td></tr>';
+    if (!body) return;
+    if (!rows.length) {
+      body.innerHTML = emptyHtml;
+      if (more) more.classList.add('hidden');
+      lucide.createIcons();
+      return;
+    }
+    const renderStatus = (log) => {
+      if (ui && ui.renderStatusBadge) {
+        if (log.status === 'ok') return ui.renderStatusBadge('generic', 'success', { label: 'OK' });
+        if (String(log.status) === '429') return ui.renderStatusBadge('generic', 'warning', { label: '429' });
+        if (String(log.status) === 'timeout') return ui.renderStatusBadge('generic', 'warn', { label: 'Timeout' });
+        return ui.renderStatusBadge('generic', 'error', { label: String(log.status || 'Error') });
+      }
+      return `<span class="badge badge-neutral">${esc(log.status || '-')}</span>`;
+    };
+    const renderRow = (log) => {
+      const modelText = String(log.model || '-');
+      const modelCopy = (log.model ? ` <button type="button" class="copy-inline" data-copy-text="${attr(log.model)}" title="Copy model" aria-label="Copy model"><i data-lucide="copy" class="w-3.5 h-3.5"></i></button>` : '');
+      const reqCopy = (log.request_id ? `<button type="button" class="copy-inline ml-1" data-copy-text="${attr(log.request_id)}" title="Copy request id" aria-label="Copy request id"><i data-lucide="copy" class="w-3.5 h-3.5"></i></button>` : '');
+      return `<tr class="hover:bg-white/[0.02] border-b border-white/5">` +
+        `<td class="text-xs text-muted-foreground mono col-time">${esc(fmtTime(log.created_at))}</td>` +
+        `<td class="text-sm font-semibold text-foreground col-tag">${esc(TASK_LABELS[log.task] || log.task || '-')}</td>` +
+        `<td class="text-xs mono">` +
+        `<span class="text-muted-foreground">${esc(log.provider_name || '-')}</span>${reqCopy}<br>` +
+        `<span class="inline-flex items-center gap-1">${esc(modelText)}${modelCopy}</span>` +
+        `</td>` +
+        `<td class="text-xs mono col-num ${Number(log.duration_ms || 0) > 10000 ? 'text-yellow-400' : ''}">${esc(log.duration_ms ?? '-')} ms</td>` +
+        `<td class="col-tag">${renderStatus(log)}</td>` +
+        `<td class="text-xs mono text-muted-foreground col-num">${esc(log.prompt_tokens ?? '-')} / ${esc(log.completion_tokens ?? '-')}</td>` +
+        `<td class="text-xs text-muted-foreground col-text-ellipsis" title="${attr(log.error_summary || '')}">${esc(log.error_summary || '-')}</td>` +
+        `</tr>`;
+    };
+    if (ui && ui.progressiveRenderList) {
+      ui.progressiveRenderList({
+        items: rows,
+        container: body,
+        moreContainer: more,
+        renderItem: renderRow,
+        emptyHtml
+      });
+      if (ui.bootPage) ui.bootPage(body.closest('section') || document);
+    } else {
+      body.innerHTML = rows.map(renderRow).join('');
+      if (more) more.classList.add('hidden');
+      lucide.createIcons();
+    }
+  }
+  async function pingLLM(task) {
+    const btn = document.getElementById(`btn-ping-${task}`);
+    if (!btn) return;
+    if (btn.dataset.loading === '1') return;
+    const run = async () => {
+      const r = await fetch('/api/llm/selfcheck', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ task })
+      });
+      const d = await r.json();
+      if (d.ok) {
+        toast(`${TASK_LABELS[task] || task} self-check OK (${d.duration_ms}ms) ${d.response || 'OK'}`, 'success');
+        return;
+      }
+      toast(`${TASK_LABELS[task] || task} self-check failed: ${d.error || d.status || 'unknown error'}`, 'error');
+    };
+    try {
+      if (ui && ui.withButtonLoading) {
+        await ui.withButtonLoading(btn, run, { text: 'Checking...' });
+      } else {
+        const old = btn.innerHTML;
+        btn.disabled = true;
+        btn.innerHTML = '<i data-lucide="loader-2" class="w-4 h-4 mr-1 animate-spin"></i>Checking...';
+        lucide.createIcons();
+        try { await run(); } finally { btn.disabled = false; btn.innerHTML = old; lucide.createIcons(); }
+      }
+    } catch (e) {
+      toast(`Self-check error: ${e.message || e}`, 'error');
+    } finally {
+      await refreshStatusAndLogs();
+    }
+  }
+</script>
+{% endblock %}

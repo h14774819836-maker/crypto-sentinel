@@ -1,0 +1,21 @@
+<div class="{{ page_header_class|default('mb-8 animate-fade-in-up stagger-1') }}">
+  <div class="inline-flex items-center gap-2 px-3 py-1 rounded-full border text-xs font-semibold mb-3 {{ page_badge_class|default('bg-primary/10 border-primary/20 text-primary') }}">
+    {% if page_badge_icon %}
+    <i data-lucide="{{ page_badge_icon }}" class="w-3 h-3"></i>
+    {% endif %}
+    <span>{{ page_badge_text }}</span>
+  </div>
+  <div class="flex items-end justify-between gap-4 flex-wrap">
+    <div>
+      <h2 class="text-3xl md:text-4xl font-bold tracking-tight mb-2 text-transparent bg-clip-text bg-gradient-to-r from-white to-gray-400">{{ page_title }}</h2>
+      {% if page_subtitle %}
+      <p class="text-muted-foreground text-sm md:text-base">{{ page_subtitle }}</p>
+      {% endif %}
+    </div>
+    {% if page_header_actions_html %}
+    <div class="flex flex-wrap items-center gap-2">
+      {{ page_header_actions_html|safe }}
+    </div>
+    {% endif %}
+  </div>
+</div>

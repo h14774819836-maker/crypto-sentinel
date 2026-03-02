@@ -1,0 +1,32 @@
+{% macro copy_button(text, label='Copy', classes='') -%}
+<button
+  type="button"
+  class="copy-inline {{ classes }}"
+  data-copy-text="{{ text }}"
+  data-copy-success="{{ label }} success"
+  data-copy-error="{{ label }} failed"
+  aria-label="{{ label }}"
+  title="{{ label }}">
+  <i data-lucide="copy" class="w-3.5 h-3.5"></i>
+</button>
+{%- endmacro %}
+
+{% macro skeleton_line(width='100%', classes='') -%}
+<div class="skeleton-line {{ classes }}" style="width: {{ width }};"></div>
+{%- endmacro %}
+
+{% macro skeleton_card(lines=3, classes='') -%}
+<div class="skeleton-card {{ classes }}">
+  <div class="skeleton-line w-2/3"></div>
+  {% for _ in range(lines) %}
+  <div class="skeleton-line"></div>
+  {% endfor %}
+</div>
+{%- endmacro %}
+
+{% macro skeleton_kpi(classes='') -%}
+<div class="skeleton-kpi {{ classes }}">
+  <div class="skeleton-line w-1/2"></div>
+  <div class="skeleton-line skeleton-line-lg w-1/3"></div>
+</div>
+{%- endmacro %}

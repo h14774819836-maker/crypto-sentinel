@@ -1,0 +1,22 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.venv/
+.env
+data/
+*.db
+*.sqlite
+.DS_Store
+
+# Executable data and logs
+*.log
+*.txt
+!requirements.txt
+*.json
+!package.json
+!package-lock.json
+*.egg-info/
+.idea/
+.vscode/

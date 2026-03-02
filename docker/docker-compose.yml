@@ -1,0 +1,7 @@
+# Deprecated location.
+# Use the repository root compose file instead:
+#   docker compose -f ../docker-compose.yml up --build
+#
+# This file is intentionally a compatibility notice to avoid maintaining two
+# independent compose specs.
+services: {}

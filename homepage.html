@@ -1,0 +1,2104 @@
+
+
+<!doctype html>
+<html lang="zh-CN" class="dark" style="background-color:#060a12;color-scheme:dark;">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Crypto Sentinel - Market Overview</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <link rel="stylesheet" href="/static/styles.css?v=20260228-4">
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            background: 'hsl(var(--background))',
+            foreground: 'hsl(var(--foreground))',
+            primary: { DEFAULT: 'hsl(var(--primary))', foreground: 'hsl(var(--primary-foreground))' },
+            secondary: { DEFAULT: 'hsl(var(--secondary))', foreground: 'hsl(var(--secondary-foreground))' },
+            muted: { DEFAULT: 'hsl(var(--muted))', foreground: 'hsl(var(--muted-foreground))' },
+            accent: { DEFAULT: 'hsl(var(--accent))', foreground: 'hsl(var(--accent-foreground))' },
+            card: { DEFAULT: 'hsl(var(--card))', foreground: 'hsl(var(--card-foreground))' },
+            success: 'hsl(var(--success))',
+            warning: 'hsl(var(--warning))',
+            danger: 'hsl(var(--danger))',
+          }
+        }
+      }
+    };
+  </script>
+  
+<style>
+  #ai-console-container {
+    scrollbar-gutter: stable both-edges;
+  }
+
+  #ai-console-container::-webkit-scrollbar {
+    width: 10px;
+  }
+
+  #ai-console-container::-webkit-scrollbar-track {
+    background: rgba(15, 23, 42, 0.4);
+    border-radius: 999px;
+  }
+
+  #ai-console-container::-webkit-scrollbar-thumb {
+    background: linear-gradient(180deg, rgba(34, 197, 94, 0.55), rgba(59, 130, 246, 0.55));
+    border-radius: 999px;
+    border: 2px solid transparent;
+    background-clip: padding-box;
+  }
+
+  .ai-console-shell {
+    border: 1px solid rgba(34, 197, 94, 0.22);
+    background: linear-gradient(180deg, rgba(2, 6, 23, 0.92), rgba(2, 6, 23, 0.75));
+    box-shadow: inset 0 0 0 1px rgba(59, 130, 246, 0.08), 0 16px 32px rgba(2, 6, 23, 0.35);
+  }
+
+  .ai-console-stream {
+    border-left: 2px solid rgba(56, 189, 248, 0.55);
+    padding-left: 0.7rem;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .ai-console-live-dot .animate-ping {
+      animation: none !important;
+    }
+  }
+</style>
+
+</head>
+<body class="app-shell flex bg-background text-foreground min-h-screen font-sans selection:bg-primary/30">
+  
+
+
+
+
+<aside class="w-64 glass-panel border-r border-white/10 hidden md:flex flex-col fixed inset-y-0 z-50">
+
+  <div class="h-16 flex items-center justify-between px-6 border-b border-white/5">
+    <div class="flex items-center gap-2 text-primary font-bold text-xl tracking-tight">
+      <i data-lucide="hexagon" class="w-6 h-6 text-primary"></i>
+      <span>Sentinel<span class="text-foreground">OS</span></span>
+    </div>
+    
+  </div>
+  <nav class="flex-1 py-6 px-4 space-y-1 overflow-y-auto">
+    <div class="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-4 px-2" data-i18n="nav.dashboards">Dashboards</div>
+
+    <a href="/" class="nav-link is-active">
+      <i data-lucide="layout-dashboard" class="w-5 h-5"></i>
+      <span data-i18n="nav.overview">Overview</span>
+    </a>
+
+    <a href="/alerts" class="nav-link ">
+      <i data-lucide="bell" class="w-5 h-5"></i>
+      <span data-i18n="nav.alerts">Alerts</span>
+    </a>
+
+    <a href="/youtube" class="nav-link ">
+      <i data-lucide="youtube" class="w-5 h-5"></i>
+      <span data-i18n="nav.youtube">YouTube Signals</span>
+    </a>
+
+    <a href="/llm" class="nav-link mt-4 ">
+      <i data-lucide="cpu" class="w-5 h-5"></i>
+      <span data-i18n="nav.llm_debug">LLM Debug</span>
+    </a>
+
+    <div class="text-xs font-semibold text-muted-foreground uppercase tracking-wider mt-8 mb-4 px-2" data-i18n="nav.endpoints">API Endpoints</div>
+
+    <a href="/api/market" class="nav-link nav-link-api">
+      <i data-lucide="braces" class="w-4 h-4"></i>
+      <span data-i18n="nav.market_api">Market API</span>
+    </a>
+    <a href="/api/alerts" class="nav-link nav-link-api">
+      <i data-lucide="braces" class="w-4 h-4"></i>
+      <span data-i18n="nav.alerts_api">Alerts API</span>
+    </a>
+    <a href="/api/ai-signals" class="nav-link nav-link-api">
+      <i data-lucide="braces" class="w-4 h-4"></i>
+      <span data-i18n="nav.ai_signals_api">AI Signals API</span>
+    </a>
+    <a href="/api/health" class="nav-link nav-link-api">
+      <i data-lucide="activity" class="w-4 h-4"></i>
+      <span data-i18n="nav.health">System Health</span>
+    </a>
+  </nav>
+  <div class="p-4 border-t border-white/5">
+    <div class="flex items-center gap-3 px-3 py-2 rounded-lg bg-white/5 border border-white/5 justify-between">
+      <div class="flex items-center gap-3">
+        <span class="status-dot active" aria-hidden="true"></span>
+        <span class="text-sm font-medium text-muted-foreground" data-i18n="status.online">System Online</span>
+      </div>
+      <button type="button" data-lang-toggle onclick="toggleLanguage()" class="icon-btn h-7 w-7 text-xs font-bold" aria-label="Toggle language">EN</button>
+    </div>
+  </div>
+</aside>
+  <header class="md:hidden glass-panel h-16 fixed top-0 w-full z-40 flex items-center justify-between px-4 border-b border-white/10">
+  <div class="flex items-center gap-2 text-primary font-bold text-lg">
+    <i data-lucide="hexagon" class="w-5 h-5 text-primary"></i>
+    <span>Sentinel<span class="text-foreground">OS</span></span>
+  </div>
+  <div class="flex items-center gap-3">
+    <button type="button" data-lang-toggle onclick="toggleLanguage()" class="icon-btn h-7 w-7 text-xs font-bold" aria-label="Toggle language">EN</button>
+    <button type="button" class="icon-btn" data-mobile-sidebar-open aria-label="Open menu">
+      <i data-lucide="menu" class="w-5 h-5"></i>
+    </button>
+  </div>
+</header>
+
+
+
+
+
+
+<div class="mobile-sidebar-overlay hidden" data-mobile-sidebar-overlay></div>
+<aside class="mobile-sidebar glass-panel border-r border-white/10 md:hidden fixed inset-y-0 left-0 z-[70] w-[min(86vw,22rem)] hidden" data-mobile-sidebar>
+
+  <div class="h-16 flex items-center justify-between px-6 border-b border-white/5">
+    <div class="flex items-center gap-2 text-primary font-bold text-xl tracking-tight">
+      <i data-lucide="hexagon" class="w-6 h-6 text-primary"></i>
+      <span>Sentinel<span class="text-foreground">OS</span></span>
+    </div>
+    
+    <button type="button" class="icon-btn" data-mobile-sidebar-close aria-label="Close menu">
+      <i data-lucide="x" class="w-5 h-5"></i>
+    </button>
+    
+  </div>
+  <nav class="flex-1 py-6 px-4 space-y-1 overflow-y-auto">
+    <div class="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-4 px-2" data-i18n="nav.dashboards">Dashboards</div>
+
+    <a href="/" class="nav-link is-active">
+      <i data-lucide="layout-dashboard" class="w-5 h-5"></i>
+      <span data-i18n="nav.overview">Overview</span>
+    </a>
+
+    <a href="/alerts" class="nav-link ">
+      <i data-lucide="bell" class="w-5 h-5"></i>
+      <span data-i18n="nav.alerts">Alerts</span>
+    </a>
+
+    <a href="/youtube" class="nav-link ">
+      <i data-lucide="youtube" class="w-5 h-5"></i>
+      <span data-i18n="nav.youtube">YouTube Signals</span>
+    </a>
+
+    <a href="/llm" class="nav-link mt-4 ">
+      <i data-lucide="cpu" class="w-5 h-5"></i>
+      <span data-i18n="nav.llm_debug">LLM Debug</span>
+    </a>
+
+    <div class="text-xs font-semibold text-muted-foreground uppercase tracking-wider mt-8 mb-4 px-2" data-i18n="nav.endpoints">API Endpoints</div>
+
+    <a href="/api/market" class="nav-link nav-link-api">
+      <i data-lucide="braces" class="w-4 h-4"></i>
+      <span data-i18n="nav.market_api">Market API</span>
+    </a>
+    <a href="/api/alerts" class="nav-link nav-link-api">
+      <i data-lucide="braces" class="w-4 h-4"></i>
+      <span data-i18n="nav.alerts_api">Alerts API</span>
+    </a>
+    <a href="/api/ai-signals" class="nav-link nav-link-api">
+      <i data-lucide="braces" class="w-4 h-4"></i>
+      <span data-i18n="nav.ai_signals_api">AI Signals API</span>
+    </a>
+    <a href="/api/health" class="nav-link nav-link-api">
+      <i data-lucide="activity" class="w-4 h-4"></i>
+      <span data-i18n="nav.health">System Health</span>
+    </a>
+  </nav>
+  <div class="p-4 border-t border-white/5">
+    <div class="flex items-center gap-3 px-3 py-2 rounded-lg bg-white/5 border border-white/5 justify-between">
+      <div class="flex items-center gap-3">
+        <span class="status-dot active" aria-hidden="true"></span>
+        <span class="text-sm font-medium text-muted-foreground" data-i18n="status.online">System Online</span>
+      </div>
+      <button type="button" data-lang-toggle onclick="toggleLanguage()" class="icon-btn h-7 w-7 text-xs font-bold" aria-label="Toggle language">EN</button>
+    </div>
+  </div>
+</aside>
+
+  <main class="app-shell__main flex-1 md:ml-64 p-4 pt-20 md:p-8 md:pt-8 max-w-[1440px] mx-auto w-full">
+    
+<div class="mb-8 animate-fade-in-up stagger-1">
+
+  <div
+    class="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-primary/10 border border-primary/20 text-primary text-xs font-semibold mb-3">
+
+    <span class="relative flex h-2 w-2">
+
+      <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-primary opacity-75"></span>
+
+      <span class="relative inline-flex rounded-full h-2 w-2 bg-primary"></span>
+
+    </span>
+
+    <span data-i18n="overview.badge">实时市场数据</span>
+
+  </div>
+
+  <h2 data-i18n="overview.title"
+    class="text-3xl md:text-4xl font-bold tracking-tight mb-2 text-transparent bg-clip-text bg-gradient-to-r from-white to-gray-400">
+
+    市场总览</h2>
+
+  <p data-i18n="overview.subtitle" class="text-muted-foreground text-sm md:text-base">实时市场趋势、AI 交易信号与自动告警。</p>
+
+</div>
+
+
+
+<div class="mb-6 flex flex-wrap gap-3" id="global-coin-selector">
+
+  
+
+  
+
+  <button
+    class="coin-tab px-6 py-2 rounded-full text-sm font-bold transition-all border border-white/10 bg-white/[0.02] text-muted-foreground hover:bg-white/10"
+    data-symbol="BTCUSDT" onclick="selectCoin('BTCUSDT')">
+
+    BTCUSDT
+
+  </button>
+
+  
+
+  <button
+    class="coin-tab px-6 py-2 rounded-full text-sm font-bold transition-all border border-white/10 bg-white/[0.02] text-muted-foreground hover:bg-white/10"
+    data-symbol="ETHUSDT" onclick="selectCoin('ETHUSDT')">
+
+    ETHUSDT
+
+  </button>
+
+  
+
+  <button
+    class="coin-tab px-6 py-2 rounded-full text-sm font-bold transition-all border border-white/10 bg-white/[0.02] text-muted-foreground hover:bg-white/10"
+    data-symbol="SOLUSDT" onclick="selectCoin('SOLUSDT')">
+
+    SOLUSDT
+
+  </button>
+
+  
+
+  
+
+</div>
+
+
+
+<div class="grid grid-cols-1 xl:grid-cols-3 gap-6 xl:gap-8">
+
+
+
+  <!-- Left Column: Market Data & AI Signals -->
+
+  <div class="xl:col-span-2 space-y-6">
+
+
+
+    <!-- Market Data Table -->
+
+    <section class="card glass-panel animate-fade-in-up stagger-2">
+
+      <div class="card-header bg-white/[0.02]">
+
+        <h3 class="card-title flex items-center gap-2">
+
+          <i data-lucide="bar-chart-2" class="w-5 h-5 text-primary"></i> <span
+            data-i18n="overview.table.market">市场波动</span>
+
+        </h3>
+
+      </div>
+
+      <div class="table-wrapper">
+
+        <table>
+
+          <thead>
+
+            <tr>
+
+              <th data-i18n="overview.table.symbol">交易对</th>
+
+              <th data-i18n="overview.table.price">价格</th>
+
+              <th data-i18n="overview.table.1m">1分钟 ▲</th>
+
+              <th data-i18n="overview.table.10m">10分钟 ▲</th>
+
+              <th data-i18n="overview.table.vol">波动率(20)</th>
+
+              <th data-i18n="overview.table.zscore">波动Z分数</th>
+
+              <th data-i18n="overview.table.updated">更新时间</th>
+
+            </tr>
+
+          </thead>
+
+          <tbody id="market-data-tbody">
+
+            
+
+            
+
+            <tr class="group" data-symbol="BTCUSDT">
+
+              <td class="mono font-bold text-foreground col-tag">BTCUSDT</td>
+
+              <td class="mono col-num">$66966.770000</td>
+
+              <td
+                class="mono col-num font-medium text-positive">
+
+                0.0002%
+
+              </td>
+
+              <td
+                class="mono col-num font-medium text-positive">
+
+                0.0022%
+
+              </td>
+
+              <td class="mono col-num text-muted-foreground group-hover:text-foreground transition-colors">0.000506</td>
+
+              <td class="mono col-num text-muted-foreground group-hover:text-foreground transition-colors">-0.094</td>
+
+              <td class="text-muted-foreground text-xs col-time">15:03:00</td>
+
+            </tr>
+
+            
+
+            <tr class="group" data-symbol="ETHUSDT">
+
+              <td class="mono font-bold text-foreground col-tag">ETHUSDT</td>
+
+              <td class="mono col-num">$2005.290000</td>
+
+              <td
+                class="mono col-num font-medium text-positive">
+
+                0.0000%
+
+              </td>
+
+              <td
+                class="mono col-num font-medium text-positive">
+
+                0.0032%
+
+              </td>
+
+              <td class="mono col-num text-muted-foreground group-hover:text-foreground transition-colors">0.000712</td>
+
+              <td class="mono col-num text-muted-foreground group-hover:text-foreground transition-colors">0.241</td>
+
+              <td class="text-muted-foreground text-xs col-time">15:03:00</td>
+
+            </tr>
+
+            
+
+            <tr class="group" data-symbol="SOLUSDT">
+
+              <td class="mono font-bold text-foreground col-tag">SOLUSDT</td>
+
+              <td class="mono col-num">$86.110000</td>
+
+              <td
+                class="mono col-num font-medium text-positive">
+
+                0.0002%
+
+              </td>
+
+              <td
+                class="mono col-num font-medium text-positive">
+
+                0.0054%
+
+              </td>
+
+              <td class="mono col-num text-muted-foreground group-hover:text-foreground transition-colors">0.000754</td>
+
+              <td class="mono col-num text-muted-foreground group-hover:text-foreground transition-colors">0.537</td>
+
+              <td class="text-muted-foreground text-xs col-time">15:03:00</td>
+
+            </tr>
+
+            
+
+            
+
+          </tbody>
+
+        </table>
+
+      </div>
+
+    </section>
+
+
+
+    <!-- AI Trading Signals -->
+
+    <section id="overview-ai-panel" class="card glass-panel animate-fade-in-up stagger-3">
+
+      <div class="card-header bg-white/[0.02]">
+
+        <h3 class="card-title flex items-center gap-2">
+
+          <i data-lucide="bot" class="w-5 h-5 text-accent"></i> <span data-i18n="overview.ai.title">AI 分析引擎</span>
+
+        </h3>
+
+        <div class="flex items-center gap-3 flex-wrap justify-end">
+
+          <label for="modelSelector" class="text-xs text-muted-foreground uppercase tracking-wider">Model
+            Selector</label>
+
+          <select id="modelSelector"
+            class="h-9 min-w-[200px] rounded-lg border border-white/10 bg-black/30 px-3 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary/40">
+
+            
+            
+            
+            <optgroup label="高阶 Premium">
+              
+              <option value="deepseek-reasoner" >DeepSeek Reasoner
+              </option>
+              
+              <option value="anthropic/claude-opus-4.6" >Claude Opus 4.6
+              </option>
+              
+              <option value="google/gemini-3.1-pro-preview" >Gemini 3.1 Pro Preview
+              </option>
+              
+              <option value="qwen/qwen3.5-397b-a17b" >Qwen3.5 397B A17B
+              </option>
+              
+            </optgroup>
+            
+            
+            
+            
+            <optgroup label="均衡 Balanced">
+              
+              <option value="doubao-seed-2-0-pro-260215" selected>豆包2.0
+              </option>
+              
+              <option value="deepseek/deepseek-r1" >DeepSeek R1
+              </option>
+              
+              <option value="anthropic/claude-sonnet-4.6" >Claude Sonnet 4.6
+              </option>
+              
+              <option value="qwen/qwen3.5-plus-02-15" >Qwen3.5 Plus (2026-02-15)
+              </option>
+              
+              <option value="minimax/minimax-m2.5" >MiniMax M2.5
+              </option>
+              
+            </optgroup>
+            
+            
+            
+            
+            <optgroup label="省钱 Cheap">
+              
+              <option value="deepseek-chat" >DeepSeek Chat
+              </option>
+              
+              <option value="z-ai/glm-5" >GLM 5
+              </option>
+              
+            </optgroup>
+            
+            
+
+          </select>
+
+          <span id="analyze-status" class="text-sm font-medium text-muted-foreground status-chip-row"
+            aria-live="polite"></span>
+
+          <button id="btn-analyze" onclick="runAiAnalysis()" class="btn btn-primary" data-loading-text="Running...">
+            <i data-lucide="cpu" class="w-4 h-4 mr-2"></i> <span data-i18n="overview.ai.btn">开始分析</span>
+          </button>
+
+        </div>
+
+      </div>
+
+      <div class="px-4 pt-4">
+        <div id="overview-ai-panel-error" class="panel-error hidden"></div>
+      </div>
+
+      <div id="ai-signals-container" class="space-y-4 mt-4">
+
+        
+
+        
+
+        <div
+          class="ai-signal-card group p-5 rounded-xl border border-white/5 bg-white/[0.02] hover:bg-white/[0.04] transition-all"
+          data-symbol="BTCUSDT" style="display: block">
+
+          <!-- Header -->
+
+          <div class="flex items-center justify-between mb-4 pb-4 border-b border-white/5">
+
+            <div class="font-bold text-lg text-foreground flex items-center gap-3">
+
+              <div class="relative flex h-3 w-3">
+
+                <span
+                  class="animate-ping absolute inline-flex h-full w-full rounded-full bg-gray-400 opacity-75"></span>
+
+                <span
+                  class="relative inline-flex rounded-full h-3 w-3 bg-gray-500 shadow-[0_0_8px_currentColor]"></span>
+
+              </div>
+
+              BTCUSDT
+
+            </div>
+
+            <div>
+
+              <span class="badge badge-neutral px-3 py-1 text-sm" data-i18n-enum="HOLD"
+                data-i18n-type="action">观望</span>
+
+              
+
+            </div>
+
+          </div>
+
+
+
+          <!-- Metrics Grid -->
+
+          <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+
+            <!-- Entry -->
+
+            <div class="bg-black/20 rounded-lg p-3 border border-white/5 flex flex-col items-center justify-center">
+
+              <span class="text-xs text-muted-foreground mb-1 block" data-i18n="overview.table.entry">入场点</span>
+
+              <span class="mono font-bold text-lg text-muted-foreground">
+                -
+              </span>
+              
+
+            </div>
+
+            <!-- TP -->
+
+            <div class="bg-black/20 rounded-lg p-3 border border-white/5 flex flex-col items-center justify-center">
+
+              <span class="text-xs text-muted-foreground mb-1 block" data-i18n="overview.table.tp">止盈</span>
+
+              <span
+                class="mono font-bold text-lg text-muted-foreground">
+                -
+              </span>
+              
+
+            </div>
+
+            <!-- SL -->
+
+            <div class="bg-black/20 rounded-lg p-3 border border-white/5 flex flex-col items-center justify-center">
+
+              <span class="text-xs text-muted-foreground mb-1 block" data-i18n="overview.table.sl">止损</span>
+
+              <span
+                class="mono font-bold text-lg text-muted-foreground">
+                -
+              </span>
+              
+
+            </div>
+
+            <!-- Confidence -->
+
+            <div
+              class="bg-black/20 rounded-lg p-3 border border-white/5 flex flex-col items-center justify-center w-full">
+
+              <div class="flex justify-between w-full text-xs mb-1">
+
+                <span class="text-muted-foreground" data-i18n="overview.table.conviction">信心指数</span>
+
+                <span
+                  class="mono font-bold text-muted-foreground">35%</span>
+
+              </div>
+
+              <div class="w-full h-1.5 bg-white/10 rounded-full overflow-hidden mt-1">
+
+                <div
+                  class="h-full bg-white/20 transition-all duration-1000"
+                  style="width: 35%;"></div>
+
+              </div>
+
+            </div>
+
+          </div>
+
+
+
+          <!-- Reasoning -->
+
+          <div class="bg-black/40 rounded-lg p-4 border border-white/5 relative mt-4">
+
+            <div
+              class="absolute -top-2.5 left-4 bg-[#141416] px-2 text-[10px] font-bold text-primary uppercase tracking-wider rounded">
+
+              Strategy Logic (doubao-seed-2-0-pro-260215)</div>
+
+            <div class="text-sm text-foreground/90 whitespace-pre-wrap leading-relaxed">结构化解析/校验失败，已降级为HOLD。</div>
+
+          </div>
+
+          
+          
+          
+          
+          
+          
+          
+          
+          
+          
+          
+          
+          
+
+          <details class="mt-4 rounded-lg border border-white/5 bg-black/20 group/details">
+            <summary
+              class="list-none cursor-pointer px-4 py-3 flex items-center justify-between gap-3 hover:bg-white/[0.03] transition-colors rounded-lg">
+              <div class="flex items-center gap-2">
+                <i data-lucide="chevrons-up-down" class="w-4 h-4 text-muted-foreground"></i>
+                <span class="text-xs font-bold uppercase tracking-wider text-muted-foreground">展开详情</span>
+              </div>
+              <div class="flex items-center gap-2">
+                
+                
+              </div>
+            </summary>
+
+            <div class="px-4 pb-4 pt-1 space-y-4">
+              
+              <div class="rounded-lg border border-white/5 bg-black/30 p-3">
+                <div class="text-[11px] font-bold uppercase tracking-wider text-primary mb-2">Validation / 风控提示</div>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+                  <div class="space-y-1">
+                    
+                    
+                    
+                    <div class="text-emerald-300">
+                      可交易门控：可交易
+                    </div>
+                    
+                    <div class="text-muted-foreground">
+                      原因：未发现明显交易性门控问题
+                    </div>
+                    
+                    
+                  </div>
+                  <div class="space-y-1">
+                    
+                    
+                    
+                  </div>
+                </div>
+              </div>
+              
+
+              
+
+              
+
+              
+              <div class="rounded-lg border border-white/5 bg-black/30 p-3">
+                <div class="text-[11px] font-bold uppercase tracking-wider text-primary mb-2">Scenarios（情景剧本）</div>
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
+                  
+                  <div class="rounded-md border border-white/5 bg-black/20 p-2">
+                    <div class="text-muted-foreground mb-1">基础情景</div>
+                    <div class="text-foreground/90 whitespace-pre-wrap"></div>
+                  </div>
+                  
+                  <div class="rounded-md border border-white/5 bg-black/20 p-2">
+                    <div class="text-muted-foreground mb-1">看多情景</div>
+                    <div class="text-foreground/90 whitespace-pre-wrap"></div>
+                  </div>
+                  
+                  <div class="rounded-md border border-white/5 bg-black/20 p-2">
+                    <div class="text-muted-foreground mb-1">看空情景</div>
+                    <div class="text-foreground/90 whitespace-pre-wrap"></div>
+                  </div>
+                  
+                </div>
+              </div>
+              
+
+              
+
+              
+              <div class="rounded-lg border border-white/5 bg-black/30 p-3">
+                <div class="text-[11px] font-bold uppercase tracking-wider text-primary mb-2">Data Quality / Budget（调试）
+                </div>
+                <div class="text-xs space-y-1">
+                  
+                  <div>数据质量：<span class="mono">DEGRADED</span></div>
+                  
+                  
+                  <div class="text-muted-foreground">说明：YouTube 共识较旧或缺失</div>
+                  
+                  
+                  
+                  <div class="text-muted-foreground mono break-all">
+                    输入预算：YT 352/352
+                    | Alerts 486
+                  </div>
+                  
+                  
+                </div>
+              </div>
+              
+            </div>
+          </details>
+          
+
+        </div>
+
+        
+
+        <div
+          class="ai-signal-card group p-5 rounded-xl border border-white/5 bg-white/[0.02] hover:bg-white/[0.04] transition-all"
+          data-symbol="ETHUSDT" style="display: none">
+
+          <!-- Header -->
+
+          <div class="flex items-center justify-between mb-4 pb-4 border-b border-white/5">
+
+            <div class="font-bold text-lg text-foreground flex items-center gap-3">
+
+              <div class="relative flex h-3 w-3">
+
+                <span
+                  class="animate-ping absolute inline-flex h-full w-full rounded-full bg-gray-400 opacity-75"></span>
+
+                <span
+                  class="relative inline-flex rounded-full h-3 w-3 bg-gray-500 shadow-[0_0_8px_currentColor]"></span>
+
+              </div>
+
+              ETHUSDT
+
+            </div>
+
+            <div>
+
+              <span class="badge badge-neutral px-3 py-1 text-sm" data-i18n-enum="HOLD"
+                data-i18n-type="action">观望</span>
+
+              
+
+            </div>
+
+          </div>
+
+
+
+          <!-- Metrics Grid -->
+
+          <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+
+            <!-- Entry -->
+
+            <div class="bg-black/20 rounded-lg p-3 border border-white/5 flex flex-col items-center justify-center">
+
+              <span class="text-xs text-muted-foreground mb-1 block" data-i18n="overview.table.entry">入场点</span>
+
+              <span class="mono font-bold text-lg text-muted-foreground">
+                -
+              </span>
+              
+
+            </div>
+
+            <!-- TP -->
+
+            <div class="bg-black/20 rounded-lg p-3 border border-white/5 flex flex-col items-center justify-center">
+
+              <span class="text-xs text-muted-foreground mb-1 block" data-i18n="overview.table.tp">止盈</span>
+
+              <span
+                class="mono font-bold text-lg text-muted-foreground">
+                -
+              </span>
+              
+
+            </div>
+
+            <!-- SL -->
+
+            <div class="bg-black/20 rounded-lg p-3 border border-white/5 flex flex-col items-center justify-center">
+
+              <span class="text-xs text-muted-foreground mb-1 block" data-i18n="overview.table.sl">止损</span>
+
+              <span
+                class="mono font-bold text-lg text-muted-foreground">
+                -
+              </span>
+              
+
+            </div>
+
+            <!-- Confidence -->
+
+            <div
+              class="bg-black/20 rounded-lg p-3 border border-white/5 flex flex-col items-center justify-center w-full">
+
+              <div class="flex justify-between w-full text-xs mb-1">
+
+                <span class="text-muted-foreground" data-i18n="overview.table.conviction">信心指数</span>
+
+                <span
+                  class="mono font-bold text-muted-foreground">35%</span>
+
+              </div>
+
+              <div class="w-full h-1.5 bg-white/10 rounded-full overflow-hidden mt-1">
+
+                <div
+                  class="h-full bg-white/20 transition-all duration-1000"
+                  style="width: 35%;"></div>
+
+              </div>
+
+            </div>
+
+          </div>
+
+
+
+          <!-- Reasoning -->
+
+          <div class="bg-black/40 rounded-lg p-4 border border-white/5 relative mt-4">
+
+            <div
+              class="absolute -top-2.5 left-4 bg-[#141416] px-2 text-[10px] font-bold text-primary uppercase tracking-wider rounded">
+
+              Strategy Logic (doubao-seed-2-0-pro-260215)</div>
+
+            <div class="text-sm text-foreground/90 whitespace-pre-wrap leading-relaxed">结构化解析/校验失败，已降级为HOLD。</div>
+
+          </div>
+
+          
+          
+          
+          
+          
+          
+          
+          
+          
+          
+          
+          
+          
+
+          <details class="mt-4 rounded-lg border border-white/5 bg-black/20 group/details">
+            <summary
+              class="list-none cursor-pointer px-4 py-3 flex items-center justify-between gap-3 hover:bg-white/[0.03] transition-colors rounded-lg">
+              <div class="flex items-center gap-2">
+                <i data-lucide="chevrons-up-down" class="w-4 h-4 text-muted-foreground"></i>
+                <span class="text-xs font-bold uppercase tracking-wider text-muted-foreground">展开详情</span>
+              </div>
+              <div class="flex items-center gap-2">
+                
+                
+              </div>
+            </summary>
+
+            <div class="px-4 pb-4 pt-1 space-y-4">
+              
+              <div class="rounded-lg border border-white/5 bg-black/30 p-3">
+                <div class="text-[11px] font-bold uppercase tracking-wider text-primary mb-2">Validation / 风控提示</div>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+                  <div class="space-y-1">
+                    
+                    
+                    
+                    <div class="text-emerald-300">
+                      可交易门控：可交易
+                    </div>
+                    
+                    <div class="text-muted-foreground">
+                      原因：未发现明显交易性门控问题
+                    </div>
+                    
+                    
+                  </div>
+                  <div class="space-y-1">
+                    
+                    
+                    
+                  </div>
+                </div>
+              </div>
+              
+
+              
+
+              
+
+              
+              <div class="rounded-lg border border-white/5 bg-black/30 p-3">
+                <div class="text-[11px] font-bold uppercase tracking-wider text-primary mb-2">Scenarios（情景剧本）</div>
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
+                  
+                  <div class="rounded-md border border-white/5 bg-black/20 p-2">
+                    <div class="text-muted-foreground mb-1">基础情景</div>
+                    <div class="text-foreground/90 whitespace-pre-wrap"></div>
+                  </div>
+                  
+                  <div class="rounded-md border border-white/5 bg-black/20 p-2">
+                    <div class="text-muted-foreground mb-1">看多情景</div>
+                    <div class="text-foreground/90 whitespace-pre-wrap"></div>
+                  </div>
+                  
+                  <div class="rounded-md border border-white/5 bg-black/20 p-2">
+                    <div class="text-muted-foreground mb-1">看空情景</div>
+                    <div class="text-foreground/90 whitespace-pre-wrap"></div>
+                  </div>
+                  
+                </div>
+              </div>
+              
+
+              
+
+              
+              <div class="rounded-lg border border-white/5 bg-black/30 p-3">
+                <div class="text-[11px] font-bold uppercase tracking-wider text-primary mb-2">Data Quality / Budget（调试）
+                </div>
+                <div class="text-xs space-y-1">
+                  
+                  <div>数据质量：<span class="mono">DEGRADED</span></div>
+                  
+                  
+                  <div class="text-muted-foreground">说明：YouTube 共识较旧或缺失</div>
+                  
+                  
+                  
+                  <div class="text-muted-foreground mono break-all">
+                    输入预算：YT 352/352
+                    | Alerts 512
+                  </div>
+                  
+                  
+                </div>
+              </div>
+              
+            </div>
+          </details>
+          
+
+        </div>
+
+        
+
+        <div
+          class="ai-signal-card group p-5 rounded-xl border border-white/5 bg-white/[0.02] hover:bg-white/[0.04] transition-all"
+          data-symbol="SOLUSDT" style="display: none">
+
+          <!-- Header -->
+
+          <div class="flex items-center justify-between mb-4 pb-4 border-b border-white/5">
+
+            <div class="font-bold text-lg text-foreground flex items-center gap-3">
+
+              <div class="relative flex h-3 w-3">
+
+                <span
+                  class="animate-ping absolute inline-flex h-full w-full rounded-full bg-gray-400 opacity-75"></span>
+
+                <span
+                  class="relative inline-flex rounded-full h-3 w-3 bg-gray-500 shadow-[0_0_8px_currentColor]"></span>
+
+              </div>
+
+              SOLUSDT
+
+            </div>
+
+            <div>
+
+              <span class="badge badge-neutral px-3 py-1 text-sm" data-i18n-enum="HOLD"
+                data-i18n-type="action">观望</span>
+
+              
+
+            </div>
+
+          </div>
+
+
+
+          <!-- Metrics Grid -->
+
+          <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+
+            <!-- Entry -->
+
+            <div class="bg-black/20 rounded-lg p-3 border border-white/5 flex flex-col items-center justify-center">
+
+              <span class="text-xs text-muted-foreground mb-1 block" data-i18n="overview.table.entry">入场点</span>
+
+              <span class="mono font-bold text-lg text-muted-foreground">
+                -
+              </span>
+              
+
+            </div>
+
+            <!-- TP -->
+
+            <div class="bg-black/20 rounded-lg p-3 border border-white/5 flex flex-col items-center justify-center">
+
+              <span class="text-xs text-muted-foreground mb-1 block" data-i18n="overview.table.tp">止盈</span>
+
+              <span
+                class="mono font-bold text-lg text-muted-foreground">
+                -
+              </span>
+              
+
+            </div>
+
+            <!-- SL -->
+
+            <div class="bg-black/20 rounded-lg p-3 border border-white/5 flex flex-col items-center justify-center">
+
+              <span class="text-xs text-muted-foreground mb-1 block" data-i18n="overview.table.sl">止损</span>
+
+              <span
+                class="mono font-bold text-lg text-muted-foreground">
+                -
+              </span>
+              
+
+            </div>
+
+            <!-- Confidence -->
+
+            <div
+              class="bg-black/20 rounded-lg p-3 border border-white/5 flex flex-col items-center justify-center w-full">
+
+              <div class="flex justify-between w-full text-xs mb-1">
+
+                <span class="text-muted-foreground" data-i18n="overview.table.conviction">信心指数</span>
+
+                <span
+                  class="mono font-bold text-muted-foreground">35%</span>
+
+              </div>
+
+              <div class="w-full h-1.5 bg-white/10 rounded-full overflow-hidden mt-1">
+
+                <div
+                  class="h-full bg-white/20 transition-all duration-1000"
+                  style="width: 35%;"></div>
+
+              </div>
+
+            </div>
+
+          </div>
+
+
+
+          <!-- Reasoning -->
+
+          <div class="bg-black/40 rounded-lg p-4 border border-white/5 relative mt-4">
+
+            <div
+              class="absolute -top-2.5 left-4 bg-[#141416] px-2 text-[10px] font-bold text-primary uppercase tracking-wider rounded">
+
+              Strategy Logic (doubao-seed-2-0-pro-260215)</div>
+
+            <div class="text-sm text-foreground/90 whitespace-pre-wrap leading-relaxed">结构化解析/校验失败，已降级为HOLD。</div>
+
+          </div>
+
+          
+          
+          
+          
+          
+          
+          
+          
+          
+          
+          
+          
+          
+
+          <details class="mt-4 rounded-lg border border-white/5 bg-black/20 group/details">
+            <summary
+              class="list-none cursor-pointer px-4 py-3 flex items-center justify-between gap-3 hover:bg-white/[0.03] transition-colors rounded-lg">
+              <div class="flex items-center gap-2">
+                <i data-lucide="chevrons-up-down" class="w-4 h-4 text-muted-foreground"></i>
+                <span class="text-xs font-bold uppercase tracking-wider text-muted-foreground">展开详情</span>
+              </div>
+              <div class="flex items-center gap-2">
+                
+                
+              </div>
+            </summary>
+
+            <div class="px-4 pb-4 pt-1 space-y-4">
+              
+              <div class="rounded-lg border border-white/5 bg-black/30 p-3">
+                <div class="text-[11px] font-bold uppercase tracking-wider text-primary mb-2">Validation / 风控提示</div>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+                  <div class="space-y-1">
+                    
+                    
+                    
+                    <div class="text-emerald-300">
+                      可交易门控：可交易
+                    </div>
+                    
+                    <div class="text-muted-foreground">
+                      原因：未发现明显交易性门控问题
+                    </div>
+                    
+                    
+                  </div>
+                  <div class="space-y-1">
+                    
+                    
+                    
+                  </div>
+                </div>
+              </div>
+              
+
+              
+
+              
+
+              
+              <div class="rounded-lg border border-white/5 bg-black/30 p-3">
+                <div class="text-[11px] font-bold uppercase tracking-wider text-primary mb-2">Scenarios（情景剧本）</div>
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
+                  
+                  <div class="rounded-md border border-white/5 bg-black/20 p-2">
+                    <div class="text-muted-foreground mb-1">基础情景</div>
+                    <div class="text-foreground/90 whitespace-pre-wrap"></div>
+                  </div>
+                  
+                  <div class="rounded-md border border-white/5 bg-black/20 p-2">
+                    <div class="text-muted-foreground mb-1">看多情景</div>
+                    <div class="text-foreground/90 whitespace-pre-wrap"></div>
+                  </div>
+                  
+                  <div class="rounded-md border border-white/5 bg-black/20 p-2">
+                    <div class="text-muted-foreground mb-1">看空情景</div>
+                    <div class="text-foreground/90 whitespace-pre-wrap"></div>
+                  </div>
+                  
+                </div>
+              </div>
+              
+
+              
+
+              
+              <div class="rounded-lg border border-white/5 bg-black/30 p-3">
+                <div class="text-[11px] font-bold uppercase tracking-wider text-primary mb-2">Data Quality / Budget（调试）
+                </div>
+                <div class="text-xs space-y-1">
+                  
+                  <div>数据质量：<span class="mono">DEGRADED</span></div>
+                  
+                  
+                  <div class="text-muted-foreground">说明：YouTube 共识较旧或缺失</div>
+                  
+                  
+                  
+                  <div class="text-muted-foreground mono break-all">
+                    输入预算：YT 352/352
+                    | Alerts 514
+                  </div>
+                  
+                  
+                </div>
+              </div>
+              
+            </div>
+          </details>
+          
+
+        </div>
+
+        
+
+        
+
+      </div>
+
+
+
+      <!-- Streaming AI Reasoning Console -->
+      <div class="px-4 pb-4">
+        <div class="ai-console-shell mt-4 rounded-xl overflow-hidden">
+          <div class="px-4 py-3 border-b border-white/10 flex items-center gap-3 flex-wrap">
+            <div class="flex items-center gap-2 min-w-0">
+              <i data-lucide="terminal-square" class="w-4 h-4 text-cyan-300 shrink-0"></i>
+              <div class="min-w-0">
+                <div class="text-xs font-bold uppercase tracking-wider text-slate-200">AI Console</div>
+                <div class="text-[11px] text-slate-400 truncate">Reasoning stream and runtime traces</div>
+              </div>
+            </div>
+
+            <div class="ml-auto flex items-center gap-2 flex-wrap">
+              <div class="ai-console-live-dot inline-flex items-center gap-1.5 text-[10px] uppercase text-slate-400">
+                <span class="relative flex h-2 w-2">
+                  <span
+                    class="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-300 opacity-75"></span>
+                  <span class="relative inline-flex rounded-full h-2 w-2 bg-amber-300"></span>
+                </span>
+                <span>Live</span>
+              </div>
+              <button id="ai-console-follow" type="button" class="btn btn-secondary btn-sm hidden">Follow Live</button>
+              <button id="ai-console-clear" type="button" class="btn btn-secondary btn-sm">Clear</button>
+              <button type="button" class="section-toggle"
+                data-persist-toggle-key="sentinel.ui.overview.ai_console.collapsed"
+                data-persist-toggle-target="#ai-console-container" data-persist-default="collapsed"
+                data-persist-label-expanded="Hide Console" data-persist-label-collapsed="Show Console"
+                data-persist-collapsed-class="hidden" data-icon-expanded="chevron-up" data-icon-collapsed="chevron-down"
+                aria-expanded="true">
+                <i data-lucide="chevron-up" class="w-3.5 h-3.5"></i>
+                <span data-persist-label>Hide Console</span>
+              </button>
+            </div>
+          </div>
+
+          <div id="ai-console-container"
+            class="hidden relative max-h-[360px] min-h-[220px] overflow-y-auto overscroll-contain w-full px-4 py-3">
+            <div id="ai-console-scroll">
+              <div id="ai-console-output" class="text-xs font-mono text-slate-300/90 whitespace-pre-wrap break-words">
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </section>
+
+
+
+  </div>
+
+
+
+  <!-- Right Column: Alerts and YouTube -->
+
+  <div class="space-y-6">
+
+
+
+    <!-- Latest Alerts Widget -->
+
+    <section class="card glass-panel animate-fade-in-up stagger-4 border-l-4 border-l-red-500">
+
+      <div class="card-header bg-red-500/5">
+
+        <h3 class="card-title flex items-center gap-2 text-red-500"
+          style="background: none; color: #ef4444; -webkit-text-fill-color: initial;">
+
+          <i data-lucide="siren" class="w-5 h-5"></i> <span data-i18n="overview.alerts.title">系统告警</span>
+
+        </h3>
+
+        <a href="/alerts"
+          class="text-xs text-muted-foreground hover:text-foreground inline-flex items-center gap-1 transition-colors">
+
+          <span data-i18n="overview.alerts.view_all">查看全部</span> <i data-lucide="arrow-right" class="w-3 h-3"></i>
+
+        </a>
+
+      </div>
+
+      <div class="p-0">
+
+        
+
+        <div class="divide-y divide-white/[0.05]">
+
+          
+
+          <div class="p-4 hover:bg-white/[0.02] transition-colors relative group">
+
+            <div
+              class="absolute left-0 top-0 bottom-0 w-0.5 bg-red-500 opacity-0 group-hover:opacity-100 transition-opacity">
+
+            </div>
+
+            <div class="flex justify-between items-start mb-2">
+
+              <div class="flex items-center gap-2">
+
+                <span class="font-bold text-sm">SOLUSDT</span>
+
+                <span class="text-[10px] mono text-muted-foreground bg-white/5 px-2 py-0.5 rounded">MOMENTUM_ANOMALY_UP</span>
+
+              </div>
+
+              <span class="text-xs text-muted-foreground mono">21:53</span>
+
+            </div>
+
+            <p class="text-xs text-muted-foreground line-clamp-2 leading-relaxed">1分钟快速上冲，异常强度 Score 95/100（极端），5m/15m待确认。</p>
+
+          </div>
+
+          
+
+          <div class="p-4 hover:bg-white/[0.02] transition-colors relative group">
+
+            <div
+              class="absolute left-0 top-0 bottom-0 w-0.5 bg-red-500 opacity-0 group-hover:opacity-100 transition-opacity">
+
+            </div>
+
+            <div class="flex justify-between items-start mb-2">
+
+              <div class="flex items-center gap-2">
+
+                <span class="font-bold text-sm">ETHUSDT</span>
+
+                <span class="text-[10px] mono text-muted-foreground bg-white/5 px-2 py-0.5 rounded">MOMENTUM_ANOMALY_UP</span>
+
+              </div>
+
+              <span class="text-xs text-muted-foreground mono">21:53</span>
+
+            </div>
+
+            <p class="text-xs text-muted-foreground line-clamp-2 leading-relaxed">1分钟快速上冲，异常强度 Score 98/100（极端），5m/15m待确认。</p>
+
+          </div>
+
+          
+
+          <div class="p-4 hover:bg-white/[0.02] transition-colors relative group">
+
+            <div
+              class="absolute left-0 top-0 bottom-0 w-0.5 bg-red-500 opacity-0 group-hover:opacity-100 transition-opacity">
+
+            </div>
+
+            <div class="flex justify-between items-start mb-2">
+
+              <div class="flex items-center gap-2">
+
+                <span class="font-bold text-sm">BTCUSDT</span>
+
+                <span class="text-[10px] mono text-muted-foreground bg-white/5 px-2 py-0.5 rounded">MOMENTUM_ANOMALY_UP</span>
+
+              </div>
+
+              <span class="text-xs text-muted-foreground mono">21:53</span>
+
+            </div>
+
+            <p class="text-xs text-muted-foreground line-clamp-2 leading-relaxed">1分钟快速上冲，异常强度 Score 98/100（极端），5m/15m待确认。</p>
+
+          </div>
+
+          
+
+          <div class="p-4 hover:bg-white/[0.02] transition-colors relative group">
+
+            <div
+              class="absolute left-0 top-0 bottom-0 w-0.5 bg-yellow-500 opacity-0 group-hover:opacity-100 transition-opacity">
+
+            </div>
+
+            <div class="flex justify-between items-start mb-2">
+
+              <div class="flex items-center gap-2">
+
+                <span class="font-bold text-sm">SOLUSDT</span>
+
+                <span class="text-[10px] mono text-muted-foreground bg-white/5 px-2 py-0.5 rounded">MOMENTUM_ANOMALY_DOWN</span>
+
+              </div>
+
+              <span class="text-xs text-muted-foreground mono">21:21</span>
+
+            </div>
+
+            <p class="text-xs text-muted-foreground line-clamp-2 leading-relaxed">1分钟快速下挫，异常强度 Score 71/100（中等），5m已确认。</p>
+
+          </div>
+
+          
+
+          <div class="p-4 hover:bg-white/[0.02] transition-colors relative group">
+
+            <div
+              class="absolute left-0 top-0 bottom-0 w-0.5 bg-yellow-500 opacity-0 group-hover:opacity-100 transition-opacity">
+
+            </div>
+
+            <div class="flex justify-between items-start mb-2">
+
+              <div class="flex items-center gap-2">
+
+                <span class="font-bold text-sm">ETHUSDT</span>
+
+                <span class="text-[10px] mono text-muted-foreground bg-white/5 px-2 py-0.5 rounded">MOMENTUM_ANOMALY_DOWN</span>
+
+              </div>
+
+              <span class="text-xs text-muted-foreground mono">21:21</span>
+
+            </div>
+
+            <p class="text-xs text-muted-foreground line-clamp-2 leading-relaxed">1分钟快速下挫，异常强度 Score 87/100（严重），5m已确认。</p>
+
+          </div>
+
+          
+
+        </div>
+
+        
+
+      </div>
+
+    </section>
+
+
+
+    <!-- YouTube Consensus Widget -->
+
+    
+
+    <section class="card glass-panel animate-fade-in-up stagger-5">
+
+      <div class="card-header bg-white/[0.02]">
+
+        <h3 class="card-title flex items-center gap-2">
+
+          <i data-lucide="youtube" class="w-5 h-5 text-red-500"></i> <span data-i18n="overview.yt.title">YouTube
+
+            市场情绪</span>
+
+        </h3>
+
+      </div>
+
+      <div class="p-5">
+
+        
+
+        
+
+
+
+        <div class="bg-white/[0.03] rounded-lg p-4 mb-4 border border-white/5 relative overflow-hidden">
+
+          <!-- Glowing background accent -->
+
+          <div
+            class="absolute -right-10 -top-10 w-32 h-32 rounded-full blur-[40px] pointer-events-none
+
+                  bg-blue-500/20">
+
+          </div>
+
+
+
+          <div class="flex justify-between items-center mb-4 relative">
+
+            <span class="text-xs font-semibold text-muted-foreground uppercase tracking-wider"
+              data-i18n="overview.yt.bias">总体偏好</span>
+
+            <span class="badge badge-neutral" data-i18n-enum="neutral" data-i18n-type="bias">中性</span>
+
+            
+
+          </div>
+
+
+
+          <div class="mb-4 relative">
+
+            <div class="flex justify-between text-xs mb-1">
+
+              <span class="text-muted-foreground" data-i18n="overview.yt.conf">置信度</span>
+
+              <span class="font-bold mono">82/100</span>
+
+            </div>
+
+            <div class="h-1.5 w-full bg-white/10 rounded-full overflow-hidden">
+
+              <div
+                class="h-full rounded-full transition-all bg-blue-400"
+                style="width: 82%;"></div>
+
+            </div>
+
+          </div>
+
+
+
+          
+
+          <div class="grid grid-cols-2 gap-2 text-xs relative">
+
+            <div class="bg-black/20 rounded p-2 border border-white/5">
+
+              <div class="text-muted-foreground mb-1" data-i18n="overview.yt.support">支撑位</div>
+
+              <div class="text-emerald-400 font-mono">65800, 65000, 60000, 59800, 57600
+
+              </div>
+
+            </div>
+
+            <div class="bg-black/20 rounded p-2 border border-white/5">
+
+              <div class="text-muted-foreground mb-1" data-i18n="overview.yt.resistance">阻力位</div>
+
+              <div class="text-red-400 font-mono">67800, 68500, 69000, 72000
+
+              </div>
+
+            </div>
+
+          </div>
+
+          
+
+        </div>
+
+
+
+        <a href="/youtube" class="btn btn-secondary w-full text-xs">
+
+          <span data-i18n="overview.yt.btn">查看详细分析</span> <i data-lucide="arrow-right" class="w-3 h-3 ml-2"></i>
+
+        </a>
+
+
+
+        
+
+      </div>
+
+    </section>
+
+    
+
+
+
+  </div>
+
+</div>
+
+  </main>
+
+  <script src="/static/i18n.js?v=20260228-4"></script>
+  <script src="/static/ui_core.js?v=20260228-4"></script>
+  <script>
+    document.addEventListener('DOMContentLoaded', function () {
+      if (window.SentinelUI && typeof window.SentinelUI.bootPage === 'function') {
+        window.SentinelUI.bootPage(document);
+      } else if (window.lucide && window.lucide.createIcons) {
+        window.lucide.createIcons();
+      }
+    });
+  </script>
+  
+<script>
+
+  let currentCoin = 'BTCUSDT';
+
+
+
+  function selectCoin(symbol) {
+
+    currentCoin = symbol;
+
+
+
+    // Update Tabs UI
+
+    document.querySelectorAll('.coin-tab').forEach(tab => {
+
+      if (tab.dataset.symbol === symbol) {
+
+        tab.classList.add('bg-primary', 'text-primary-foreground', 'border-primary', 'shadow-[0_0_15px_rgba(99,102,241,0.3)]');
+
+        tab.classList.remove('bg-white/[0.02]', 'text-muted-foreground', 'hover:bg-white/10');
+
+      } else {
+
+        tab.classList.remove('bg-primary', 'text-primary-foreground', 'border-primary', 'shadow-[0_0_15px_rgba(99,102,241,0.3)]');
+
+        tab.classList.add('bg-white/[0.02]', 'text-muted-foreground', 'hover:bg-white/10');
+
+      }
+
+    });
+
+
+
+    // Filter Market Data
+
+    document.querySelectorAll('#market-data-tbody tr[data-symbol]').forEach(row => {
+      const selected = row.dataset.symbol === symbol;
+      row.style.display = '';
+      row.classList.toggle('bg-white/[0.03]', selected);
+      row.classList.toggle('border-primary/20', selected);
+    });
+
+
+
+    // Filter AI Signals
+
+    document.querySelectorAll('#ai-signals-container .ai-signal-card').forEach(card => {
+
+      card.style.display = card.dataset.symbol === symbol ? '' : 'none';
+
+    });
+
+
+
+    // Filter AI Stream Console
+
+    document.querySelectorAll('#ai-console-output > div[id^="ai-console-"]').forEach(div => {
+
+      const divSymbol = div.id.replace('ai-console-', '');
+
+      div.style.display = divSymbol === symbol ? '' : 'none';
+
+    });
+
+  }
+
+
+
+  document.addEventListener('DOMContentLoaded', () => {
+
+    const tabs = document.querySelectorAll('.coin-tab');
+
+    let defaultSymbol = null;
+
+    tabs.forEach(tab => {
+
+      if (tab.dataset.symbol === 'BTCUSDT') defaultSymbol = 'BTCUSDT';
+
+    });
+
+    if (!defaultSymbol && tabs.length > 0) defaultSymbol = tabs[0].dataset.symbol;
+
+    if (defaultSymbol) selectCoin(defaultSymbol);
+
+  });
+
+
+
+  // Initialize Lucide icons
+
+  lucide.createIcons();
+  const aiConsoleState = {
+    autoFollow: true,
+    streaming: false,
+  };
+
+  function isConsoleNearBottom(container, threshold = 36) {
+    if (!container) return true;
+    const gap = container.scrollHeight - container.clientHeight - container.scrollTop;
+    return gap <= threshold;
+  }
+
+  function setAiConsoleAutoFollow(enabled) {
+    aiConsoleState.autoFollow = !!enabled;
+    const followBtn = document.getElementById('ai-console-follow');
+    if (!followBtn) return;
+    followBtn.classList.toggle('hidden', aiConsoleState.autoFollow);
+    followBtn.classList.toggle('btn-primary', !aiConsoleState.autoFollow);
+    followBtn.classList.toggle('btn-secondary', aiConsoleState.autoFollow);
+    followBtn.textContent = aiConsoleState.autoFollow ? 'Following Live' : 'Follow Live';
+  }
+
+  function setAnalyzeStatus(kind, label, options = {}) {
+    const status = document.getElementById('analyze-status');
+    if (!status) return;
+    if (window.SentinelUI && typeof window.SentinelUI.renderStatusDot === 'function') {
+      status.innerHTML = window.SentinelUI.renderStatusDot('generic', kind, {
+        label,
+        pulse: !!options.pulse,
+        className: 'mr-1'
+      });
+      if (window.SentinelUI.applyStatusTokens) window.SentinelUI.applyStatusTokens(status);
+    } else {
+      status.textContent = label;
+    }
+  }
+
+
+
+  async function runAiAnalysis() {
+
+    const btn = document.getElementById('btn-analyze');
+
+    const consoleContainer = document.getElementById('ai-console-container');
+
+    const consoleOutput = document.getElementById('ai-console-output');
+    const followBtn = document.getElementById('ai-console-follow');
+    const clearBtn = document.getElementById('ai-console-clear');
+    const aiPanel = document.getElementById('overview-ai-panel');
+    const ui = window.SentinelUI;
+
+    const modelSelector = document.getElementById('modelSelector');
+
+    const selectedModel = modelSelector && modelSelector.value ? modelSelector.value : 'doubao-seed-2-0-pro-260215';
+
+    const selectedLabel = modelSelector && modelSelector.selectedIndex >= 0
+
+      ? modelSelector.options[modelSelector.selectedIndex].text
+
+      : selectedModel;
+
+    const encodedModel = encodeURIComponent(selectedModel);
+
+    const streamUrl = `/api/ai-analyze/stream?model=${encodedModel}`;
+
+    const preflightUrl = `/api/ai-analyze?dry_run=1&model=${encodedModel}`;
+
+    let scrollTimeout = null;
+
+    if (consoleContainer && !consoleContainer.dataset.boundScrollWatcher) {
+      consoleContainer.dataset.boundScrollWatcher = '1';
+      consoleContainer.addEventListener('scroll', () => {
+        if (!aiConsoleState.streaming) return;
+        setAiConsoleAutoFollow(isConsoleNearBottom(consoleContainer));
+      }, { passive: true });
+    }
+
+    if (followBtn && !followBtn.dataset.boundFollowClick) {
+      followBtn.dataset.boundFollowClick = '1';
+      followBtn.addEventListener('click', () => {
+        if (!consoleContainer) return;
+        consoleContainer.scrollTop = consoleContainer.scrollHeight;
+        setAiConsoleAutoFollow(true);
+      });
+    }
+
+    if (clearBtn && !clearBtn.dataset.boundClearClick) {
+      clearBtn.dataset.boundClearClick = '1';
+      clearBtn.addEventListener('click', () => {
+        consoleOutput.innerHTML = '';
+      });
+    }
+
+
+
+    const resetAnalyzeButton = (labelHtml) => {
+
+      if (ui && typeof ui.setLoading === 'function') {
+        ui.setLoading(btn, false);
+      } else {
+        btn.disabled = false;
+      }
+      if (labelHtml) {
+        btn.innerHTML = labelHtml;
+        btn.dataset.originalHtml = labelHtml;
+      }
+      lucide.createIcons();
+
+    };
+
+
+
+    if (ui && ui.clearError) ui.clearError(aiPanel);
+    if (ui && ui.setLoading) {
+      if (!ui.setLoading(btn, true, { text: 'Running...' })) return;
+    } else {
+      btn.disabled = true;
+      btn.innerHTML = '<i data-lucide="loader-2" class="w-4 h-4 mr-2 animate-spin"></i> Running...';
+      lucide.createIcons();
+    }
+
+
+
+    setAnalyzeStatus('loading', `Analyzing with ${selectedLabel}...`, { pulse: true });
+
+    consoleOutput.innerHTML = '';
+
+    consoleContainer.classList.remove('hidden');
+    aiConsoleState.streaming = true;
+    setAiConsoleAutoFollow(true);
+
+
+
+    try {
+
+      const preflightRes = await fetch(preflightUrl, { method: 'POST' });
+
+      if (!preflightRes.ok) {
+
+        let errMsg = `Request failed (${preflightRes.status})`;
+
+        try {
+
+          const body = await preflightRes.json();
+
+          errMsg = body.detail || body.error || errMsg;
+
+        } catch (_err) {
+
+          // ignore JSON parse failure
+
+        }
+
+        throw new Error(errMsg);
+
+      }
+
+    } catch (err) {
+
+      const errMsg = err && err.message ? err.message : 'Model validation failed';
+
+      setAnalyzeStatus('error', errMsg);
+      if (ui && ui.showPanelError) ui.showPanelError(aiPanel, errMsg);
+
+      resetAnalyzeButton('<i data-lucide="cpu" class="w-4 h-4 mr-2"></i> Retry');
+      aiConsoleState.streaming = false;
+
+      return;
+
+    }
+
+
+
+    const evtSource = new EventSource(streamUrl);
+
+
+
+    evtSource.onmessage = function (event) {
+
+      try {
+
+        const data = JSON.parse(event.data);
+
+
+
+        if (data.type === 'error') {
+
+          setAnalyzeStatus('error', data.error || 'Analysis failed');
+          if (ui && ui.showPanelError) ui.showPanelError(aiPanel, data.error || 'Analysis failed');
+
+          resetAnalyzeButton('<i data-lucide="cpu" class="w-4 h-4 mr-2"></i> Retry');
+          aiConsoleState.streaming = false;
+
+          evtSource.close();
+
+        }
+
+        else if (data.type === 'chunk') {
+
+          let symbolDiv = document.getElementById(`ai-console-${data.symbol}`);
+
+          if (!symbolDiv) {
+
+            symbolDiv = document.createElement('div');
+
+            symbolDiv.id = `ai-console-${data.symbol}`;
+
+            symbolDiv.className = 'ai-console-stream mb-3 rounded-r-lg bg-white/[0.02] py-2 pr-2';
+
+            symbolDiv.innerHTML = `<div class="text-[10px] text-cyan-300 font-semibold uppercase mb-1 tracking-wider">[ ${data.symbol} ]</div><div class="stream-text text-slate-300/90 whitespace-pre-wrap break-words leading-6"></div>`;
+
+            symbolDiv.style.display = data.symbol === currentCoin ? '' : 'none';
+
+            consoleOutput.appendChild(symbolDiv);
+
+          }
+
+          const textContainer = symbolDiv.querySelector('.stream-text');
+
+          const lastNode = textContainer.lastChild;
+
+          if (lastNode && lastNode.nodeType === Node.TEXT_NODE) {
+
+            lastNode.appendData(data.text);
+
+          } else {
+
+            textContainer.appendChild(document.createTextNode(data.text));
+
+          }
+
+          if (aiConsoleState.autoFollow && !scrollTimeout) {
+
+            scrollTimeout = setTimeout(() => {
+
+              consoleContainer.scrollTop = consoleContainer.scrollHeight;
+
+              scrollTimeout = null;
+
+            }, 100);
+
+          }
+
+        }
+
+        else if (data.type === 'symbol_done') {
+
+          let symbolDiv = document.getElementById(`ai-console-${data.symbol}`);
+
+          if (symbolDiv) {
+
+            const div = document.createElement('div');
+
+            div.className = 'text-emerald-300/80 text-[10px] mt-2 font-semibold';
+
+            div.textContent = '--- Analysis Completed ---';
+
+            symbolDiv.appendChild(div);
+
+          }
+
+          if (aiConsoleState.autoFollow) {
+            consoleContainer.scrollTop = consoleContainer.scrollHeight;
+          }
+
+
+
+          fetch(location.href)
+
+            .then(res => res.text())
+
+            .then(html => {
+
+              const parser = new DOMParser();
+
+              const doc = parser.parseFromString(html, 'text/html');
+
+
+
+              const newAiContainer = doc.querySelector('#ai-signals-container');
+
+              const oldAiContainer = document.getElementById('ai-signals-container');
+
+              if (newAiContainer && oldAiContainer) {
+
+                const newCards = Array.from(newAiContainer.querySelectorAll('.ai-signal-card'));
+
+                const oldCards = Array.from(oldAiContainer.querySelectorAll('.ai-signal-card'));
+
+
+
+                const newCard = newCards.find(card => card.dataset && card.dataset.symbol === data.symbol);
+
+                const oldCard = oldCards.find(card => card.dataset && card.dataset.symbol === data.symbol);
+
+
+
+                if (newCard && oldCard) {
+
+                  oldCard.replaceWith(newCard);
+
+                  newCard.style.display = newCard.dataset.symbol === currentCoin ? '' : 'none';
+
+                } else if (newCard && !oldCard) {
+
+                  oldAiContainer.appendChild(newCard);
+
+                  newCard.style.display = newCard.dataset.symbol === currentCoin ? '' : 'none';
+
+                }
+
+              }
+
+              lucide.createIcons();
+              if (window.SentinelUI && window.SentinelUI.bootPage) window.SentinelUI.bootPage(oldAiContainer);
+
+            })
+
+            .catch(err => console.error(`Failed to update table for ${data.symbol}:`, err));
+
+        }
+
+        else if (data.type === 'done') {
+
+          setAnalyzeStatus('success', `Analysis completed (${selectedLabel})`);
+          aiConsoleState.streaming = false;
+
+          evtSource.close();
+
+          resetAnalyzeButton('<i data-lucide="cpu" class="w-4 h-4 mr-2"></i> Re-run Analysis');
+
+        }
+
+      } catch (err) {
+
+        console.error('Parse error:', err);
+
+      }
+
+    };
+
+
+
+    evtSource.onerror = function () {
+
+      const msg = 'Stream disconnected. Possible unsupported model or network error.';
+      setAnalyzeStatus('error', msg);
+      if (ui && ui.showPanelError) ui.showPanelError(aiPanel, msg);
+
+      resetAnalyzeButton('<i data-lucide="cpu" class="w-4 h-4 mr-2"></i> Retry');
+      aiConsoleState.streaming = false;
+
+      evtSource.close();
+
+    };
+
+  }
+
+</script>
+
+</body>
+</html>

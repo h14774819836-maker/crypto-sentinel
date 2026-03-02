@@ -1,0 +1,110 @@
+{% extends "base.html" %}
+
+{% set page_main_max = 'max-w-[1440px]' %}
+{% import "partials/ui_macros.html" as ui %}
+
+{% block title %}Crypto Sentinel - Alerts Center{% endblock %}
+
+{% block content %}
+{% set page_badge_icon = 'shield-alert' %}
+{% set page_badge_text = 'SYSTEM ALERTS' %}
+{% set page_badge_class = 'bg-red-500/10 border-red-500/20 text-red-500' %}
+{% set page_title = 'Alerts Center' %}
+{% set page_subtitle = 'Comprehensive history of triggered market signals and systemic events.' %}
+{% set page_header_actions_html = '<span class=\"status-badge status-badge-info\"><i data-lucide=\"clock-3\" class=\"w-3 h-3\"></i><span>Generated ' ~ (generated_at|bj_time('%H:%M:%S')) ~ '</span></span>' %}
+{% include "partials/page_header.html" %}
+
+    <!-- Alert History Table -->
+    <section class="card glass-panel animate-fade-in-up stagger-2">
+      <div class="card-header bg-white/[0.02]">
+        <h3 class="card-title flex items-center gap-2">
+          <i data-lucide="history" class="w-5 h-5 text-primary"></i> <span data-i18n="alerts.table.title">Notification
+            Log</span>
+        </h3>
+      </div>
+      <div class="table-wrapper">
+        <table class="table-dense">
+          <thead>
+            <tr>
+              <th data-i18n="alerts.table.timestamp">时间戳</th>
+              <th data-i18n="alerts.table.asset">资产</th>
+              <th data-i18n="alerts.table.type">类型</th>
+              <th data-i18n="alerts.table.severity">严重性</th>
+              <th data-i18n="alerts.table.reason">触发原因</th>
+              <th data-i18n="alerts.table.metrics">指标数据基准</th>
+              <th data-i18n="alerts.table.delivery">发送状态</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% if alerts %}
+            {% for alert in alerts %}
+            <tr class="group relative">
+              <td class="text-muted-foreground text-sm mono whitespace-nowrap col-time">
+                <span class="text-foreground font-medium">{{ alert.created_at | bj_time("%Y-%m-%d") }}</span>
+                <span class="opacity-70 ml-1">{{ alert.created_at | bj_time("%H:%M:%S") }}</span>
+              </td>
+              <td class="font-bold text-foreground">
+                <div class="flex items-center gap-2">
+                  <div
+                    class="w-2 h-2 rounded-full {{ 'bg-red-500 shadow-[0_0_8px_rgba(239,68,68,0.8)]' if alert.severity == 'CRITICAL' else 'bg-yellow-500 shadow-[0_0_8px_rgba(245,158,11,0.8)]' if alert.severity == 'WARNING' else 'bg-blue-500 shadow-[0_0_8px_rgba(59,130,246,0.8)]' }}">
+                  </div>
+                  {{ alert.symbol }}
+                </div>
+              </td>
+              <td class="col-tag">
+                <span class="badge badge-info shadow-[0_0_10px_rgba(59,130,246,0.15)]">{{ alert.alert_type }}</span>
+              </td>
+              <td class="col-tag">
+                {% if alert.severity == "CRITICAL" %}
+                <span data-status-kind="severity" data-status-value="critical"></span>
+                {% elif alert.severity == "WARNING" %}
+                <span data-status-kind="generic" data-status-value="warn" data-status-label="WARNING"></span>
+                {% else %}
+                <span data-status-kind="generic" data-status-value="info" data-status-label="{{ alert.severity }}"></span>
+                {% endif %}
+              </td>
+              <td class="max-w-[250px]" title="{{ alert.reason }}">
+                <p class="truncate text-sm text-foreground group-hover:text-primary transition-colors cursor-help">{{
+                  alert.reason }}</p>
+              </td>
+              <td class="max-w-[200px]" title="{{ alert.metrics_json }}">
+                <div class="flex items-center gap-2">
+                  <div class="truncate mono text-xs text-muted-foreground bg-black/20 px-2 py-1 rounded border border-white/5 cursor-help">
+                    {{ alert.metrics_json }}</div>
+                  {{ ui.copy_button(alert.metrics_json, '复制指标') }}
+                </div>
+              </td>
+              <td class="col-tag">
+                {% if alert.sent_to_telegram %}
+                <span data-status-kind="generic" data-status-value="success" data-status-label="Telegram"></span>
+                {% else %}
+                <span data-status-kind="health" data-status-value="stale" data-status-label="Local"></span>
+                {% endif %}
+              </td>
+            </tr>
+            {% endfor %}
+            {% else %}
+            <tr>
+              <td colspan="7" class="text-center text-muted-foreground py-16">
+                <div class="flex flex-col items-center justify-center gap-4">
+                  <div class="h-16 w-16 rounded-full bg-white/5 flex items-center justify-center">
+                    <i data-lucide="bell-off" class="w-8 h-8 opacity-50"></i>
+                  </div>
+                  <div class="text-center">
+                    <p class="text-foreground font-medium mb-1" data-i18n="alerts.empty">暂无告警历史记录。</p>
+                  </div>
+                </div>
+              </td>
+            </tr>
+            {% endif %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    lucide.createIcons();
+  </script>
+{% endblock %}

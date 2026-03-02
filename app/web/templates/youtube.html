@@ -1,0 +1,1683 @@
+{% extends "base.html" %}
+
+{% set page_main_max = 'max-w-[1680px]' %}
+{% import "partials/ui_macros.html" as ui %}
+
+{% block title %}Crypto Sentinel - YouTube 信号{% endblock %}
+
+{% block head_extra %}
+<style>
+    .yt-video-card {
+        position: relative;
+        border-color: rgba(255, 255, 255, 0.08);
+        transition: all 250ms cubic-bezier(0.4, 0, 0.2, 1);
+        background: rgba(15, 23, 42, 0.3);
+        backdrop-filter: blur(8px);
+    }
+
+    .yt-video-card:hover {
+        transform: translateY(-4px);
+        border-color: rgba(255, 255, 255, 0.15);
+        box-shadow: 0 12px 30px -10px rgba(0, 0, 0, 0.5);
+        background: rgba(15, 23, 42, 0.45);
+    }
+
+    .yt-video-card::before {
+        content: "";
+        position: absolute;
+        left: 0;
+        top: 0;
+        bottom: 0;
+        width: 3px;
+        border-radius: 10px 0 0 10px;
+        background: var(--yt-card-accent, rgba(148, 163, 184, 0.7));
+        box-shadow: 0 0 12px var(--yt-card-accent, rgba(148, 163, 184, 0.7));
+        opacity: 0.8;
+        transition: all 250ms ease;
+    }
+
+    .yt-video-card:hover::before {
+        width: 4px;
+        opacity: 1;
+        box-shadow: 0 0 20px var(--yt-card-accent, rgba(148, 163, 184, 0.7));
+    }
+
+    .yt-video-card[data-analysis-status="queued"] {
+        --yt-card-accent: #94a3b8;
+    }
+
+    .yt-video-card[data-analysis-status="running"] {
+        --yt-card-accent: #3b82f6;
+    }
+
+    .yt-video-card[data-analysis-status="done"] {
+        --yt-card-accent: #10b981;
+    }
+
+    .yt-video-card[data-analysis-status="failed_paused"] {
+        --yt-card-accent: #f59e0b;
+    }
+
+    .yt-video-card[data-analysis-status="pending"] {
+        --yt-card-accent: #64748b;
+    }
+
+    .yt-video-card[data-queue-state="waiting"] {
+        --yt-card-accent: rgba(148, 163, 184, 0.88);
+    }
+
+    .yt-video-card[data-queue-state="running"] {
+        --yt-card-accent: rgba(45, 212, 191, 0.92);
+    }
+
+    .yt-video-card[data-queue-state="blocked"] {
+        --yt-card-accent: rgba(251, 146, 60, 0.94);
+    }
+
+    .yt-video-card[data-queue-state="done"] {
+        --yt-card-accent: rgba(52, 211, 153, 0.92);
+    }
+
+    .yt-video-card[data-retry-wait="true"] {
+        --yt-card-accent: rgba(251, 191, 36, 0.92);
+    }
+
+    .yt-video-card.is-running {
+        box-shadow: 0 0 0 1px rgba(59, 130, 246, 0.3), 0 10px 30px rgba(37, 99, 235, 0.15);
+        animation: yt-card-pulse 2s infinite ease-in-out;
+    }
+
+    @keyframes yt-card-pulse {
+
+        0%,
+        100% {
+            transform: translateY(-4px);
+            box-shadow: 0 12px 30px -10px rgba(37, 99, 235, 0.2);
+        }
+
+        50% {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 20px -10px rgba(37, 99, 235, 0.1);
+        }
+    }
+
+    .yt-video-card.is-done {
+        background-image: linear-gradient(180deg, rgba(16, 185, 129, 0.07), rgba(16, 185, 129, 0.02));
+    }
+
+    .yt-video-card.is-stalled {
+        border-color: rgba(251, 191, 36, 0.55) !important;
+        box-shadow: 0 0 0 1px rgba(251, 191, 36, 0.32), 0 0 22px rgba(251, 191, 36, 0.22);
+        animation: yt-stalled-ring 1.2s ease-in-out infinite;
+    }
+
+    .yt-runtime-strip {
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        background: linear-gradient(120deg, rgba(30, 64, 175, 0.18), rgba(2, 6, 23, 0.66));
+        border-radius: 0.75rem;
+        padding: 0.6rem 0.8rem;
+    }
+
+    .yt-queue-health {
+        height: 8px;
+        border-radius: 999px;
+        overflow: hidden;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        background: rgba(2, 6, 16, 0.75);
+        display: flex;
+        gap: 1px;
+    }
+
+    .yt-queue-health-seg {
+        height: 100%;
+        min-width: 0;
+    }
+
+    .yt-queue-health-waiting {
+        background: rgba(148, 163, 184, 0.9);
+    }
+
+    .yt-queue-health-running {
+        background: rgba(45, 212, 191, 0.95);
+    }
+
+    .yt-queue-health-blocked {
+        background: rgba(251, 146, 60, 0.98);
+    }
+
+    .yt-queue-health-done {
+        background: rgba(52, 211, 153, 0.95);
+    }
+
+    .yt-blocked-chip {
+        border: 1px solid rgba(251, 146, 60, 0.35);
+        background: rgba(251, 146, 60, 0.12);
+        color: rgba(254, 215, 170, 0.95);
+        border-radius: 999px;
+        padding: 0.1rem 0.45rem;
+        font-size: 11px;
+        line-height: 1.35;
+    }
+
+    .analysis-meta-icon {
+        width: 16px;
+        height: 16px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        opacity: 0.85;
+        flex-shrink: 0;
+    }
+
+    .analysis-meta-text {
+        line-height: 1.2;
+    }
+
+    .analysis-stagebar {
+        width: 100%;
+        height: 3px;
+        border-radius: 999px;
+        background: rgba(148, 163, 184, 0.2);
+        overflow: hidden;
+    }
+
+    .analysis-stagebar-fill {
+        display: block;
+        width: 0;
+        height: 100%;
+        border-radius: inherit;
+        background: linear-gradient(90deg, rgba(59, 130, 246, 0.9), rgba(245, 158, 11, 0.9));
+        transition: width 200ms ease;
+    }
+
+    .yt-vsi-pill {
+        border-radius: 0.65rem;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        background: rgba(2, 6, 23, 0.6);
+        padding: 0.3rem 0.55rem;
+        display: inline-flex;
+        gap: 0.4rem;
+        align-items: center;
+    }
+
+    @keyframes yt-card-breathe {
+
+        0%,
+        100% {
+            transform: translateY(0);
+        }
+
+        50% {
+            transform: translateY(-1px);
+        }
+    }
+
+    @keyframes yt-stalled-ring {
+
+        0%,
+        100% {
+            box-shadow: 0 0 0 1px rgba(251, 191, 36, 0.3), 0 0 16px rgba(251, 191, 36, 0.18);
+        }
+
+        50% {
+            box-shadow: 0 0 0 1px rgba(251, 191, 36, 0.5), 0 0 28px rgba(251, 191, 36, 0.28);
+        }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+
+        .yt-video-card.is-running,
+        .yt-video-card.is-stalled {
+            animation: none !important;
+        }
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="mb-8 animate-fade-in-up stagger-1">
+    <div
+        class="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-red-500/10 border border-red-500/20 text-red-500 text-xs font-semibold mb-3">
+        <i data-lucide="youtube" class="w-3 h-3"></i>
+        <span data-i18n="yt.badge">内容分析</span>
+    </div>
+    <h2 data-i18n="yt.title"
+        class="text-3xl md:text-4xl font-bold tracking-tight mb-2 text-transparent bg-clip-text bg-gradient-to-r from-white to-gray-400">
+        YouTube 信号
+    </h2>
+    <p data-i18n="yt.subtitle" class="text-muted-foreground text-sm md:text-base">
+        自动监控频道，转录视频内容并评估 VSI 信号指数。
+    </p>
+</div>
+
+<div class="grid grid-cols-1 md:grid-cols-3 gap-5 mb-5 animate-fade-in-up stagger-2">
+    <div class="card glass-panel p-5 relative overflow-hidden group">
+        <div
+            class="absolute -right-6 -top-6 w-24 h-24 bg-primary/20 rounded-full blur-2xl group-hover:bg-primary/30 transition-colors pointer-events-none">
+        </div>
+        <div class="text-sm font-semibold text-muted-foreground mb-2 flex items-center gap-2">
+            <i data-lucide="users" class="w-4 h-4"></i>
+            <span data-i18n="yt.stats.channels">已关注频道</span>
+        </div>
+        <div class="text-4xl font-bold text-foreground">{{ youtube_stats.channel_count if youtube_stats else 0 }}</div>
+    </div>
+    <div class="card glass-panel p-5 relative overflow-hidden group">
+        <div
+            class="absolute -right-6 -top-6 w-24 h-24 bg-accent/20 rounded-full blur-2xl group-hover:bg-accent/30 transition-colors pointer-events-none">
+        </div>
+        <div class="text-sm font-semibold text-muted-foreground mb-2 flex items-center gap-2">
+            <i data-lucide="video" class="w-4 h-4"></i>
+            <span data-i18n="yt.stats.videos">24h 内新视频</span>
+        </div>
+        <div class="text-4xl font-bold text-foreground">{{ youtube_stats.recent_video_count_24h if youtube_stats else 0
+            }}</div>
+    </div>
+    <div class="card glass-panel p-5 relative overflow-hidden group">
+        <div
+            class="absolute -right-6 -top-6 w-24 h-24 bg-emerald-500/20 rounded-full blur-2xl group-hover:bg-emerald-500/30 transition-colors pointer-events-none">
+        </div>
+        <div class="text-sm font-semibold text-muted-foreground mb-2 flex items-center gap-2">
+            <i data-lucide="file-audio" class="w-4 h-4"></i>
+            <span data-i18n="yt.stats.transcriptions">转录进度</span>
+        </div>
+        <div class="flex items-end gap-2">
+            <div class="text-4xl font-bold text-foreground">{{ youtube_stats.transcribed_count if youtube_stats else 0
+                }}</div>
+            <div class="text-muted-foreground mb-1 font-medium">
+                / {{ youtube_stats.pending_transcript_count if youtube_stats else 0 }}
+                <span data-i18n="yt.stats.pending">待处理</span>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="flex items-center gap-4 mb-6 pt-2 animate-fade-in-up stagger-2">
+    <div id="yt-head-worker"
+        class="flex-1 yt-runtime-strip text-xs text-muted-foreground flex items-center justify-between gap-2 px-4 py-2 bg-black/30 border-white/5">
+        {% if youtube_worker_status and youtube_worker_status.is_online %}
+        <span data-i18n="yt.worker.banner_online" class="text-emerald-400 font-medium">Worker 在线</span>
+        {% else %}
+        <span data-i18n="yt.worker.banner_offline" class="text-amber-400 font-medium">Worker 离线或心跳超时</span>
+        {% endif %}
+    </div>
+    <div id="yt-head-asr"
+        class="flex-1 yt-runtime-strip text-xs text-muted-foreground flex items-center justify-between gap-2 px-4 py-2 bg-black/30 border-white/5">
+        <span data-i18n="yt.asr.banner_checking" class="text-blue-400 font-medium">ASR 引擎检查中...</span>
+    </div>
+</div>
+
+<div class="grid grid-cols-1 lg:grid-cols-[320px_minmax(0,1fr)] gap-6 xl:gap-7">
+    <div class="space-y-6">
+        <section id="yt-asr-panel" class="card glass-panel animate-fade-in-up stagger-3">
+            <div class="card-header bg-white/[0.02]">
+                <h3 class="card-title flex items-center gap-2">
+                    <i data-lucide="cpu" class="w-5 h-5 text-accent"></i>
+                    <span data-i18n="yt.asr.title">本地 ASR 引擎</span>
+                </h3>
+            </div>
+            <div class="p-5">
+                <div id="yt-asr-panel-error" class="panel-error hidden mb-3"></div>
+                <div class="flex items-center justify-between mb-4">
+                    <div class="flex items-center gap-3">
+                        <div class="relative flex h-3 w-3" id="model-status-indicator">
+                            <span
+                                class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                            <span class="relative inline-flex rounded-full h-3 w-3 bg-emerald-500"></span>
+                        </div>
+                        <div>
+                            <div id="model-status-text" class="font-semibold text-sm">状态检查中...</div>
+                        </div>
+                    </div>
+                    <button id="btn-model" class="btn btn-primary btn-sm text-xs h-8" onclick="downloadModel()"
+                        style="display:none;" data-i18n="yt.asr.btn_download">
+                        下载模型
+                    </button>
+                </div>
+
+                <div
+                    class="flex flex-wrap items-center gap-2 mb-3 bg-black/20 rounded-lg border border-white/5 px-3 py-2">
+                    <div class="flex items-center gap-1.5 border-r border-white/10 pr-2">
+                        <span class="text-[10px] text-muted-foreground" data-i18n="yt.asr.model">Model</span>
+                        <span id="model-field-model" class="font-mono text-[11px] text-foreground">-</span>
+                    </div>
+                    <div class="flex items-center gap-1.5 border-r border-white/10 pr-2">
+                        <span class="text-[10px] text-muted-foreground" data-i18n="yt.asr.compute">Compute</span>
+                        <span id="model-field-compute" class="font-mono text-[11px] text-foreground">-</span>
+                    </div>
+                    <div class="flex items-center gap-1.5 border-r border-white/10 pr-2">
+                        <span class="text-[10px] text-muted-foreground" data-i18n="yt.asr.device">Device</span>
+                        <span id="model-field-device" class="font-mono text-[11px] text-foreground">-</span>
+                    </div>
+                    <div class="flex items-center gap-1.5">
+                        <span class="text-[10px] text-muted-foreground" data-i18n="yt.asr.lang">Language</span>
+                        <span id="model-field-lang" class="font-mono text-[11px] text-foreground">-</span>
+                    </div>
+                </div>
+
+                <div id="model-progress"
+                    class="hidden p-3 bg-blue-500/10 border border-blue-500/20 text-blue-400 rounded-lg font-mono text-xs">
+                </div>
+            </div>
+        </section>
+
+        <section class="card glass-panel animate-fade-in-up stagger-4">
+            <div class="card-header bg-white/[0.02]">
+                <h3 class="card-title flex items-center gap-2">
+                    <i data-lucide="radio-receiver" class="w-5 h-5 text-primary"></i>
+                    <span data-i18n="yt.tracking.title">频道追踪</span>
+                </h3>
+            </div>
+            <div class="p-5 border-b border-white/5">
+                <div class="flex flex-col gap-3">
+                    <input id="channel-url"
+                        class="flex h-10 w-full rounded-md border border-white/10 bg-black/20 px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary focus-visible:border-primary transition-colors placeholder:text-muted-foreground"
+                        type="text" placeholder="https://youtube.com/@Channel">
+                    <div class="flex gap-2 w-full">
+                        <button id="btn-add" class="btn btn-primary w-full flex-1" onclick="addChannel()">
+                            <span data-i18n="yt.tracking.btn_add">添加</span>
+                        </button>
+                        <button id="btn-sync" class="btn btn-secondary w-full flex-1 gap-2" onclick="manualSync()">
+                            <i data-lucide="refresh-cw" class="w-4 h-4"></i>
+                            <span data-i18n="yt.tracking.btn_sync">Sync</span>
+                        </button>
+                    </div>
+                    <span id="add-status" class="text-xs h-4 block"></span>
+                </div>
+                <div id="sync-log"
+                    class="hidden mt-4 p-3 bg-black/40 border border-white/5 rounded-lg max-h-40 overflow-y-auto font-mono text-xs space-y-1">
+                </div>
+            </div>
+
+            <div class="max-h-[300px] overflow-y-auto">
+                {% if channels %}
+                <div class="divide-y divide-white/[0.05]">
+                    {% for ch in channels %}
+                    <div id="row-{{ ch.channel_id }}"
+                        class="p-4 hover:bg-white/[0.02] transition-colors flex justify-between items-center group">
+                        <div class="overflow-hidden pr-3 min-w-0">
+                            <div class="font-semibold text-sm text-foreground truncate"
+                                title="{{ ch.channel_title or ch.channel_id }}">
+                                {{ ch.channel_title or ch.channel_id }}
+                            </div>
+                            <div class="text-[11px] text-muted-foreground truncate">{{ ch.channel_id }}</div>
+                            <a href="{{ ch.channel_url }}" target="_blank"
+                                class="text-xs text-primary/80 hover:text-primary transition-colors inline-flex items-center gap-1 mt-1">
+                                <span data-i18n="yt.tracking.view_channel">View channel</span>
+                                <i data-lucide="external-link" class="w-3 h-3"></i>
+                            </a>
+                        </div>
+                        <button
+                            class="text-red-400 opacity-60 hover:opacity-100 hover:bg-red-400/10 p-2 rounded-md transition-all shrink-0"
+                            onclick="removeChannel('{{ ch.channel_id }}')" title="删除">
+                            <i data-lucide="trash-2" class="w-4 h-4"></i>
+                        </button>
+                    </div>
+                    {% endfor %}
+                </div>
+                {% else %}
+                <div class="py-8 flex flex-col items-center justify-center text-muted-foreground">
+                    <i data-lucide="search" class="w-6 h-6 mb-2 opacity-50"></i>
+                    <p class="text-sm" data-i18n="yt.tracking.empty">No channels added</p>
+                </div>
+                {% endif %}
+            </div>
+        </section>
+    </div>
+
+    <div class="space-y-6 min-w-0">
+        <section class="card glass-panel animate-fade-in-up stagger-5">
+            <div class="card-header bg-white/[0.02]">
+                <h3 class="card-title flex items-center gap-2">
+                    <i data-lucide="film" class="w-5 h-5 text-emerald-400"></i>
+                    <span data-i18n="yt.queue.title">内容队列</span>
+                </h3>
+            </div>
+            <div class="p-4 md:p-5 min-h-[260px]">
+                <div class="mb-4 flex flex-col gap-2">
+                    <div id="yt-worker-status"
+                        class="text-[11px] px-2.5 py-1.5 rounded-md border border-white/10 bg-black/20 text-muted-foreground flex items-center justify-between gap-2 flex-wrap">
+                        {% if youtube_worker_status and youtube_worker_status.is_online %}
+                        <span class="badge badge-success text-[10px] py-0">Worker 在线</span>
+                        {% else %}
+                        <span class="badge badge-warning text-[10px] py-0 flex items-center gap-1">Worker 离线 <span
+                                class="mono opacity-80">(stale)</span></span>
+                        {% endif %}
+                    </div>
+                    <div id="yt-queue-summary"
+                        class="text-[11px] px-2.5 py-1.5 rounded-md border border-white/5 bg-black/20 text-muted-foreground flex items-center gap-2 flex-wrap">
+                        {% set q = youtube_queue_summary_initial or {} %}
+                        <span class="mono">等待中 {{ q.waiting if q else 0 }}</span>
+                        <span class="mono">分析中 {{ q.running if q else 0 }}</span>
+                        <span class="mono text-amber-300">已拦截 {{ q.blocked if q else 0 }}</span>
+                        <span class="mono text-emerald-300">已完成 {{ q.done if q else 0 }}</span>
+                    </div>
+                    <div id="yt-queue-health" class="yt-queue-health" aria-label="YouTube AI queue health"></div>
+                    <div id="yt-scheduler-summary"
+                        class="text-[11px] px-2.5 py-1.5 rounded-md border border-white/5 bg-black/20 text-muted-foreground flex items-center gap-2 flex-wrap">
+                        {% set sch = youtube_scheduler_status or {} %}
+                        <span class="mono">轮询: {{ sch.poll_seconds if sch else 0 }}s</span>
+                        <span class="mono">下次: {% if sch.next_run_eta_seconds is not none %}{{ sch.next_run_eta_seconds
+                            }}s{% else %}-{% endif %}</span>
+                        <span class="mono">上次: -</span>
+                        <span class="mono">状态: -</span>
+                    </div>
+                    <div id="yt-llm-summary"
+                        class="text-[11px] px-2.5 py-1.5 rounded-md border border-white/5 bg-black/20 text-muted-foreground flex items-center gap-2 flex-wrap">
+                        {% set llm = youtube_effective_llm or {} %}
+                        <span class="mono">配置: {{ llm.profile if llm else "-" }}</span>
+                        <span class="mono">提供商: {{ llm.provider if llm else "-" }}</span>
+                        <span class="mono">模型: {{ llm.model if llm else "-" }}</span>
+                        <span class="mono block break-all">基础URL: {{ llm.base_url if llm else "-" }}</span>
+                    </div>
+                </div>
+                {% if videos %}
+                <div class="grid grid-cols-1 xl:grid-cols-2 gap-4 lg:gap-5">
+                    {% for v in videos %}
+                    {% set vstate = (video_status_map.get(v.video_id) if video_status_map else {}) %}
+                    <div id="video-card-{{ v.video_id }}" data-video-id="{{ v.video_id }}"
+                        data-analysis-status="pending" data-queue-state="{{ vstate.queue_state or 'waiting' }}"
+                        data-analysis-stage="" data-retry-wait="false"
+                        class="group yt-video-card bg-black/20 hover:bg-white/[0.04] border border-white/5 hover:border-white/10 rounded-xl p-2.5 transition-all duration-300 relative flex flex-col gap-2">
+                        <div class="flex items-start justify-between gap-2">
+                            <div class="flex-1 min-w-0">
+                                <h4 class="font-semibold text-foreground text-sm pr-2 mb-0 leading-snug"
+                                    title="{{ v.title }}">
+                                    <span class="line-clamp-2">{{ v.title }}</span>
+                                </h4>
+                                <div class="flex items-center flex-wrap gap-x-2 gap-y-1 text-xs text-muted-foreground">
+                                    <i data-lucide="youtube" class="w-3.5 h-3.5 shrink-0"></i>
+                                    <span class="truncate max-w-[180px]">{{ v.channel_title or v.channel_id }}</span>
+                                    <span class="opacity-35">.</span>
+                                    <span class="mono">{{ v.published_at | bj_time("%b %d, %H:%M") if v.published_at
+                                        else "-" }}</span>
+                                    <span class="copy-chip mono text-[10px]">
+                                        {{ v.video_id[:6] }}...
+                                        {{ ui.copy_button(v.video_id, 'Copy video ID') }}
+                                    </span>
+                                </div>
+                            </div>
+                            <a href="{{ v.url }}" target="_blank"
+                                class="shrink-0 w-8 h-8 flex items-center justify-center rounded-lg bg-white/5 hover:bg-white/10 text-muted-foreground hover:text-white transition-colors border border-white/10 cursor-pointer"
+                                title="Open in YouTube">
+                                <i data-lucide="external-link" class="w-4 h-4"></i>
+                            </a>
+                        </div>
+
+                        <div class="flex items-center flex-wrap gap-2.5">
+                            <div id="status-{{ v.video_id }}" class="shrink-0">
+                                {% if vstate.transcript_status == "transcribed" %}
+                                <span class="badge badge-success shadow-[0_0_10px_rgba(16,185,129,0.1)]">转录就绪 ({{
+                                    v.transcript_text|length if v.transcript_text else 0 }}c)</span>
+                                {% elif vstate.transcript_status == "asr_failed_paused" %}
+                                <span class="badge badge-danger max-w-[180px] truncate"
+                                    title="{{ v.last_error or 'ASR failed and paused' }}">ASR Failed (Paused)</span>
+                                {% elif vstate.transcript_status == "queued_asr" %}
+                                <span class="badge badge-info shadow-[0_0_10px_rgba(59,130,246,0.1)]">ASR Queued</span>
+                                {% else %}
+                                <span class="badge badge-neutral" data-i18n="yt.analysis_meta.pending_subtitle">Waiting
+                                    subtitle</span>
+                                {% endif %}
+                            </div>
+
+                            <div id="analysis-status-{{ v.video_id }}" class="shrink-0">
+                                {% if vstate.analysis_status == "done" %}
+                                <span class="badge badge-success">AI Done</span>
+                                {% elif vstate.analysis_status == "running" %}
+                                <span class="badge badge-info shadow-[0_0_10px_rgba(59,130,246,0.1)]"
+                                    data-i18n="yt.analysis_status.running">Analyzing</span>
+                                {% elif vstate.analysis_status == "queued" %}
+                                <span class="badge badge-neutral" data-i18n="yt.analysis_status.queued">Queued</span>
+                                {% elif vstate.analysis_status == "failed_paused" %}
+                                <span class="badge badge-warning max-w-[180px] truncate"
+                                    title="{{ vstate.analysis_error_summary or 'AI failed and paused' }}">AI Failed
+                                    (Paused)</span>
+                                {% elif v.transcript_text %}
+                                <span class="badge badge-neutral" data-i18n="yt.analysis_status.pending">Pending
+                                    AI</span>
+                                {% else %}
+                                <span class="badge badge-neutral opacity-60"
+                                    data-i18n="yt.analysis_status.wait_asr">Waiting ASR</span>
+                                {% endif %}
+                            </div>
+
+                            {% set scores = scores_map.get(v.video_id) if scores_map else None %}
+                            {% if scores %}
+                            {% set vsi = scores.vsi %}
+                            <div class="yt-vsi-pill mono font-bold text-xs"
+                                title="DC:{{ scores.dc }} PQ:{{ scores.pq }}">
+                                <span
+                                    class="text-[10px] text-muted-foreground uppercase tracking-wider font-semibold">VSI</span>
+                                <span
+                                    class="{% if vsi >= 15 %}text-emerald-400{% elif vsi <= -15 %}text-red-400{% else %}text-foreground{% endif %} text-sm">
+                                    {{ "%.1f"|format(vsi) }}
+                                </span>
+                                <span
+                                    class="text-[10px] {% if vsi >= 15 %}text-emerald-300{% elif vsi <= -15 %}text-red-300{% else %}text-muted-foreground{% endif %}">
+                                    {% if vsi >= 15 %}UP{% elif vsi <= -15 %}DOWN{% else %}FLAT{% endif %} </span>
+                            </div>
+                            {% else %}
+                            <div class="yt-vsi-pill mono font-semibold text-xs text-muted-foreground opacity-60">
+                                <span class="text-[10px] uppercase tracking-wider">VSI</span>
+                                <span>-.-</span>
+                            </div>
+                            {% endif %}
+                        </div>
+
+                        <div id="analysis-detail-{{ v.video_id }}" class="space-y-2">
+                            <div id="analysis-meta-{{ v.video_id }}"
+                                class="analysis-meta text-xs text-muted-foreground min-h-[16px] leading-tight">
+                                <span class="analysis-meta-icon"><i data-lucide="activity"
+                                        class="w-3.5 h-3.5"></i></span>
+                                <span class="analysis-meta-text">{{ vstate.status_notes or '' }}</span>
+                            </div>
+                            <div id="analysis-action-{{ v.video_id }}"
+                                class="hidden text-xs px-2.5 py-2 rounded-lg border border-white/10 bg-black/20">
+                                <span class="yt-blocked-chip">{{ vstate.queue_reason_label or '' }}</span>
+                                <span class="ml-2 text-muted-foreground">{{ (vstate.error_detail.suggested_action if
+                                    vstate.error_detail else '') or '' }}</span>
+                            </div>
+                        </div>
+                        <div id="analysis-stagebar-{{ v.video_id }}" class="analysis-stagebar" aria-hidden="true">
+                            <span class="analysis-stagebar-fill"></span>
+                        </div>
+                        <div class="flex justify-end">
+                            <button type="button" class="section-toggle"
+                                data-persist-toggle-key="sentinel.ui.youtube.video_card.{{ v.video_id }}.expanded"
+                                data-persist-toggle-target="#analysis-detail-{{ v.video_id }}"
+                                data-persist-default="collapsed" data-persist-label-expanded="Collapse details"
+                                data-persist-label-collapsed="Expand details" data-icon-expanded="chevron-up"
+                                data-icon-collapsed="chevron-down" aria-expanded="false">
+                                <i data-lucide="chevron-down" class="w-3.5 h-3.5"></i>
+                                <span data-persist-label>Expand details</span>
+                            </button>
+                        </div>
+
+                        <div id="actions-{{ v.video_id }}"
+                            class="pt-2 border-t border-white/5 flex items-center gap-2 w-full mt-auto flex-wrap">
+                            {% if v.transcript_text %}
+                            {% set ai_btn_tone = 'btn-secondary' %}
+                            {% if vstate.analysis_status == "done" %}
+                            {% set ai_btn_tone = 'btn-success' %}
+                            {% elif vstate.analysis_status == "running" %}
+                            {% set ai_btn_tone = 'btn-info' %}
+                            {% elif vstate.analysis_status == "failed_paused" %}
+                            {% set ai_btn_tone = 'btn-warning' %}
+                            {% endif %}
+                            <button data-yt-ai-action="{{ v.video_id }}"
+                                class="btn {{ ai_btn_tone }} yt-ai-action-btn h-8 px-3 text-xs transition-all group/btn cursor-pointer"
+                                onclick="viewTranscript('{{ v.video_id }}')">
+                                <i data-lucide="sparkles"
+                                    class="w-3.5 h-3.5 mr-1.5 opacity-80 group-hover/btn:opacity-100"></i>
+                                <span data-i18n="yt.queue.btn_insight" class="font-semibold tracking-wide">AI
+                                    Insight</span>
+                            </button>
+                            {% endif %}
+
+                            {% if vstate.analysis_status == "failed_paused" and v.transcript_text %}
+                            <button id="retry-ai-btn-{{ v.video_id }}"
+                                class="btn btn-warning h-8 px-3 text-xs yt-retry-ai-btn cursor-pointer"
+                                data-video-id="{{ v.video_id }}" onclick="retryAiAnalyze('{{ v.video_id }}')">
+                                <i data-lucide="refresh-cw" class="w-3.5 h-3.5 mr-1.5"></i>
+                                <span data-i18n="yt.queue.btn_retry">Retry AI</span>
+                            </button>
+                            {% endif %}
+
+                            {% if v.needs_asr and not v.transcript_text %}
+                            <button id="asr-btn-{{ v.video_id }}"
+                                class="btn btn-secondary h-8 px-3 text-xs bg-white/[0.02] cursor-pointer"
+                                onclick="triggerAsr('{{ v.video_id }}')">
+                                <i data-lucide="mic" class="w-3.5 h-3.5 mr-1.5"></i>
+                                <span data-i18n="yt.queue.btn_transcribe">Transcribe</span>
+                            </button>
+                            {% endif %}
+
+                            {% if not v.transcript_text and not v.needs_asr %}
+                            <div class="h-8 px-3 rounded border border-white/5 bg-white/[0.01] flex items-center justify-center text-xs text-muted-foreground opacity-50"
+                                data-i18n="yt.queue.status_waiting">
+                                Waiting upstream context...
+                            </div>
+                            {% endif %}
+                        </div>
+                    </div>
+                    {% endfor %}
+                </div>
+                {% else %}
+                <div class="py-20 flex flex-col items-center justify-center text-muted-foreground">
+                    <i data-lucide="film" class="w-12 h-12 opacity-20 mb-4"></i>
+                    <h4 class="text-foreground font-semibold mb-1" data-i18n="yt.queue.empty_title">No videos found</h4>
+                    <p class="text-sm opacity-70" data-i18n="yt.queue.empty">Sync channels to discover the latest
+                        content.</p>
+                </div>
+                {% endif %}
+            </div>
+        </section>
+    </div>
+</div>
+
+<div id="transcript-modal"
+    class="fixed inset-0 bg-black/80 backdrop-blur-sm z-[100] hidden items-center justify-center p-4">
+    <div class="glass-panel w-full max-w-5xl max-h-[90vh] rounded-2xl overflow-hidden border border-white/10">
+        <div class="p-4 md:p-5 border-b border-white/5 flex items-start justify-between gap-4">
+            <div class="min-w-0">
+                <h2 id="modal-title" class="text-lg md:text-xl font-semibold truncate">Transcript & AI Insight</h2>
+                <div id="modal-meta" class="text-xs text-muted-foreground mt-1"></div>
+            </div>
+            <button type="button" class="icon-btn" onclick="closeModal()" aria-label="Close transcript modal">
+                <i data-lucide="x" class="w-4 h-4"></i>
+            </button>
+        </div>
+        <div class="p-4 md:p-5 overflow-auto max-h-[calc(90vh-84px)]">
+            <div id="modal-panel-error" class="panel-error hidden mb-4"></div>
+            <div id="modal-insight" class="hidden mb-4">
+                <h3 class="flex items-center gap-2 text-primary font-bold mb-3">
+                    <i data-lucide="sparkles" class="w-4 h-4"></i>
+                    <span data-i18n="yt.modal.insight_title">AI Insight JSON / Score</span>
+                </h3>
+                <div id="modal-scorecard" class="hidden grid grid-cols-1 md:grid-cols-3 gap-3 mb-4"></div>
+                <pre id="modal-insight-json"
+                    class="rounded-xl border border-white/10 bg-black/30 p-3 text-xs mono text-foreground/90 overflow-auto"></pre>
+            </div>
+            <div>
+                <h3 class="flex items-center gap-2 text-foreground font-semibold mb-3">
+                    <i data-lucide="scroll-text" class="w-4 h-4 text-muted-foreground"></i>
+                    <span data-i18n="yt.modal.transcript_title">Transcript</span>
+                </h3>
+                <div id="modal-transcript"
+                    class="rounded-xl border border-white/10 bg-black/30 p-4 text-sm leading-6 whitespace-pre-wrap break-words min-h-[120px]">
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    lucide.createIcons();
+
+    const statusEl = document.getElementById('add-status');
+    const logEl = document.getElementById('sync-log');
+    const ui = window.SentinelUI || null;
+    const asrPanel = document.getElementById('yt-asr-panel');
+    const workerBannerEl = document.getElementById('yt-head-worker');
+    const asrBannerEl = document.getElementById('yt-head-asr');
+
+    function showAsrPanelError(msg) {
+        if (ui && ui.showPanelError) return ui.showPanelError(asrPanel, msg);
+        const slot = document.getElementById('yt-asr-panel-error');
+        if (slot) { slot.textContent = msg; slot.classList.remove('hidden'); }
+    }
+
+    function clearAsrPanelError() {
+        if (ui && ui.clearError) ui.clearError(asrPanel);
+        const slot = document.getElementById('yt-asr-panel-error');
+        if (slot) { slot.textContent = ''; slot.classList.add('hidden'); }
+    }
+
+    function escapeHtml(value) {
+        return String(value ?? '').replace(/[&<>"']/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[m]));
+    }
+
+    function log(msg, colorClass = 'text-muted-foreground') {
+        logEl.classList.remove('hidden');
+        logEl.innerHTML += `<div class="${colorClass}">${escapeHtml(msg)}</div>`;
+        logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    function setNote(message, colorClass) {
+        statusEl.textContent = message;
+        statusEl.className = `text-xs h-4 block ${colorClass}`;
+    }
+
+    function badgeClass(kind) {
+        if (kind === 'success') return 'badge badge-success shadow-[0_0_10px_rgba(16,185,129,0.1)]';
+        if (kind === 'info') return 'badge badge-info shadow-[0_0_10px_rgba(59,130,246,0.1)]';
+        if (kind === 'warning') return 'badge badge-warning shadow-[0_0_10px_rgba(245,158,11,0.1)]';
+        if (kind === 'danger') return 'badge badge-danger shadow-[0_0_10px_rgba(239,68,68,0.1)]';
+        return 'badge badge-neutral';
+    }
+
+    function updateVideoStatus(videoId, kind, text) {
+        const cell = document.getElementById(`status-${videoId}`);
+        if (!cell) return;
+        if (ui && typeof ui.renderStatusBadge === 'function') {
+            const normalized = kind === 'danger' ? 'error' : (kind || 'neutral');
+            cell.innerHTML = ui.renderStatusBadge('generic', normalized, {
+                label: text,
+                className: 'inline-flex max-w-[160px] truncate'
+            });
+            if (ui.applyStatusTokens) ui.applyStatusTokens(cell);
+            return;
+        }
+        cell.innerHTML = `<span class="${badgeClass(kind)} inline-block max-w-[120px] truncate" title="${escapeHtml(text)}">${escapeHtml(text)}</span>`;
+    }
+
+    let ytQueuePollTimer = null;
+    let ytQueuePollInFlight = false;
+
+    function langCode() {
+        try {
+            return (typeof currentLang === 'string' ? currentLang : (localStorage.getItem('sentinel_lang') || 'zh')).toLowerCase();
+        } catch (_e) {
+            return 'zh';
+        }
+    }
+
+    function tr(key, zhFallback = '', enFallback = '', vars = null) {
+        const lang = langCode();
+        const dict = (typeof translations === 'object' && translations && translations[lang]) ? translations[lang] : null;
+        let text = (dict && dict[key]) || (lang === 'en' ? enFallback : zhFallback) || zhFallback || enFallback || key;
+        if (vars && typeof vars === 'object') {
+            for (const [k, v] of Object.entries(vars)) {
+                text = text.replaceAll(`{${k}}`, String(v ?? ''));
+            }
+        }
+        return text;
+    }
+
+    function stageLabel(stage) {
+        const normalized = String(stage || '').toLowerCase();
+        const map = {
+            queued: ['yt.analysis_stage.queued', 'Queued', 'Queued'],
+            prompt_build: ['yt.analysis_stage.prompt_build', 'Build prompt', 'Build prompt'],
+            llm_request: ['yt.analysis_stage.llm_request', 'Model request', 'Model request'],
+            parse_json: ['yt.analysis_stage.parse_json', 'Parse response', 'Parse response'],
+            validate_vta: ['yt.analysis_stage.validate_vta', 'Validate schema', 'Validate schema'],
+            score_vta: ['yt.analysis_stage.score_vta', 'Score VTA', 'Score VTA'],
+            save_insight: ['yt.analysis_stage.save_insight', 'Save insight', 'Save insight'],
+            retry_wait: ['yt.analysis_stage.retry_wait', 'Retry wait', 'Retry wait'],
+            done: ['yt.analysis_stage.done', 'Done', 'Done'],
+            failed: ['yt.analysis_stage.failed', 'Failed', 'Failed'],
+        };
+        const picked = map[normalized];
+        if (!picked) return stage || '-';
+        return tr(picked[0], picked[1], picked[2]);
+    }
+
+    function suggestedActionLabel(action) {
+        const key = String(action || '').toLowerCase();
+        if (key === 'update_api_key') return tr('yt.action.update_api_key', '更新 API Key 后自动恢复', 'Update API key and auto-recover');
+        if (key === 'wait_auto_retry') return tr('yt.action.wait_auto_retry', '等待自动重试', 'Wait for auto retry');
+        if (key === 'check_worker_online') return tr('yt.action.check_worker_online', '检查 Worker 在线状态', 'Check worker online status');
+        if (key === 'manual_retry') return tr('yt.action.manual_retry', '可手动重试', 'Manual retry available');
+        return tr('yt.action.manual_retry', '可手动重试', 'Manual retry available');
+    }
+
+    function stageIcon(item) {
+        const status = String(item?.analysis_status || '');
+        const qstate = String(item?.queue_state || '');
+        const stage = String(item?.analysis_stage || '');
+        if (qstate === 'blocked') return 'shield-alert';
+        if (item?.analysis_stalled) return 'alert-triangle';
+        if (status === 'done') return 'check-circle-2';
+        if (status === 'failed_paused') return 'octagon-alert';
+        if (stage === 'retry_wait') return 'clock-3';
+        if (status === 'running') return 'activity';
+        if (status === 'queued') return 'list-ordered';
+        return 'minus';
+    }
+
+    function analysisStageProgress(item) {
+        const status = String(item?.analysis_status || '').toLowerCase();
+        const stage = String(item?.analysis_stage || '').toLowerCase();
+        if (status === 'done' || status === 'failed_paused') return 100;
+        const progressMap = {
+            queued: 12,
+            prompt_build: 24,
+            llm_request: 46,
+            parse_json: 64,
+            validate_vta: 78,
+            score_vta: 89,
+            save_insight: 96,
+            retry_wait: 8,
+            done: 100,
+            failed: 100,
+        };
+        let pct = Number(progressMap[stage] || 0);
+        if (status === 'running' && pct < 18) pct = 18;
+        if (status === 'queued' && pct < 8) pct = 8;
+        return pct;
+    }
+
+    function analysisStatusBadgeHtml(item) {
+        const status = String(item?.analysis_status || '');
+        const queueState = String(item?.queue_state || '').toLowerCase();
+        const reasonLabel = item?.queue_reason_label || tr('yt.queue.metric.blocked', 'Blocked', 'Blocked');
+        const hasTranscript = !!item?.has_transcript;
+        const transcriptStatus = String(item?.transcript_status || '');
+        const stage = String(item?.analysis_stage || '').toLowerCase();
+        if (queueState === 'blocked') {
+            return `<span class="badge badge-warning max-w-[190px] truncate" title="${escapeHtml(reasonLabel)}">${escapeHtml(tr('yt.queue.metric.blocked', 'Blocked', 'Blocked'))}: ${escapeHtml(reasonLabel)}</span>`;
+        }
+        if (status === 'done') return `<span class="badge badge-success">${escapeHtml(tr('yt.analysis_status.done', 'AI done', 'AI done'))}</span>`;
+        if (status === 'running') return `<span class="badge badge-info shadow-[0_0_10px_rgba(59,130,246,0.1)]">${escapeHtml(tr('yt.analysis_status.running', 'Analyzing', 'Analyzing'))}</span>`;
+        if (status === 'queued' && stage === 'retry_wait') {
+            return `<span class="badge badge-warning">${escapeHtml(tr('yt.analysis_status.retry_wait', 'Retry wait', 'Retry wait'))}</span>`;
+        }
+        if (status === 'queued') return `<span class="badge badge-neutral">${escapeHtml(tr('yt.analysis_status.queued', 'Queued', 'Queued'))}</span>`;
+        if (status === 'failed_paused') {
+            const tip = escapeHtml(item?.analysis_error_summary || tr('yt.analysis_meta.failed_paused', 'AI failed, waiting manual retry', 'AI failed, waiting manual retry'));
+            return `<span class="badge badge-warning max-w-[180px] truncate" title="${tip}">${escapeHtml(tr('yt.analysis_status.failed_paused', 'AI failed (paused)', 'AI failed (paused)'))}</span>`;
+        }
+        if (status === 'pending' && (hasTranscript || transcriptStatus === 'transcribed')) {
+            return `<span class="badge badge-neutral">${escapeHtml(tr('yt.analysis_status.pending', 'Pending AI', 'Pending AI'))}</span>`;
+        }
+        return `<span class="badge badge-neutral opacity-60">${escapeHtml(tr('yt.analysis_status.wait_asr', 'Waiting ASR', 'Waiting ASR'))}</span>`;
+    }
+
+    function analysisMetaText(item) {
+        const status = String(item?.analysis_status || '');
+        const queueState = String(item?.queue_state || '').toLowerCase();
+        const transcriptStatus = String(item?.transcript_status || '');
+        const stage = String(item?.analysis_stage || '').toLowerCase();
+        const elapsed = item?.analysis_elapsed_seconds;
+        const elapsedText = Number.isFinite(elapsed) ? `${elapsed}s` : null;
+        const stalled = !!item?.analysis_stalled;
+        if (queueState === 'blocked') {
+            const reason = item?.queue_reason_label || tr('yt.queue.metric.blocked', 'Blocked', 'Blocked');
+            const action = suggestedActionLabel(item?.error_detail?.suggested_action);
+            const msg = item?.error_detail?.message || item?.analysis_error_summary || item?.status_notes || '';
+            return `${reason} | ${action}${msg ? ` | ${msg}` : ''}`;
+        }
+        if (status === 'running') {
+            let text = `${tr('yt.analysis_meta.stage_prefix', 'Stage: ', 'Stage: ')}${stageLabel(item?.analysis_stage)}`;
+            if (elapsedText) text += ` | ${tr('yt.analysis_meta.elapsed', 'Elapsed', 'Elapsed')} ${elapsedText}`;
+            if (stalled) text += ` | ${tr('yt.analysis_stalled', 'Possibly stalled', 'Possibly stalled')}`;
+            return text;
+        }
+        if (status === 'queued') {
+            if (stage === 'retry_wait') {
+                const eta = Number(item?.analysis_retry_eta_seconds);
+                const etaText = Number.isFinite(eta) ? `${Math.max(0, eta)}s` : '-';
+                let text = `${tr('yt.analysis_meta.retry_wait', 'Auto retry in', 'Auto retry in')} ${etaText}`;
+                if (item?.analysis_error_summary) text += ` | ${item.analysis_error_summary}`;
+                return text;
+            }
+            let text = tr('yt.analysis_status.queued', 'Queued', 'Queued');
+            if (elapsedText) text += ` | ${tr('yt.analysis_meta.waiting', 'Waiting', 'Waiting')} ${elapsedText}`;
+            if (stalled) text += ` | ${tr('yt.analysis_stalled', 'Possibly stalled', 'Possibly stalled')}`;
+            return text;
+        }
+        if (status === 'failed_paused') {
+            return item?.analysis_error_summary || tr('yt.analysis_meta.failed_paused', 'AI failed, waiting manual retry', 'AI failed, waiting manual retry');
+        }
+        if (status === 'done') {
+            return elapsedText
+                ? `${tr('yt.analysis_meta.done', 'Done', 'Done')} | ${tr('yt.analysis_meta.elapsed', 'Elapsed', 'Elapsed')} ${elapsedText}`
+                : tr('yt.analysis_meta.done', 'Done', 'Done');
+        }
+        if (transcriptStatus === 'asr_failed_paused') {
+            return tr('yt.analysis_meta.asr_failed_paused', 'ASR failed, waiting manual retry', 'ASR failed, waiting manual retry');
+        }
+        if (transcriptStatus === 'queued_asr') {
+            return tr('yt.analysis_meta.queued_asr', 'ASR queued', 'ASR queued');
+        }
+        if (transcriptStatus === 'pending_subtitle') {
+            return tr('yt.analysis_meta.pending_subtitle', 'Waiting subtitles', 'Waiting subtitles');
+        }
+        if (status === 'pending') {
+            return tr('yt.analysis_meta.pending', 'Transcript ready, pending AI', 'Transcript ready, pending AI');
+        }
+        return item?.status_notes || '';
+    }
+
+    function renderAnalysisAction(videoId, item) {
+        const box = document.getElementById(`analysis-action-${videoId}`);
+        if (!box) return;
+        const queueState = String(item?.queue_state || '').toLowerCase();
+        if (queueState !== 'blocked') {
+            box.classList.add('hidden');
+            box.innerHTML = '';
+            return;
+        }
+        const reason = item?.queue_reason_label || tr('yt.queue.metric.blocked', 'Blocked', 'Blocked');
+        const action = suggestedActionLabel(item?.error_detail?.suggested_action);
+        const msg = item?.error_detail?.message ? ` | ${item.error_detail.message}` : '';
+        box.classList.remove('hidden');
+        box.innerHTML = `<span class="yt-blocked-chip">${escapeHtml(reason)}</span><span class="ml-2 text-muted-foreground">${escapeHtml(action)}${escapeHtml(msg)}</span>`;
+    }
+
+    function aiButtonTone(status) {
+        const s = String(status || '');
+        if (s === 'done') return 'btn-success';
+        if (s === 'running') return 'btn-info';
+        if (s === 'failed_paused') return 'btn-warning';
+        return 'btn-secondary';
+    }
+
+    function shouldShowRetryAction(item) {
+        const status = String(item?.analysis_status || '');
+        const stage = String(item?.analysis_stage || '').toLowerCase();
+        const hasTranscript = !!item?.has_transcript;
+        if (!hasTranscript) return false;
+        if (status === 'failed_paused') return true;
+        if (item?.analysis_stalled) return true;
+        if (status === 'queued' && stage === 'retry_wait') return true;
+        return false;
+    }
+
+    function ensureRetryButton(videoId, item) {
+        const container = document.getElementById(`actions-${videoId}`);
+        if (!container) return;
+        let btn = document.getElementById(`retry-ai-btn-${videoId}`);
+        const show = shouldShowRetryAction(item);
+        if (!show) {
+            if (btn) btn.remove();
+            return;
+        }
+        const stage = String(item?.analysis_stage || '').toLowerCase();
+        const waitingRetry = stage === 'retry_wait';
+        const label = waitingRetry
+            ? tr('yt.queue.btn_retry_now', 'Retry now', 'Retry now')
+            : tr('yt.queue.btn_retry', 'Retry AI', 'Retry AI');
+        if (!btn) {
+            btn = document.createElement('button');
+            btn.id = `retry-ai-btn-${videoId}`;
+            btn.setAttribute('data-video-id', videoId);
+            btn.className = 'btn btn-warning h-8 px-3 text-xs yt-retry-ai-btn';
+            btn.onclick = () => retryAiAnalyze(videoId);
+            container.appendChild(btn);
+        }
+        btn.className = waitingRetry
+            ? 'btn btn-secondary h-8 px-3 text-xs yt-retry-ai-btn'
+            : 'btn btn-warning h-8 px-3 text-xs yt-retry-ai-btn';
+        btn.innerHTML = `<i data-lucide="refresh-cw" class="w-3.5 h-3.5 mr-1.5"></i><span>${escapeHtml(label)}</span>`;
+    }
+
+    function syncActionButtons(videoId, item) {
+        const btn = document.querySelector(`button[data-yt-ai-action="${videoId}"]`);
+        if (!btn) return;
+        btn.classList.remove('btn-success', 'btn-info', 'btn-warning', 'btn-secondary', 'btn-primary');
+        btn.classList.add(aiButtonTone(item?.analysis_status));
+        ensureRetryButton(videoId, item);
+    }
+
+    function renderAnalysisStatus(videoId, item) {
+        const cell = document.getElementById(`analysis-status-${videoId}`);
+        if (!cell) return;
+        cell.innerHTML = analysisStatusBadgeHtml(item);
+        syncActionButtons(videoId, item);
+    }
+
+    function renderCardVisualState(videoId, item) {
+        const card = document.getElementById(`video-card-${videoId}`);
+        if (!card) return;
+        const status = String(item?.analysis_status || 'pending');
+        const queueState = String(item?.queue_state || 'waiting');
+        const stage = String(item?.analysis_stage || '').toLowerCase();
+        card.dataset.analysisStatus = status;
+        card.dataset.queueState = queueState;
+        card.dataset.analysisStage = stage;
+        card.dataset.retryWait = stage === 'retry_wait' ? 'true' : 'false';
+        card.classList.toggle('is-running', status === 'running');
+        card.classList.toggle('is-done', status === 'done');
+        card.classList.toggle('is-stalled', !!item?.analysis_stalled || queueState === 'blocked');
+    }
+
+    function renderAnalysisProgress(videoId, item) {
+        const bar = document.getElementById(`analysis-stagebar-${videoId}`);
+        if (!bar) return;
+        const fill = bar.querySelector('.analysis-stagebar-fill');
+        if (!fill) return;
+        const status = String(item?.analysis_status || '').toLowerCase();
+        const stage = String(item?.analysis_stage || '').toLowerCase();
+        const pct = analysisStageProgress(item);
+        fill.style.width = `${Math.max(0, Math.min(100, pct))}%`;
+        if (status === 'done') {
+            fill.style.background = 'linear-gradient(90deg, rgba(16, 185, 129, 0.95), rgba(52, 211, 153, 0.95))';
+        } else if (status === 'failed_paused') {
+            fill.style.background = 'linear-gradient(90deg, rgba(245, 158, 11, 0.95), rgba(239, 68, 68, 0.95))';
+        } else if (stage === 'retry_wait') {
+            fill.style.background = 'linear-gradient(90deg, rgba(251, 191, 36, 0.95), rgba(245, 158, 11, 0.95))';
+        } else {
+            fill.style.background = 'linear-gradient(90deg, rgba(59, 130, 246, 0.9), rgba(245, 158, 11, 0.9))';
+        }
+    }
+
+    function renderAnalysisMeta(videoId, item) {
+        const cell = document.getElementById(`analysis-meta-${videoId}`);
+        if (!cell) return;
+        const text = analysisMetaText(item);
+        const icon = stageIcon(item);
+        cell.innerHTML = `<span class="analysis-meta-icon"><i data-lucide="${escapeHtml(icon)}" class="w-3.5 h-3.5"></i></span><span class="analysis-meta-text">${escapeHtml(text || '')}</span>`;
+        if (item?.analysis_stalled || String(item?.queue_state || '').toLowerCase() === 'blocked') {
+            cell.classList.add('text-amber-300');
+            cell.classList.remove('text-muted-foreground');
+        } else {
+            cell.classList.remove('text-amber-300');
+            cell.classList.add('text-muted-foreground');
+        }
+    }
+
+    function renderWorkerStatus(worker) {
+        const isOnline = !!worker?.is_online;
+        const stale = Number.isFinite(worker?.stale_seconds) ? worker.stale_seconds : null;
+        const queueLabel = isOnline
+            ? tr('yt.worker.online', 'Online', 'Online')
+            : tr('yt.worker.offline', 'Offline/Stalled', 'Offline/Stalled');
+        const bannerLabel = isOnline
+            ? tr('yt.worker.banner_online', 'Worker online', 'Worker online')
+            : tr('yt.worker.banner_offline', 'Worker offline or stale', 'Worker offline or stale');
+
+        if (queueEl) {
+            const badgeHtml = ui && ui.renderStatusBadge
+                ? ui.renderStatusBadge('health', isOnline ? 'online' : 'offline', { label: queueLabel })
+                : `<span class="${isOnline ? 'badge badge-success py-0.5 text-[10px]' : 'badge badge-warning py-0.5 text-[10px]'}">${escapeHtml(queueLabel)}</span>`;
+            queueEl.className = 'text-[11px] px-2.5 py-1.5 rounded-md border border-white/10 bg-black/20 text-muted-foreground flex items-center justify-between gap-2 flex-wrap';
+            queueEl.innerHTML = badgeHtml + (stale != null ? `<span class="mono text-[10px] text-muted-foreground">${escapeHtml(tr('yt.worker.stale_suffix', 'stale={seconds}s', 'stale={seconds}s', { seconds: stale }))}</span>` : '');
+            if (ui && ui.applyStatusTokens) ui.applyStatusTokens(queueEl);
+        }
+
+        if (workerBannerEl) {
+            workerBannerEl.className = `yt-runtime-strip text-xs flex items-center justify-between gap-2 ${isOnline ? 'text-emerald-300' : 'text-amber-300'}`;
+            workerBannerEl.innerHTML = `
+                    <span>${escapeHtml(bannerLabel)}</span>
+                    ${stale != null ? `<span class="mono text-[11px] opacity-80">${escapeHtml(tr('yt.worker.stale_suffix', 'stale={seconds}s', 'stale={seconds}s', { seconds: stale }))}</span>` : ''}
+                `;
+        }
+    }
+
+    function renderQueueSummary(summary) {
+        const el = document.getElementById('yt-queue-summary');
+        if (!el || !summary) return;
+        el.className = 'text-[11px] px-2.5 py-1.5 rounded-md border border-white/5 bg-black/20 text-muted-foreground flex items-center gap-2 flex-wrap';
+        const waiting = Number(summary.waiting || 0);
+        const running = Number(summary.running || 0);
+        const blocked = Number(summary.blocked || 0);
+        const done = Number(summary.done || 0);
+        el.innerHTML = `
+                <span class="mono">${escapeHtml(tr('yt.queue.metric.waiting', 'Waiting', 'Waiting'))} ${waiting}</span>
+                <span class="mono">${escapeHtml(tr('yt.queue.metric.running', 'Running', 'Running'))} ${running}</span>
+                <span class="mono ${blocked > 0 ? 'text-amber-300' : 'text-muted-foreground'}">${escapeHtml(tr('yt.queue.metric.blocked', 'Blocked', 'Blocked'))} ${blocked}</span>
+                <span class="mono text-emerald-300">${escapeHtml(tr('yt.queue.metric.done', 'Done', 'Done'))} ${done}</span>`;
+
+        const breakdown = summary.blocked_breakdown || {};
+        const topReasons = Object.entries(breakdown)
+            .slice(0, 3)
+            .map(([reason, count]) => `<span class="yt-blocked-chip text-[10px] py-0.5">${escapeHtml(tr('yt.queue.reason.' + reason, reason, reason))} x${escapeHtml(String(count))}</span>`)
+            .join('');
+        if (topReasons) {
+            el.innerHTML += `<span class="inline-flex items-center gap-1">${topReasons}</span>`;
+        }
+
+        const hb = document.getElementById('yt-queue-health');
+        if (!hb) return;
+        const total = Math.max(1, waiting + running + blocked + done);
+        const seg = (value, css) => value > 0
+            ? `<div class="yt-queue-health-seg ${css}" style="width:${Math.max(3, Math.round((value / total) * 100))}%"></div>`
+            : '';
+        hb.innerHTML = [
+            seg(waiting, 'yt-queue-health-waiting'),
+            seg(running, 'yt-queue-health-running'),
+            seg(blocked, 'yt-queue-health-blocked'),
+            seg(done, 'yt-queue-health-done'),
+        ].join('');
+    }
+
+    function renderSchedulerSummary(scheduler) {
+        const el = document.getElementById('yt-scheduler-summary');
+        if (!el) return;
+        const poll = Number(scheduler?.poll_seconds || 0);
+        const eta = scheduler?.next_run_eta_seconds;
+        const last = scheduler?.last_run_at || '-';
+        const status = scheduler?.last_status || '-';
+        const etaText = Number.isFinite(eta) ? `${Math.max(0, Number(eta))}s` : '-';
+        el.className = 'text-[11px] px-2.5 py-1.5 rounded-md border border-white/5 bg-black/20 text-muted-foreground flex items-center gap-2 flex-wrap';
+        el.innerHTML = `
+                <span class="mono">${escapeHtml(tr('yt.scheduler.poll', 'Poll', 'Poll'))}: ${poll || '-'}s</span>
+                <span class="mono">${escapeHtml(tr('yt.scheduler.next', 'Next', 'Next'))}: ${escapeHtml(etaText)}</span>
+                <span class="mono">${escapeHtml(tr('yt.scheduler.last', 'Last', 'Last'))}: ${escapeHtml(String(last))}</span>
+                <span class="mono">${escapeHtml(tr('yt.scheduler.status', 'Status', 'Status'))}: ${escapeHtml(String(status))}</span>
+            `;
+    }
+
+    function renderEffectiveLlm(effectiveLlm) {
+        const el = document.getElementById('yt-llm-summary');
+        if (!el) return;
+        const profile = effectiveLlm?.profile || '-';
+        const provider = effectiveLlm?.provider || '-';
+        const model = effectiveLlm?.model || '-';
+        const baseUrl = effectiveLlm?.base_url || '-';
+        el.className = 'text-[11px] px-2.5 py-1.5 rounded-md border border-white/5 bg-black/20 text-muted-foreground flex items-center gap-2 flex-wrap';
+        el.innerHTML = `
+                <span class="mono">${escapeHtml(tr('yt.llm.profile', 'Profile', 'Profile'))}: ${escapeHtml(String(profile))}</span>
+                <span class="mono">${escapeHtml(tr('yt.llm.provider', 'Provider', 'Provider'))}: ${escapeHtml(String(provider))}</span>
+                <span class="mono">${escapeHtml(tr('yt.llm.model', 'Model', 'Model'))}: ${escapeHtml(String(model))}</span>
+                <span class="mono block break-all">${escapeHtml(tr('yt.llm.base_url', 'Base URL', 'Base URL'))}: ${escapeHtml(String(baseUrl))}</span>
+            `;
+    }
+
+    function patchYoutubeQueueItems(items) {
+        if (!Array.isArray(items)) return;
+        for (const item of items) {
+            if (!item || !item.video_id) continue;
+            renderAnalysisStatus(item.video_id, item);
+            renderAnalysisMeta(item.video_id, item);
+            renderAnalysisAction(item.video_id, item);
+            renderCardVisualState(item.video_id, item);
+            renderAnalysisProgress(item.video_id, item);
+        }
+        lucide.createIcons();
+    }
+
+    function hasActiveAnalysis(items) {
+        return Array.isArray(items) && items.some(it => ['waiting', 'running'].includes(String(it?.queue_state || '')));
+    }
+
+    function nextQueuePollMs(items, opts = {}) {
+        if (opts.fast) return 1500;
+        if (document.hidden) return 15000;
+        return hasActiveAnalysis(items) ? 3000 : 10000;
+    }
+
+    function scheduleYoutubeQueuePoll(ms) {
+        if (ytQueuePollTimer) clearTimeout(ytQueuePollTimer);
+        ytQueuePollTimer = setTimeout(() => { refreshYoutubeQueueStatus().catch(() => { }); }, Math.max(500, Number(ms) || 3000));
+    }
+
+    async function refreshYoutubeQueueStatus(opts = {}) {
+        if (ytQueuePollInFlight) {
+            if (opts.fast) scheduleYoutubeQueuePoll(800);
+            return;
+        }
+        ytQueuePollInFlight = true;
+        try {
+            const resp = await fetch('/api/youtube/videos?limit=30', { cache: 'no-store' });
+            const data = await resp.json();
+            patchYoutubeQueueItems(data.items || []);
+            renderQueueSummary(data.queue_summary || {});
+            renderSchedulerSummary((data.queue_summary || {}).scheduler || {});
+            renderWorkerStatus(data.worker_status || {});
+            renderEffectiveLlm(data.effective_llm || {});
+            scheduleYoutubeQueuePoll(nextQueuePollMs(data.items || [], opts));
+        } catch (err) {
+            scheduleYoutubeQueuePoll(document.hidden ? 15000 : 5000);
+        } finally {
+            ytQueuePollInFlight = false;
+        }
+    }
+
+    function setModelStatus(kind, text) {
+        const indicator = document.getElementById('model-status-indicator');
+        const statusText = document.getElementById('model-status-text');
+
+        if (kind === 'ready') {
+            indicator.innerHTML = `<span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span><span class="relative inline-flex rounded-full h-3 w-3 bg-emerald-500"></span>`;
+            statusText.classList.replace('text-muted-foreground', 'text-emerald-400');
+            statusText.classList.replace('text-red-400', 'text-emerald-400');
+            statusText.classList.replace('text-blue-400', 'text-emerald-400');
+        } else if (kind === 'warn' || kind === 'error') {
+            indicator.innerHTML = `<span class="relative inline-flex rounded-full h-3 w-3 bg-red-500 shadow-[0_0_8px_rgba(239,68,68,0.8)]"></span>`;
+            statusText.className = 'font-semibold text-sm text-red-500';
+        } else if (kind === 'loading') {
+            indicator.innerHTML = `<span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75"></span><span class="relative inline-flex rounded-full h-3 w-3 bg-blue-500"></span>`;
+            statusText.className = 'font-semibold text-sm text-blue-400';
+        }
+        statusText.textContent = text;
+
+        if (asrBannerEl) {
+            const cls = kind === 'ready'
+                ? 'text-emerald-300'
+                : (kind === 'warn' || kind === 'error' ? 'text-amber-300' : 'text-blue-300');
+            asrBannerEl.className = `yt-runtime-strip text-xs ${cls}`;
+            asrBannerEl.innerHTML = `<span>${escapeHtml(text)}</span>`;
+        }
+    }
+
+    function setModelFields(data = {}) {
+        document.getElementById('model-field-model').textContent = data.model || '-';
+        document.getElementById('model-field-device').textContent = data.device || '-';
+        document.getElementById('model-field-lang').textContent = Array.isArray(data.langs) && data.langs.length ? data.langs.join(', ') : (data.lang || 'auto');
+        document.getElementById('model-field-compute').textContent = data.compute_type || data.compute || '-';
+    }
+
+    function setModelProgress(message, isErr = false) {
+        const pg = document.getElementById('model-progress');
+        if (!message) { pg.classList.add('hidden'); return; }
+        pg.classList.remove('hidden');
+
+        if (isErr) {
+            pg.className = 'p-3 bg-red-500/10 border border-red-500/20 text-red-400 rounded-lg font-mono text-xs';
+        } else {
+            pg.className = 'p-3 bg-blue-500/10 border border-blue-500/20 text-blue-400 rounded-lg font-mono text-xs';
+        }
+        pg.textContent = message;
+    }
+
+    async function addChannel() {
+        const input = document.getElementById('channel-url');
+        const btn = document.getElementById('btn-add');
+        const url = input.value.trim();
+        if (!url) { setNote(tr('yt.error.input_url', '请先输入频道 URL', 'Input tracking URL first'), 'text-red-400'); return; }
+
+        if (ui && ui.setLoading) {
+            if (!ui.setLoading(btn, true, { text: '...' })) return;
+        } else {
+            btn.disabled = true;
+            btn.innerHTML = '<i data-lucide="loader-2" class="w-4 h-4 animate-spin"></i>';
+            lucide.createIcons();
+        }
+        setNote(tr('yt.action.parsing_channel', '正在解析频道 ID...', 'Parsing channel ID...'), 'text-muted-foreground');
+
+        try {
+            const resp = await fetch('/api/youtube/channels', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url }),
+            });
+            const data = await resp.json();
+            if (data.ok) {
+                setNote(`Bound channel: ${data.channel_id}`, 'text-emerald-400');
+                input.value = '';
+                setTimeout(() => location.reload(), 800);
+            } else {
+                setNote(data.error || 'Failed to bind', 'text-red-400');
+            }
+        } catch (err) {
+            setNote(`Network error: ${err.message}`, 'text-red-400');
+        }
+        if (ui && ui.setLoading) {
+            ui.setLoading(btn, false);
+            btn.innerHTML = '<span>Add</span>';
+            lucide.createIcons();
+        } else {
+            btn.disabled = false;
+            btn.textContent = 'Add';
+        }
+    }
+
+    async function removeChannel(channelId) {
+        if (!confirm(tr('yt.action.confirm_unbind', '确定要解除绑定该频道并清除追踪数据吗？', 'Unbind this channel and purge tracking data?'))) return;
+        try {
+            const resp = await fetch(`/api/youtube/channels/${channelId}`, { method: 'DELETE' });
+            if ((await resp.json()).ok) document.getElementById(`row-${channelId}`)?.remove();
+            else alert(tr('yt.error.unbind_failed', '解除绑定失败', 'Failed to unbind'));
+        } catch (err) { alert(`${tr('yt.error.network', 'Error', 'Error')}: ${err.message}`); }
+    }
+
+    async function manualSync() {
+        const btn = document.getElementById('btn-sync');
+        if (ui && ui.setLoading) {
+            if (!ui.setLoading(btn, true, { text: 'Syncing...' })) return;
+        } else {
+            btn.disabled = true;
+            btn.innerHTML = '<i data-lucide="loader-2" class="w-4 h-4 mr-2 animate-spin"></i> Syncing...';
+            lucide.createIcons();
+        }
+        logEl.innerHTML = '';
+        log(tr('yt.action.initiating_sync', '正在启用同步：获取最新视频...', 'Initiating sync: fetching latest videos...'), 'text-blue-400');
+
+        try {
+            const resp = await fetch('/api/youtube/sync', { method: 'POST' });
+            const data = await resp.json();
+            if (data.ok && data.results) {
+                data.results.forEach((r) => {
+                    if (r.error) { log(`${r.channel}: ${r.error}`, 'text-red-400'); return; }
+                    log(`${r.status || 'Processed'} | ${r.title || ''}`, /success|done/i.test(r.status) ? 'text-emerald-400' : 'text-yellow-400');
+                });
+                log(tr('yt.action.sync_complete', '同步完成。正在重载 GUI...', 'Sync complete. Reloading GUI...'), 'text-emerald-400 font-bold');
+                setTimeout(() => location.reload(), 1500);
+            } else {
+                log(data.error || tr('yt.error.sync_failed', '同步执行失败', 'Sync execution failed'), 'text-red-400');
+            }
+        } catch (err) {
+            log(`Request failed: ${err.message}`, 'text-red-400');
+        }
+
+        if (ui && ui.setLoading) {
+            ui.setLoading(btn, false);
+            btn.innerHTML = '<i data-lucide="refresh-cw" class="w-4 h-4 mr-2"></i><span>Sync</span>';
+            lucide.createIcons();
+        } else {
+            btn.disabled = false;
+            btn.innerHTML = '<i data-lucide="refresh-cw" class="w-4 h-4 mr-2"></i> Sync';
+            lucide.createIcons();
+        }
+    }
+
+    async function triggerAsr(videoId) {
+        const btn = document.getElementById(`asr-btn-${videoId}`);
+        if (!btn) return;
+        const initializingText = tr('yt.asr.status.initializing', 'Initializing...', 'Initializing...');
+        const processingText = tr('yt.asr.status.processing', 'Processing...', 'Processing...');
+        const doneText = tr('yt.asr.status.done', 'Done', 'Done');
+        const failedText = tr('yt.asr.status.failed', 'Failed', 'Failed');
+        const successText = tr('yt.asr.status.success', 'Success', 'Success');
+        const retryText = tr('yt.common.retry', 'Retry', 'Retry');
+        const networkErrorText = tr('yt.error.network', 'Network Error', 'Network Error');
+
+        if (ui && ui.setLoading) {
+            if (!ui.setLoading(btn, true, { text: processingText })) return;
+        } else {
+            btn.disabled = true;
+            btn.innerHTML = `<i data-lucide="loader-2" class="w-3 h-3 mr-1 animate-spin"></i>${escapeHtml(processingText)}`;
+            lucide.createIcons();
+        }
+        updateVideoStatus(videoId, 'neutral', initializingText);
+
+        try {
+            const resp = await fetch(`/api/youtube/asr/${videoId}`, { method: 'POST' });
+            const ct = resp.headers.get('content-type') || '';
+
+            if (ct.includes('text/event-stream')) {
+                const reader = resp.body.getReader();
+                const decoder = new TextDecoder();
+                let buf = '';
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    buf += decoder.decode(value, { stream: true });
+                    const lines = buf.split('\n'); buf = lines.pop();
+                    for (const line of lines) {
+                        if (!line.startsWith('data: ')) continue;
+                        try {
+                            const ev = JSON.parse(line.slice(6));
+                            if (ev.type === 'progress') {
+                                updateVideoStatus(videoId, 'info', ev.message || processingText);
+                                btn.textContent = `${Math.floor(ev.percent || 0)}%`;
+                            } else if (ev.type === 'step') {
+                                updateVideoStatus(videoId, 'neutral', ev.message || processingText);
+                                btn.textContent = processingText;
+                            } else if (ev.type === 'done') {
+                                updateVideoStatus(videoId, 'success', ev.message || doneText);
+                                btn.style.display = 'none';
+                            } else if (ev.type === 'error') {
+                                updateVideoStatus(videoId, 'danger', ev.message || failedText);
+                                if (ui && ui.setLoading) { ui.setLoading(btn, false); btn.textContent = retryText; } else { btn.textContent = retryText; btn.disabled = false; }
+                            }
+                        } catch (e) { }
+                    }
+                }
+            } else {
+                const data = await resp.json();
+                if (data.ok) { updateVideoStatus(videoId, 'success', successText); btn.style.display = 'none'; }
+                else { updateVideoStatus(videoId, 'danger', data.error || failedText); if (ui && ui.setLoading) { ui.setLoading(btn, false); btn.textContent = retryText; } else { btn.textContent = retryText; btn.disabled = false; } }
+            }
+        } catch (err) {
+            updateVideoStatus(videoId, 'danger', networkErrorText);
+            if (ui && ui.setLoading) { ui.setLoading(btn, false); btn.textContent = retryText; } else { btn.textContent = retryText; btn.disabled = false; }
+        }
+    }
+
+    async function retryAiAnalyze(videoId) {
+        const btn = document.getElementById(`retry-ai-btn-${videoId}`);
+        const queueingText = tr('yt.action.queueing', 'Queueing...', 'Queueing...');
+        if (btn) {
+            if (ui && ui.setLoading) {
+                if (!ui.setLoading(btn, true, { text: queueingText })) return;
+            } else {
+                btn.disabled = true;
+                btn.innerHTML = `<i data-lucide="loader-2" class="w-3 h-3 mr-1 animate-spin"></i>${escapeHtml(queueingText)}`;
+                lucide.createIcons();
+            }
+        }
+        try {
+            const resp = await fetch(`/api/youtube/analyze/${videoId}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ force: false }),
+            });
+            const data = await resp.json();
+            if (data.ok && data.status === 'queued') {
+                const next = {
+                    analysis_status: 'queued',
+                    analysis_stage: 'queued',
+                    analysis_elapsed_seconds: 0,
+                    analysis_retry_eta_seconds: null,
+                    analysis_stalled: false,
+                    queue_state: 'waiting',
+                    queue_reason_code: 'queued_wait_slot',
+                    queue_reason_label: 'Queued for worker slot',
+                    error_detail: null,
+                    has_transcript: true,
+                    transcript_status: 'transcribed',
+                };
+                renderAnalysisStatus(videoId, next);
+                renderAnalysisMeta(videoId, next);
+                renderAnalysisAction(videoId, next);
+                renderCardVisualState(videoId, next);
+                lucide.createIcons();
+                refreshYoutubeQueueStatus({ fast: true });
+                return;
+            }
+            const msg = data.reason || data.error || tr('yt.error.retry_ai_failed', 'Retry AI failed', 'Retry AI failed');
+            if (ui && ui.showInlineError) ui.showInlineError(btn, msg);
+            else alert(msg);
+        } catch (err) {
+            const msg = tr('yt.error.retry_ai_request_failed', 'Retry AI request failed: {msg}', 'Retry AI request failed: {msg}', { msg: err.message || err });
+            if (ui && ui.showInlineError) ui.showInlineError(btn, msg);
+            else alert(msg);
+        } finally {
+            if (btn) {
+                if (ui && ui.setLoading) {
+                    ui.setLoading(btn, false);
+                } else {
+                    btn.disabled = false;
+                }
+                btn.innerHTML = `<i data-lucide="refresh-cw" class="w-3.5 h-3.5 mr-1.5"></i><span data-i18n="yt.queue.btn_retry">重试 AI</span>`;
+                if (typeof applyTranslations === 'function') applyTranslations();
+                lucide.createIcons();
+            }
+        }
+    }
+
+    async function viewTranscript(videoId) {
+        const modal = document.getElementById('transcript-modal');
+        const title = document.getElementById('modal-title');
+        const meta = document.getElementById('modal-meta');
+        const transcript = document.getElementById('modal-transcript');
+        const insightDiv = document.getElementById('modal-insight');
+        const insightJson = document.getElementById('modal-insight-json');
+        const scorecard = document.getElementById('modal-scorecard');
+        const modalPanelError = document.getElementById('modal-panel-error');
+
+        if (modalPanelError) {
+            modalPanelError.textContent = '';
+            modalPanelError.classList.add('hidden');
+        }
+        title.textContent = tr('yt.modal.loading_payload', 'Loading payload...', 'Loading payload...');
+        meta.textContent = '';
+        transcript.innerHTML = '<i data-lucide="loader-2" class="w-6 h-6 animate-spin mx-auto opacity-50"></i>';
+        insightDiv.classList.add('hidden');
+        scorecard.classList.add('hidden');
+        modal.classList.remove('hidden');
+        modal.classList.add('flex');
+        lucide.createIcons();
+
+        try {
+            const resp = await fetch(`/api/youtube/transcript/${videoId}`);
+            const data = await resp.json();
+            if (!data.ok) {
+                const msg = data.error || tr('yt.error.fetch_failed', 'Fetch failed', 'Fetch failed');
+                title.textContent = msg;
+                transcript.textContent = '';
+                if (modalPanelError) {
+                    modalPanelError.textContent = msg;
+                    modalPanelError.classList.remove('hidden');
+                }
+                return;
+            }
+
+            title.textContent = data.title || videoId;
+            const asrText = data.asr_backend
+                ? ` | ${tr('yt.modal.meta_model', 'Model', 'Model')}: ${data.asr_model || data.asr_backend}`
+                : ` | ${tr('yt.modal.meta_source', 'Source', 'Source')}: CC`;
+            meta.textContent = `${tr('yt.modal.meta_channel', 'Channel', 'Channel')}: ${data.channel_title || '-'} | ${tr('yt.modal.meta_lang', 'Lang', 'Lang')}: ${data.transcript_lang || '?'} | ${tr('yt.modal.meta_length', 'Length', 'Length')}: ${data.char_count} ${tr('yt.modal.meta_chars', 'chars', 'chars')}${asrText}`;
+            transcript.textContent = data.transcript_text || tr('yt.modal.no_text', 'No textual data found in stream.', 'No textual data found in stream.');
+
+            if (data.insight) {
+                insightDiv.classList.remove('hidden');
+                insightJson.textContent = JSON.stringify(data.insight, null, 2);
+                const scores = data.insight.provenance?.scores;
+                if (scores) {
+                    scorecard.classList.remove('hidden');
+                    let vsiColor = 'text-foreground';
+                    let vsiBg = 'bg-white/5';
+                    let vsiBorder = 'border-white/10';
+                    if (scores.vsi >= 15) {
+                        vsiColor = 'text-emerald-400';
+                        vsiBg = 'bg-emerald-500/10';
+                        vsiBorder = 'border-emerald-500/20';
+                    } else if (scores.vsi <= -15) {
+                        vsiColor = 'text-red-400';
+                        vsiBg = 'bg-red-500/10';
+                        vsiBorder = 'border-red-500/20';
+                    }
+                    scorecard.innerHTML = `
+              <div class="px-4 py-3 rounded-lg border ${vsiBg} ${vsiBorder} flex flex-col justify-center relative">
+                <div class="text-[10px] uppercase text-muted-foreground font-semibold mb-1" data-i18n="yt.modal.index_score">VSI</div>
+                <div class="font-bold text-2xl mono ${vsiColor}">${scores.vsi}</div>
+              </div>
+              <div class="px-4 py-3 rounded-lg border bg-black/20 border-white/5 flex flex-col justify-center relative">
+                <div class="text-[10px] uppercase text-muted-foreground font-semibold mb-1">DC</div>
+                <div class="font-bold text-lg text-foreground">${scores.dc} <span class="text-xs text-muted-foreground font-normal">/ 100</span></div>
+              </div>
+              <div class="px-4 py-3 rounded-lg border bg-black/20 border-white/5 flex flex-col justify-center relative">
+                <div class="text-[10px] uppercase text-muted-foreground font-semibold mb-1">PQ</div>
+                <div class="font-bold text-lg text-foreground">${scores.pq} <span class="text-xs text-muted-foreground font-normal">/ 100</span></div>
+              </div>`;
+                }
+            } else {
+                insightDiv.classList.remove('hidden');
+                let statusMsg = tr('yt.modal.status_json_unavailable', 'No AI analysis JSON yet.', 'No AI analysis JSON yet.');
+                if (data.analysis_status === 'failed_paused') {
+                    statusMsg = tr(
+                        'yt.modal.status_json_failed_paused',
+                        'No usable AI analysis JSON yet: failed and paused.',
+                        'No usable AI analysis JSON yet: failed and paused.',
+                        { err: data.analysis_error_summary || '' },
+                    );
+                } else if (data.analysis_status === 'running') {
+                    statusMsg = tr(
+                        'yt.modal.status_json_running',
+                        'No AI analysis JSON yet: analyzing now (stage: {stage}{elapsed}).',
+                        'No AI analysis JSON yet: analyzing now (stage: {stage}{elapsed}).',
+                        {
+                            stage: data.analysis_stage || 'running',
+                            elapsed: Number.isFinite(data.analysis_elapsed_seconds) ? `, elapsed ${data.analysis_elapsed_seconds}s` : '',
+                        },
+                    );
+                } else if (data.analysis_status === 'queued') {
+                    const wait = Number.isFinite(data.analysis_retry_eta_seconds)
+                        ? `, retry in ${Math.max(0, Number(data.analysis_retry_eta_seconds))}s`
+                        : '';
+                    statusMsg = tr(
+                        'yt.modal.status_json_queued',
+                        `No AI analysis JSON yet: queued${wait}.`,
+                        `No AI analysis JSON yet: queued${wait}.`,
+                    );
+                } else if (data.analysis_status === 'pending') {
+                    statusMsg = tr(
+                        'yt.modal.status_json_pending',
+                        'No AI analysis JSON yet: pending analysis.',
+                        'No AI analysis JSON yet: pending analysis.',
+                    );
+                }
+                if (data.analysis_error_summary) {
+                    statusMsg += ` | ${data.analysis_error_summary}`;
+                }
+                insightJson.textContent = statusMsg;
+            }
+        } catch (err) {
+            const msg = err?.message || tr('yt.error.corrupted_payload', 'Corrupted payload', 'Corrupted payload');
+            title.textContent = msg;
+            transcript.textContent = msg;
+            if (modalPanelError) {
+                modalPanelError.textContent = msg;
+                modalPanelError.classList.remove('hidden');
+            }
+        } finally {
+            lucide.createIcons();
+        }
+    }
+
+    function closeModal() {
+        const m = document.getElementById('transcript-modal');
+        m.classList.remove('flex'); m.classList.add('hidden');
+    }
+
+    document.getElementById('transcript-modal').addEventListener('click', (e) => {
+        if (e.target.id === 'transcript-modal') closeModal();
+    });
+
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModal(); });
+
+    async function checkModelStatus() {
+        const btn = document.getElementById('btn-model');
+        clearAsrPanelError();
+        const locatingText = tr('yt.asr.status.locating', '正在定位 ASR 引擎...', 'Locating ASR Engine...');
+        setModelStatus('loading', locatingText);
+        try {
+            const resp = await fetch('/api/youtube/asr/model');
+            const data = await resp.json();
+            setModelFields(data);
+            if (data.ready) {
+                setModelStatus('ready', tr('yt.asr.status.online', '引擎在线', 'Engine Online'));
+                btn.style.display = 'none';
+            } else if (data.reason) {
+                setModelStatus('warn', data.reason);
+                btn.style.display = 'none';
+            } else {
+                setModelStatus('warn', tr('yt.asr.status.offline', '引擎离线', 'Engine Offline'));
+                btn.style.display = 'inline-flex';
+            }
+        } catch (err) {
+            const failedText = tr('yt.asr.status.failed', '诊断失败', 'Diagnostics Failed');
+            setModelStatus('error', failedText);
+            showAsrPanelError(err.message || failedText);
+        }
+    }
+
+    async function downloadModel() {
+        const btn = document.getElementById('btn-model');
+        clearAsrPanelError();
+        if (ui && ui.setLoading) {
+            if (!ui.setLoading(btn, true, { text: 'Pulling...' })) return;
+        } else {
+            btn.disabled = true;
+            btn.innerHTML = '<i data-lucide="loader-2" class="w-3 h-3 mr-1 animate-spin"></i> Pulling...';
+            lucide.createIcons();
+        }
+        setModelStatus('loading', 'Pulling Weights...');
+        setModelProgress('Initiating secure transfer...');
+
+        try {
+            const resp = await fetch('/api/youtube/asr/model', { method: 'POST' });
+            const ct = resp.headers.get('content-type') || '';
+            let shouldRefreshStatus = false;
+
+            if (ct.includes('text/event-stream')) {
+                const reader = resp.body.getReader();
+                const decoder = new TextDecoder();
+                let buf = '';
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    buf += decoder.decode(value, { stream: true });
+                    const lines = buf.split('\n'); buf = lines.pop();
+                    for (const line of lines) {
+                        if (!line.startsWith('data: ')) continue;
+                        try {
+                            const ev = JSON.parse(line.slice(6));
+                            if (ev.type === 'progress') { setModelProgress(ev.message); btn.textContent = `${Math.floor(ev.percent || 0)}%`; }
+                            else if (ev.type === 'step') { setModelProgress(ev.message); }
+                            else if (ev.type === 'done') { setModelStatus('ready', 'Engine Online'); setModelProgress(); btn.style.display = 'none'; shouldRefreshStatus = true; }
+                            else if (ev.type === 'error') { setModelStatus('error', 'Integrity Check Failed'); setModelProgress(ev.message, true); showAsrPanelError(ev.message || 'Integrity Check Failed'); if (ui && ui.setLoading) { ui.setLoading(btn, false); btn.textContent = 'Retry'; } else { btn.textContent = 'Retry'; btn.disabled = false; } }
+                        } catch (e) { }
+                    }
+                }
+            } else {
+                const data = await resp.json();
+                if (data.ok === false) { setModelStatus('error', 'Download Failed'); setModelProgress(data.error, true); showAsrPanelError(data.error || 'Download Failed'); if (ui && ui.setLoading) { ui.setLoading(btn, false); btn.textContent = 'Retry'; } else { btn.textContent = 'Retry'; btn.disabled = false; } return; }
+                shouldRefreshStatus = true;
+            }
+            if (shouldRefreshStatus) await checkModelStatus();
+        } catch (err) {
+            setModelStatus('error', 'Network Timeout'); setModelProgress(err.message, true); showAsrPanelError(err.message || 'Network Timeout'); if (ui && ui.setLoading) { ui.setLoading(btn, false); btn.textContent = 'Retry'; } else { btn.textContent = 'Retry'; btn.disabled = false; }
+        }
+    }
+
+    document.getElementById('channel-url').addEventListener('keypress', (e) => { if (e.key === 'Enter') addChannel(); });
+    document.addEventListener('visibilitychange', () => scheduleYoutubeQueuePoll(document.hidden ? 15000 : 1000));
+    checkModelStatus();
+    refreshYoutubeQueueStatus({ fast: true });
+</script>
+{% endblock %}

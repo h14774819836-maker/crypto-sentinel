@@ -1,0 +1,1385 @@
+{% extends "base.html" %}
+
+{% set page_main_max = 'max-w-[1440px]' %}
+{% import "partials/ui_macros.html" as ui %}
+
+{% block title %}Crypto Sentinel - Market Overview{% endblock %}
+
+{% block head_extra %}
+<style>
+  #ai-console-container {
+    scrollbar-gutter: stable both-edges;
+  }
+
+  #ai-console-container::-webkit-scrollbar {
+    width: 10px;
+  }
+
+  #ai-console-container::-webkit-scrollbar-track {
+    background: rgba(15, 23, 42, 0.4);
+    border-radius: 999px;
+  }
+
+  #ai-console-container::-webkit-scrollbar-thumb {
+    background: linear-gradient(180deg, rgba(34, 197, 94, 0.55), rgba(59, 130, 246, 0.55));
+    border-radius: 999px;
+    border: 2px solid transparent;
+    background-clip: padding-box;
+  }
+
+  .ai-console-shell {
+    border: 1px solid rgba(34, 197, 94, 0.22);
+    background: linear-gradient(180deg, rgba(2, 6, 23, 0.92), rgba(2, 6, 23, 0.75));
+    box-shadow: inset 0 0 0 1px rgba(59, 130, 246, 0.08), 0 16px 32px rgba(2, 6, 23, 0.35);
+  }
+
+  .ai-console-stream {
+    border-left: 2px solid rgba(56, 189, 248, 0.55);
+    padding-left: 0.7rem;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .ai-console-live-dot .animate-ping {
+      animation: none !important;
+    }
+  }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="mb-8 animate-fade-in-up stagger-1">
+
+  <div
+    class="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-primary/10 border border-primary/20 text-primary text-xs font-semibold mb-3">
+
+    <span class="relative flex h-2 w-2">
+
+      <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-primary opacity-75"></span>
+
+      <span class="relative inline-flex rounded-full h-2 w-2 bg-primary"></span>
+
+    </span>
+
+    <span data-i18n="overview.badge">实时市场数据</span>
+
+  </div>
+
+  <h2 data-i18n="overview.title"
+    class="text-3xl md:text-4xl font-bold tracking-tight mb-2 text-transparent bg-clip-text bg-gradient-to-r from-white to-gray-400">
+
+    市场总览</h2>
+
+  <p data-i18n="overview.subtitle" class="text-muted-foreground text-sm md:text-base">实时市场趋势、AI 交易信号与自动告警。</p>
+
+</div>
+
+
+
+<div class="mb-6 flex flex-wrap gap-3" id="global-coin-selector">
+
+  {% if snapshots %}
+
+  {% for row in snapshots %}
+
+  <button
+    class="coin-tab px-6 py-2 rounded-full text-sm font-bold transition-all border border-white/10 bg-white/[0.02] text-muted-foreground hover:bg-white/10"
+    data-symbol="{{ row.symbol }}" onclick="selectCoin('{{ row.symbol }}')">
+
+    {{ row.symbol }}
+
+  </button>
+
+  {% endfor %}
+
+  {% endif %}
+
+</div>
+
+
+
+<div class="grid grid-cols-1 xl:grid-cols-3 gap-6 xl:gap-8">
+
+
+
+  <!-- Left Column: Market Data & AI Signals -->
+
+  <div class="xl:col-span-2 space-y-6">
+
+
+
+    <!-- Market Data Table -->
+
+    <section class="card glass-panel animate-fade-in-up stagger-2">
+
+      <div class="card-header bg-white/[0.02]">
+
+        <h3 class="card-title flex items-center gap-2">
+
+          <i data-lucide="bar-chart-2" class="w-5 h-5 text-primary"></i> <span
+            data-i18n="overview.table.market">市场波动</span>
+
+        </h3>
+
+      </div>
+
+      <div class="table-wrapper">
+
+        <table>
+
+          <thead>
+
+            <tr>
+
+              <th data-i18n="overview.table.symbol">交易对</th>
+
+              <th data-i18n="overview.table.price">价格</th>
+
+              <th data-i18n="overview.table.1m">1分钟 ▲</th>
+
+              <th data-i18n="overview.table.10m">10分钟 ▲</th>
+
+              <th data-i18n="overview.table.vol">波动率(20)</th>
+
+              <th data-i18n="overview.table.zscore">波动Z分数</th>
+
+              <th data-i18n="overview.table.updated">更新时间</th>
+
+            </tr>
+
+          </thead>
+
+          <tbody id="market-data-tbody">
+
+            {% if snapshots %}
+
+            {% for row in snapshots %}
+
+            <tr class="group" data-symbol="{{ row.symbol }}">
+
+              <td class="mono font-bold text-foreground col-tag">{{ row.symbol }}</td>
+
+              <td class="mono col-num">${{ "%.6f"|format(row.price) if row.price is not none else "-" }}</td>
+
+              <td
+                class="mono col-num font-medium {{ 'text-positive' if row.ret_1m and row.ret_1m > 0 else 'text-negative' if row.ret_1m and row.ret_1m < 0 else '' }}">
+
+                {{ "%.4f"|format(row.ret_1m) if row.ret_1m is not none else "-" }}%
+
+              </td>
+
+              <td
+                class="mono col-num font-medium {{ 'text-positive' if row.ret_10m and row.ret_10m > 0 else 'text-negative' if row.ret_10m and row.ret_10m < 0 else '' }}">
+
+                {{ "%.4f"|format(row.ret_10m) if row.ret_10m is not none else "-" }}%
+
+              </td>
+
+              <td class="mono col-num text-muted-foreground group-hover:text-foreground transition-colors">{{
+
+                "%.6f"|format(row.rolling_vol_20) if row.rolling_vol_20 is not none else "-" }}</td>
+
+              <td class="mono col-num text-muted-foreground group-hover:text-foreground transition-colors">{{
+
+                "%.3f"|format(row.volume_zscore) if row.volume_zscore is not none else "-" }}</td>
+
+              <td class="text-muted-foreground text-xs col-time">{{ row.updated_at.strftime("%H:%M:%S") if
+                row.updated_at
+
+                else "-" }}</td>
+
+            </tr>
+
+            {% endfor %}
+
+            {% else %}
+
+            <tr>
+
+              <td colspan="7" class="text-center text-muted-foreground py-12">
+
+                <div class="flex flex-col items-center justify-center gap-3">
+
+                  <i data-lucide="database" class="w-8 h-8 opacity-50"></i>
+
+                  <span data-i18n="overview.empty_market">暂无市场数据，请稍后刷新。</span>
+
+                </div>
+
+              </td>
+
+            </tr>
+
+            {% endif %}
+
+          </tbody>
+
+        </table>
+
+      </div>
+
+    </section>
+
+
+
+    <!-- AI Trading Signals -->
+
+    <section id="overview-ai-panel" class="card glass-panel animate-fade-in-up stagger-3">
+
+      <div class="card-header bg-white/[0.02]">
+
+        <h3 class="card-title flex items-center gap-2">
+
+          <i data-lucide="bot" class="w-5 h-5 text-accent"></i> <span data-i18n="overview.ai.title">AI 分析引擎</span>
+
+        </h3>
+
+        <div class="flex items-center gap-3 flex-wrap justify-end">
+
+          <label for="modelSelector" class="text-xs text-muted-foreground uppercase tracking-wider">Model
+            Selector</label>
+
+          <select id="modelSelector"
+            class="h-9 min-w-[200px] rounded-lg border border-white/10 bg-black/30 px-3 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary/40">
+
+            {% for tier_key, tier_label in [('premium','高阶 Premium'), ('balanced','均衡 Balanced'), ('cheap','省钱 Cheap')]
+            %}
+            {% set tier_models = model_tiers.get(tier_key, []) if model_tiers else [] %}
+            {% if tier_models %}
+            <optgroup label="{{ tier_label }}">
+              {% for model in tier_models %}
+              <option value="{{ model.id }}" {% if model.id==default_model %}selected{% endif %}>{{ model.label }}
+              </option>
+              {% endfor %}
+            </optgroup>
+            {% endif %}
+            {% endfor %}
+
+          </select>
+
+          <span id="analyze-status" class="text-sm font-medium text-muted-foreground status-chip-row"
+            aria-live="polite"></span>
+
+          <button id="btn-analyze" onclick="runAiAnalysis()" class="btn btn-primary" data-loading-text="Running...">
+            <i data-lucide="cpu" class="w-4 h-4 mr-2"></i> <span data-i18n="overview.ai.btn">开始分析</span>
+          </button>
+
+        </div>
+
+      </div>
+
+      <div class="px-4 pt-4">
+        <div id="overview-ai-panel-error" class="panel-error hidden"></div>
+      </div>
+
+      <div id="ai-signals-container" class="space-y-4 mt-4">
+
+        {% if ai_signals %}
+
+        {% for sig in ai_signals %}
+
+        <div
+          class="ai-signal-card group p-5 rounded-xl border border-white/5 bg-white/[0.02] hover:bg-white/[0.04] transition-all"
+          data-symbol="{{ sig.symbol }}" style="display: {{ 'block' if loop.first else 'none' }}">
+
+          <!-- Header -->
+
+          <div class="flex items-center justify-between mb-4 pb-4 border-b border-white/5">
+
+            <div class="font-bold text-lg text-foreground flex items-center gap-3">
+
+              <div class="relative flex h-3 w-3">
+
+                <span
+                  class="animate-ping absolute inline-flex h-full w-full rounded-full {{ 'bg-emerald-400' if sig.direction == 'LONG' else 'bg-red-400' if sig.direction == 'SHORT' else 'bg-gray-400' }} opacity-75"></span>
+
+                <span
+                  class="relative inline-flex rounded-full h-3 w-3 {{ 'bg-emerald-500' if sig.direction == 'LONG' else 'bg-red-500' if sig.direction == 'SHORT' else 'bg-gray-500' }} shadow-[0_0_8px_currentColor]"></span>
+
+              </div>
+
+              {{ sig.symbol }}
+
+            </div>
+
+            <div>
+
+              {% if sig.direction == "LONG" %}<span
+                class="badge badge-success px-3 py-1 text-sm border-emerald-500/50 shadow-[0_0_15px_rgba(16,185,129,0.2)]"
+                data-i18n-enum="LONG" data-i18n-type="action">做多</span>
+
+              {% elif sig.direction == "SHORT" %}<span
+                class="badge badge-danger px-3 py-1 text-sm border-red-500/50 shadow-[0_0_15px_rgba(239,68,68,0.2)]"
+                data-i18n-enum="SHORT" data-i18n-type="action">做空</span>
+
+              {% else %}<span class="badge badge-neutral px-3 py-1 text-sm" data-i18n-enum="HOLD"
+                data-i18n-type="action">观望</span>
+
+              {% endif %}
+
+            </div>
+
+          </div>
+
+
+
+          <!-- Metrics Grid -->
+
+          <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+
+            <!-- Entry -->
+
+            <div class="bg-black/20 rounded-lg p-3 border border-white/5 flex flex-col items-center justify-center">
+
+              <span class="text-xs text-muted-foreground mb-1 block" data-i18n="overview.table.entry">入场点</span>
+
+              <span class="mono font-bold text-lg {{ 'text-muted-foreground' if sig.entry_price is none }}">
+                {{ "$" ~ "%.2f"|format(sig.entry_price) if sig.entry_price is not none else "-" }}
+              </span>
+              {% if sig.entry_price is not none %}
+              {{ ui.copy_button("%.2f"|format(sig.entry_price), '复制入场价', 'mt-2') }}
+              {% endif %}
+
+            </div>
+
+            <!-- TP -->
+
+            <div class="bg-black/20 rounded-lg p-3 border border-white/5 flex flex-col items-center justify-center">
+
+              <span class="text-xs text-muted-foreground mb-1 block" data-i18n="overview.table.tp">止盈</span>
+
+              <span
+                class="mono font-bold text-lg {{ 'text-positive' if sig.take_profit is not none else 'text-muted-foreground' }}">
+                {{ "$" ~ "%.2f"|format(sig.take_profit) if sig.take_profit is not none else "-" }}
+              </span>
+              {% if sig.take_profit is not none %}
+              {{ ui.copy_button("%.2f"|format(sig.take_profit), '复制止盈价', 'mt-2') }}
+              {% endif %}
+
+            </div>
+
+            <!-- SL -->
+
+            <div class="bg-black/20 rounded-lg p-3 border border-white/5 flex flex-col items-center justify-center">
+
+              <span class="text-xs text-muted-foreground mb-1 block" data-i18n="overview.table.sl">止损</span>
+
+              <span
+                class="mono font-bold text-lg {{ 'text-negative' if sig.stop_loss is not none else 'text-muted-foreground' }}">
+                {{ "$" ~ "%.2f"|format(sig.stop_loss) if sig.stop_loss is not none else "-" }}
+              </span>
+              {% if sig.stop_loss is not none %}
+              {{ ui.copy_button("%.2f"|format(sig.stop_loss), '复制止损价', 'mt-2') }}
+              {% endif %}
+
+            </div>
+
+            <!-- Confidence -->
+
+            <div
+              class="bg-black/20 rounded-lg p-3 border border-white/5 flex flex-col items-center justify-center w-full">
+
+              <div class="flex justify-between w-full text-xs mb-1">
+
+                <span class="text-muted-foreground" data-i18n="overview.table.conviction">信心指数</span>
+
+                <span
+                  class="mono font-bold {{ 'text-muted-foreground' if sig.direction == 'HOLD' else 'text-foreground' }}">{{
+
+                  sig.confidence }}%</span>
+
+              </div>
+
+              <div class="w-full h-1.5 bg-white/10 rounded-full overflow-hidden mt-1">
+
+                <div
+                  class="h-full {{ 'bg-white/20' if sig.direction == 'HOLD' else 'bg-gradient-to-r from-primary to-accent shadow-[0_0_10px_rgba(217,70,239,0.5)]' }} transition-all duration-1000"
+                  style="width: {{ sig.confidence }}%;"></div>
+
+              </div>
+
+            </div>
+
+          </div>
+
+
+
+          <!-- Reasoning -->
+
+          <div class="bg-black/40 rounded-lg p-4 border border-white/5 relative mt-4">
+
+            <div
+              class="absolute -top-2.5 left-4 bg-[#141416] px-2 text-[10px] font-bold text-primary uppercase tracking-wider rounded">
+
+              Strategy Logic ({{ sig.model_name or 'unknown' }})</div>
+
+            <div class="text-sm text-foreground/90 whitespace-pre-wrap leading-relaxed">
+
+              {{- sig.reasoning -}}
+
+            </div>
+
+          </div>
+
+          {% set aj = sig.analysis_json or {} %}
+          {% if aj %}
+          {% set validation = aj.get('validation', {}) if aj else {} %}
+          {% set warnings = validation.get('warnings', []) if validation else [] %}
+          {% set levels = aj.get('levels', {}) if aj else {} %}
+          {% set evidence = aj.get('evidence', []) if aj else [] %}
+          {% set scenarios = aj.get('scenarios', {}) if aj else {} %}
+          {% set youtube_reflection = aj.get('youtube_reflection', {}) if aj else {} %}
+          {% set risk = aj.get('risk', {}) if aj else {} %}
+          {% set context_digest = aj.get('context_digest', {}) if aj else {} %}
+          {% set data_quality = context_digest.get('data_quality', {}) if context_digest else {} %}
+          {% set input_budget_meta = context_digest.get('input_budget_meta', {}) if context_digest else {} %}
+          {% set tradeable_gate = context_digest.get('tradeable_gate', {}) if context_digest else {} %}
+
+          <details class="mt-4 rounded-lg border border-white/5 bg-black/20 group/details">
+            <summary
+              class="list-none cursor-pointer px-4 py-3 flex items-center justify-between gap-3 hover:bg-white/[0.03] transition-colors rounded-lg">
+              <div class="flex items-center gap-2">
+                <i data-lucide="chevrons-up-down" class="w-4 h-4 text-muted-foreground"></i>
+                <span class="text-xs font-bold uppercase tracking-wider text-muted-foreground">展开详情</span>
+              </div>
+              <div class="flex items-center gap-2">
+                {% if warnings %}
+                <span
+                  class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold border border-amber-400/30 bg-amber-400/10 text-amber-300">
+                  <span class="inline-block w-1.5 h-1.5 rounded-full bg-amber-400"></span>
+                  {{ warnings|length }} 条校验提示
+                </span>
+                {% endif %}
+                {% if validation.get('status') == 'downgraded' %}
+                <span
+                  class="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold border border-red-400/30 bg-red-400/10 text-red-300">
+                  已降级
+                </span>
+                {% endif %}
+              </div>
+            </summary>
+
+            <div class="px-4 pb-4 pt-1 space-y-4">
+              {% if validation or risk or tradeable_gate %}
+              <div class="rounded-lg border border-white/5 bg-black/30 p-3">
+                <div class="text-[11px] font-bold uppercase tracking-wider text-primary mb-2">Validation / 风控提示</div>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+                  <div class="space-y-1">
+                    {% if validation.get('downgrade_reason') %}
+                    <div class="text-red-300">降级原因：{{ validation.get('downgrade_reason') }}</div>
+                    {% endif %}
+                    {% if warnings %}
+                    <div class="space-y-1">
+                      {% for w in warnings %}
+                      <div class="text-amber-200">• {{ w }}</div>
+                      {% endfor %}
+                    </div>
+                    {% endif %}
+                    {% if tradeable_gate and tradeable_gate.get('tradeable') is not none %}
+                    <div class="{{ 'text-emerald-300' if tradeable_gate.get('tradeable') else 'text-amber-300' }}">
+                      可交易门控：{{ '可交易' if tradeable_gate.get('tradeable') else '谨慎/暂不交易' }}
+                    </div>
+                    {% if tradeable_gate.get('reasons') %}
+                    <div class="text-muted-foreground">
+                      原因：{{ (tradeable_gate.get('reasons') or [])|join('；') }}
+                    </div>
+                    {% endif %}
+                    {% endif %}
+                  </div>
+                  <div class="space-y-1">
+                    {% if validation.get('rr') is not none or risk.get('rr') is not none %}
+                    <div>RR：<span class="mono">{{ '%.2f'|format(validation.get('rr', risk.get('rr'))) }}</span></div>
+                    {% endif %}
+                    {% if validation.get('sl_atr_multiple') is not none or risk.get('sl_atr_multiple') is not none %}
+                    <div>SL ATR 倍数：<span class="mono">{{ '%.2f'|format(validation.get('sl_atr_multiple',
+                        risk.get('sl_atr_multiple'))) }}</span></div>
+                    {% endif %}
+                    {% if risk.get('invalidations') %}
+                    <div class="text-muted-foreground">失效条件：{{ (risk.get('invalidations') or [])|join('；') }}</div>
+                    {% endif %}
+                  </div>
+                </div>
+              </div>
+              {% endif %}
+
+              {% if (levels.get('supports') or levels.get('resistances')) %}
+              <div class="rounded-lg border border-white/5 bg-black/30 p-3">
+                <div class="text-[11px] font-bold uppercase tracking-wider text-primary mb-2">Levels（关键位）</div>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+                  <div>
+                    <div class="text-muted-foreground mb-1">支撑位</div>
+                    {% if levels.get('supports') %}
+                    {% for lv in levels.get('supports')[:3] %}
+                    <div class="mono">{{ '$%.2f'|format(lv) if lv is number else lv }}</div>
+                    {% endfor %}
+                    {% else %}
+                    <div class="text-muted-foreground">-</div>
+                    {% endif %}
+                  </div>
+                  <div>
+                    <div class="text-muted-foreground mb-1">阻力位</div>
+                    {% if levels.get('resistances') %}
+                    {% for lv in levels.get('resistances')[:3] %}
+                    <div class="mono">{{ '$%.2f'|format(lv) if lv is number else lv }}</div>
+                    {% endfor %}
+                    {% else %}
+                    <div class="text-muted-foreground">-</div>
+                    {% endif %}
+                  </div>
+                </div>
+              </div>
+              {% endif %}
+
+              {% if evidence %}
+              <div class="rounded-lg border border-white/5 bg-black/30 p-3">
+                <div class="text-[11px] font-bold uppercase tracking-wider text-primary mb-2">Evidence（证据）</div>
+                <div class="space-y-2 text-xs">
+                  {% for ev in evidence[:3] %}
+                  <div class="rounded-md border border-white/5 bg-black/20 p-2">
+                    <div class="flex items-center gap-2 flex-wrap">
+                      <span class="px-1.5 py-0.5 rounded bg-white/5 text-[10px] font-semibold mono">{{
+                        ev.get('timeframe', '-') }}</span>
+                      <span class="text-foreground/90">{{ ev.get('point', '-') }}</span>
+                    </div>
+                    {% if ev.get('metrics') %}
+                    <div class="mt-1 text-muted-foreground mono break-all">
+                      {% for k, v in ev.get('metrics', {}).items() %}
+                      <span>{{ k }}={{ v }}</span>{% if not loop.last %}<span class="mx-1">|</span>{% endif %}
+                      {% endfor %}
+                    </div>
+                    {% endif %}
+                  </div>
+                  {% endfor %}
+                </div>
+              </div>
+              {% endif %}
+
+              {% set has_scenarios = scenarios and (scenarios.get('base') or scenarios.get('bull') or
+              scenarios.get('bear')) %}
+              {% if has_scenarios %}
+              <div class="rounded-lg border border-white/5 bg-black/30 p-3">
+                <div class="text-[11px] font-bold uppercase tracking-wider text-primary mb-2">Scenarios（情景剧本）</div>
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
+                  {% for key, label in [('base','基础情景'), ('bull','看多情景'), ('bear','看空情景')] %}
+                  <div class="rounded-md border border-white/5 bg-black/20 p-2">
+                    <div class="text-muted-foreground mb-1">{{ label }}</div>
+                    <div class="text-foreground/90 whitespace-pre-wrap">{{ scenarios.get(key) or '-' }}</div>
+                  </div>
+                  {% endfor %}
+                </div>
+              </div>
+              {% endif %}
+
+              {% if youtube_reflection %}
+              <div class="rounded-lg border border-white/5 bg-black/30 p-3">
+                <div class="text-[11px] font-bold uppercase tracking-wider text-primary mb-2">YouTube Reflection（观点源）
+                </div>
+                <div class="text-xs space-y-1">
+                  {% if youtube_reflection.get('status') %}
+                  <div>状态：<span class="mono">{{ youtube_reflection.get('status') }}</span></div>
+                  {% endif %}
+                  {% if youtube_reflection.get('note') %}
+                  <div class="text-muted-foreground whitespace-pre-wrap">{{ youtube_reflection.get('note') }}</div>
+                  {% endif %}
+                </div>
+              </div>
+              {% endif %}
+
+              {% if data_quality or input_budget_meta %}
+              <div class="rounded-lg border border-white/5 bg-black/30 p-3">
+                <div class="text-[11px] font-bold uppercase tracking-wider text-primary mb-2">Data Quality / Budget（调试）
+                </div>
+                <div class="text-xs space-y-1">
+                  {% if data_quality %}
+                  <div>数据质量：<span class="mono">{{ data_quality.get('overall', '-') }}</span></div>
+                  {% if data_quality.get('missing_timeframes') %}
+                  <div class="text-muted-foreground">缺失周期：{{ (data_quality.get('missing_timeframes') or [])|join(', ')
+                    }}</div>
+                  {% endif %}
+                  {% if data_quality.get('notes') %}
+                  <div class="text-muted-foreground">说明：{{ (data_quality.get('notes') or [])|join('；') }}</div>
+                  {% endif %}
+                  {% endif %}
+                  {% if input_budget_meta %}
+                  <div class="text-muted-foreground mono break-all">
+                    输入预算：YT {{ input_budget_meta.get('youtube_radar_chars_after_clip', '-') }}/{{
+                    input_budget_meta.get('youtube_radar_chars_before_clip', '-') }}
+                    | Alerts {{ input_budget_meta.get('alerts_digest_chars', '-') }}
+                  </div>
+                  {% if input_budget_meta.get('clip_steps_applied') %}
+                  <div class="text-muted-foreground">裁剪步骤：{{ (input_budget_meta.get('clip_steps_applied') or [])|join('
+                    -> ') }}</div>
+                  {% endif %}
+                  {% endif %}
+                </div>
+              </div>
+              {% endif %}
+            </div>
+          </details>
+          {% endif %}
+
+        </div>
+
+        {% endfor %}
+
+        {% else %}
+
+        <!-- Empty State -->
+
+        <div class="text-center text-muted-foreground py-12">
+
+          <div class="flex flex-col items-center justify-center gap-3">
+
+            <i data-lucide="brain" class="w-8 h-8 opacity-50"></i>
+
+            <span data-i18n="overview.empty_ai">未生成 AI 信号，请检查相关 AI 配置。</span>
+
+          </div>
+
+        </div>
+
+        {% endif %}
+
+      </div>
+
+
+
+      <!-- Streaming AI Reasoning Console -->
+      <div class="px-4 pb-4">
+        <div class="ai-console-shell mt-4 rounded-xl overflow-hidden">
+          <div class="px-4 py-3 border-b border-white/10 flex items-center gap-3 flex-wrap">
+            <div class="flex items-center gap-2 min-w-0">
+              <i data-lucide="terminal-square" class="w-4 h-4 text-cyan-300 shrink-0"></i>
+              <div class="min-w-0">
+                <div class="text-xs font-bold uppercase tracking-wider text-slate-200">AI Console</div>
+                <div class="text-[11px] text-slate-400 truncate">Reasoning stream and runtime traces</div>
+              </div>
+            </div>
+
+            <div class="ml-auto flex items-center gap-2 flex-wrap">
+              <div class="ai-console-live-dot inline-flex items-center gap-1.5 text-[10px] uppercase text-slate-400">
+                <span class="relative flex h-2 w-2">
+                  <span
+                    class="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-300 opacity-75"></span>
+                  <span class="relative inline-flex rounded-full h-2 w-2 bg-amber-300"></span>
+                </span>
+                <span>Live</span>
+              </div>
+              <button id="ai-console-follow" type="button" class="btn btn-secondary btn-sm hidden">Follow Live</button>
+              <button id="ai-console-clear" type="button" class="btn btn-secondary btn-sm">Clear</button>
+              <button type="button" class="section-toggle"
+                data-persist-toggle-key="sentinel.ui.overview.ai_console.collapsed"
+                data-persist-toggle-target="#ai-console-container" data-persist-default="collapsed"
+                data-persist-label-expanded="Hide Console" data-persist-label-collapsed="Show Console"
+                data-persist-collapsed-class="hidden" data-icon-expanded="chevron-up" data-icon-collapsed="chevron-down"
+                aria-expanded="true">
+                <i data-lucide="chevron-up" class="w-3.5 h-3.5"></i>
+                <span data-persist-label>Hide Console</span>
+              </button>
+            </div>
+          </div>
+
+          <div id="ai-console-container"
+            class="hidden relative max-h-[360px] min-h-[220px] overflow-y-auto overscroll-contain w-full px-4 py-3">
+            <div id="ai-console-scroll">
+              <div id="ai-console-output" class="text-xs font-mono text-slate-300/90 whitespace-pre-wrap break-words">
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </section>
+
+
+
+  </div>
+
+
+
+  <!-- Right Column: Alerts and YouTube -->
+
+  <div class="space-y-6">
+
+
+
+    <!-- Latest Alerts Widget -->
+
+    <section class="card glass-panel animate-fade-in-up stagger-4 border-l-4 border-l-red-500">
+
+      <div class="card-header bg-red-500/5">
+
+        <h3 class="card-title flex items-center gap-2 text-red-500"
+          style="background: none; color: #ef4444; -webkit-text-fill-color: initial;">
+
+          <i data-lucide="siren" class="w-5 h-5"></i> <span data-i18n="overview.alerts.title">系统告警</span>
+
+        </h3>
+
+        <a href="/alerts"
+          class="text-xs text-muted-foreground hover:text-foreground inline-flex items-center gap-1 transition-colors">
+
+          <span data-i18n="overview.alerts.view_all">查看全部</span> <i data-lucide="arrow-right" class="w-3 h-3"></i>
+
+        </a>
+
+      </div>
+
+      <div class="p-0">
+
+        {% if alerts %}
+
+        <div class="divide-y divide-white/[0.05]">
+
+          {% for alert in alerts[:5] %}
+
+          <div class="p-4 hover:bg-white/[0.02] transition-colors relative group">
+
+            <div
+              class="absolute left-0 top-0 bottom-0 w-0.5 {{ 'bg-red-500' if alert.severity == 'CRITICAL' else 'bg-yellow-500' if alert.severity == 'WARNING' else 'bg-blue-500' }} opacity-0 group-hover:opacity-100 transition-opacity">
+
+            </div>
+
+            <div class="flex justify-between items-start mb-2">
+
+              <div class="flex items-center gap-2">
+
+                <span class="font-bold text-sm">{{ alert.symbol }}</span>
+
+                <span class="text-[10px] mono text-muted-foreground bg-white/5 px-2 py-0.5 rounded">{{
+
+                  alert.alert_type }}</span>
+
+              </div>
+
+              <span class="text-xs text-muted-foreground mono">{{ alert.created_at | bj_time("%H:%M") }}</span>
+
+            </div>
+
+            <p class="text-xs text-muted-foreground line-clamp-2 leading-relaxed">{{ alert.reason }}</p>
+
+          </div>
+
+          {% endfor %}
+
+        </div>
+
+        {% else %}
+
+        <div class="py-12 flex flex-col items-center justify-center text-muted-foreground">
+
+          <i data-lucide="check-circle" class="w-8 h-8 text-emerald-500/50 mb-3"></i>
+
+          <p class="text-sm" data-i18n="overview.alerts.empty">系统运行正常。近期无告警。</p>
+
+        </div>
+
+        {% endif %}
+
+      </div>
+
+    </section>
+
+
+
+    <!-- YouTube Consensus Widget -->
+
+    {% if youtube_enabled %}
+
+    <section class="card glass-panel animate-fade-in-up stagger-5">
+
+      <div class="card-header bg-white/[0.02]">
+
+        <h3 class="card-title flex items-center gap-2">
+
+          <i data-lucide="youtube" class="w-5 h-5 text-red-500"></i> <span data-i18n="overview.yt.title">YouTube
+
+            市场情绪</span>
+
+        </h3>
+
+      </div>
+
+      <div class="p-5">
+
+        {% if yt_consensus and yt_consensus.data %}
+
+        {% set c = yt_consensus.data %}
+
+
+
+        <div class="bg-white/[0.03] rounded-lg p-4 mb-4 border border-white/5 relative overflow-hidden">
+
+          <!-- Glowing background accent -->
+
+          <div
+            class="absolute -right-10 -top-10 w-32 h-32 rounded-full blur-[40px] pointer-events-none
+
+                  {{ 'bg-emerald-500/20' if c.consensus_bias == 'bullish' else 'bg-red-500/20' if c.consensus_bias == 'bearish' else 'bg-blue-500/20' }}">
+
+          </div>
+
+
+
+          <div class="flex justify-between items-center mb-4 relative">
+
+            <span class="text-xs font-semibold text-muted-foreground uppercase tracking-wider"
+              data-i18n="overview.yt.bias">总体偏好</span>
+
+            {% if c.consensus_bias == "bullish" %}<span
+              class="badge badge-success shadow-[0_0_10px_rgba(16,185,129,0.2)]" data-i18n-enum="bullish"
+              data-i18n-type="bias">看涨</span>
+
+            {% elif c.consensus_bias == "bearish" %}<span
+              class="badge badge-danger shadow-[0_0_10px_rgba(239,68,68,0.2)]" data-i18n-enum="bearish"
+              data-i18n-type="bias">看跌</span>
+
+            {% else %}<span class="badge badge-neutral" data-i18n-enum="neutral" data-i18n-type="bias">中性</span>
+
+            {% endif %}
+
+          </div>
+
+
+
+          <div class="mb-4 relative">
+
+            <div class="flex justify-between text-xs mb-1">
+
+              <span class="text-muted-foreground" data-i18n="overview.yt.conf">置信度</span>
+
+              <span class="font-bold mono">{{ c.confidence|default("-") }}/100</span>
+
+            </div>
+
+            <div class="h-1.5 w-full bg-white/10 rounded-full overflow-hidden">
+
+              <div
+                class="h-full rounded-full transition-all {{ 'bg-emerald-400' if c.consensus_bias == 'bullish' else 'bg-red-400' if c.consensus_bias == 'bearish' else 'bg-blue-400' }}"
+                style="width: {{ c.confidence|default(0) }}%;"></div>
+
+            </div>
+
+          </div>
+
+
+
+          {% if c.key_levels %}
+
+          <div class="grid grid-cols-2 gap-2 text-xs relative">
+
+            <div class="bg-black/20 rounded p-2 border border-white/5">
+
+              <div class="text-muted-foreground mb-1" data-i18n="overview.yt.support">支撑位</div>
+
+              <div class="text-emerald-400 font-mono">{{ c.key_levels.support|default([])|join(", ") or "N/A" }}
+
+              </div>
+
+            </div>
+
+            <div class="bg-black/20 rounded p-2 border border-white/5">
+
+              <div class="text-muted-foreground mb-1" data-i18n="overview.yt.resistance">阻力位</div>
+
+              <div class="text-red-400 font-mono">{{ c.key_levels.resistance|default([])|join(", ") or "N/A" }}
+
+              </div>
+
+            </div>
+
+          </div>
+
+          {% endif %}
+
+        </div>
+
+
+
+        <a href="/youtube" class="btn btn-secondary w-full text-xs">
+
+          <span data-i18n="overview.yt.btn">查看详细分析</span> <i data-lucide="arrow-right" class="w-3 h-3 ml-2"></i>
+
+        </a>
+
+
+
+        {% else %}
+
+        <div class="text-center py-6 text-sm text-muted-foreground flex flex-col items-center">
+
+          <i data-lucide="activity" class="w-6 h-6 mb-2 opacity-50"></i>
+
+          <p data-i18n="overview.yt.empty">暂无共识数据。</p>
+
+          <a href="/youtube" class="text-primary hover:underline mt-2 flex items-center gap-1"><span
+              data-i18n="overview.yt.manage">管理频道</span> <i data-lucide="external-link" class="w-3 h-3"></i></a>
+
+        </div>
+
+        {% endif %}
+
+      </div>
+
+    </section>
+
+    {% endif %}
+
+
+
+  </div>
+
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+
+  let currentCoin = 'BTCUSDT';
+
+
+
+  function selectCoin(symbol) {
+
+    currentCoin = symbol;
+
+
+
+    // Update Tabs UI
+
+    document.querySelectorAll('.coin-tab').forEach(tab => {
+
+      if (tab.dataset.symbol === symbol) {
+
+        tab.classList.add('bg-primary', 'text-primary-foreground', 'border-primary', 'shadow-[0_0_15px_rgba(99,102,241,0.3)]');
+
+        tab.classList.remove('bg-white/[0.02]', 'text-muted-foreground', 'hover:bg-white/10');
+
+      } else {
+
+        tab.classList.remove('bg-primary', 'text-primary-foreground', 'border-primary', 'shadow-[0_0_15px_rgba(99,102,241,0.3)]');
+
+        tab.classList.add('bg-white/[0.02]', 'text-muted-foreground', 'hover:bg-white/10');
+
+      }
+
+    });
+
+
+
+    // Filter Market Data
+
+    document.querySelectorAll('#market-data-tbody tr[data-symbol]').forEach(row => {
+      const selected = row.dataset.symbol === symbol;
+      row.style.display = '';
+      row.classList.toggle('bg-white/[0.03]', selected);
+      row.classList.toggle('border-primary/20', selected);
+    });
+
+
+
+    // Filter AI Signals
+
+    document.querySelectorAll('#ai-signals-container .ai-signal-card').forEach(card => {
+
+      card.style.display = card.dataset.symbol === symbol ? '' : 'none';
+
+    });
+
+
+
+    // Filter AI Stream Console
+
+    document.querySelectorAll('#ai-console-output > div[id^="ai-console-"]').forEach(div => {
+
+      const divSymbol = div.id.replace('ai-console-', '');
+
+      div.style.display = divSymbol === symbol ? '' : 'none';
+
+    });
+
+  }
+
+
+
+  document.addEventListener('DOMContentLoaded', () => {
+
+    const tabs = document.querySelectorAll('.coin-tab');
+
+    let defaultSymbol = null;
+
+    tabs.forEach(tab => {
+
+      if (tab.dataset.symbol === 'BTCUSDT') defaultSymbol = 'BTCUSDT';
+
+    });
+
+    if (!defaultSymbol && tabs.length > 0) defaultSymbol = tabs[0].dataset.symbol;
+
+    if (defaultSymbol) selectCoin(defaultSymbol);
+
+  });
+
+
+
+  // Initialize Lucide icons
+
+  lucide.createIcons();
+  const aiConsoleState = {
+    autoFollow: true,
+    streaming: false,
+  };
+
+  function isConsoleNearBottom(container, threshold = 36) {
+    if (!container) return true;
+    const gap = container.scrollHeight - container.clientHeight - container.scrollTop;
+    return gap <= threshold;
+  }
+
+  function setAiConsoleAutoFollow(enabled) {
+    aiConsoleState.autoFollow = !!enabled;
+    const followBtn = document.getElementById('ai-console-follow');
+    if (!followBtn) return;
+    followBtn.classList.toggle('hidden', aiConsoleState.autoFollow);
+    followBtn.classList.toggle('btn-primary', !aiConsoleState.autoFollow);
+    followBtn.classList.toggle('btn-secondary', aiConsoleState.autoFollow);
+    followBtn.textContent = aiConsoleState.autoFollow ? 'Following Live' : 'Follow Live';
+  }
+
+  function setAnalyzeStatus(kind, label, options = {}) {
+    const status = document.getElementById('analyze-status');
+    if (!status) return;
+    if (window.SentinelUI && typeof window.SentinelUI.renderStatusDot === 'function') {
+      status.innerHTML = window.SentinelUI.renderStatusDot('generic', kind, {
+        label,
+        pulse: !!options.pulse,
+        className: 'mr-1'
+      });
+      if (window.SentinelUI.applyStatusTokens) window.SentinelUI.applyStatusTokens(status);
+    } else {
+      status.textContent = label;
+    }
+  }
+
+
+
+  async function runAiAnalysis() {
+
+    const btn = document.getElementById('btn-analyze');
+
+    const consoleContainer = document.getElementById('ai-console-container');
+
+    const consoleOutput = document.getElementById('ai-console-output');
+    const followBtn = document.getElementById('ai-console-follow');
+    const clearBtn = document.getElementById('ai-console-clear');
+    const aiPanel = document.getElementById('overview-ai-panel');
+    const ui = window.SentinelUI;
+
+    const modelSelector = document.getElementById('modelSelector');
+
+    const selectedModel = modelSelector && modelSelector.value ? modelSelector.value : '{{ default_model }}';
+
+    const selectedLabel = modelSelector && modelSelector.selectedIndex >= 0
+
+      ? modelSelector.options[modelSelector.selectedIndex].text
+
+      : selectedModel;
+
+    const encodedModel = encodeURIComponent(selectedModel);
+
+    const streamUrl = `/api/ai-analyze/stream?model=${encodedModel}`;
+
+    const preflightUrl = `/api/ai-analyze?dry_run=1&model=${encodedModel}`;
+
+    let scrollTimeout = null;
+
+    if (consoleContainer && !consoleContainer.dataset.boundScrollWatcher) {
+      consoleContainer.dataset.boundScrollWatcher = '1';
+      consoleContainer.addEventListener('scroll', () => {
+        if (!aiConsoleState.streaming) return;
+        setAiConsoleAutoFollow(isConsoleNearBottom(consoleContainer));
+      }, { passive: true });
+    }
+
+    if (followBtn && !followBtn.dataset.boundFollowClick) {
+      followBtn.dataset.boundFollowClick = '1';
+      followBtn.addEventListener('click', () => {
+        if (!consoleContainer) return;
+        consoleContainer.scrollTop = consoleContainer.scrollHeight;
+        setAiConsoleAutoFollow(true);
+      });
+    }
+
+    if (clearBtn && !clearBtn.dataset.boundClearClick) {
+      clearBtn.dataset.boundClearClick = '1';
+      clearBtn.addEventListener('click', () => {
+        consoleOutput.innerHTML = '';
+      });
+    }
+
+
+
+    const resetAnalyzeButton = (labelHtml) => {
+
+      if (ui && typeof ui.setLoading === 'function') {
+        ui.setLoading(btn, false);
+      } else {
+        btn.disabled = false;
+      }
+      if (labelHtml) {
+        btn.innerHTML = labelHtml;
+        btn.dataset.originalHtml = labelHtml;
+      }
+      lucide.createIcons();
+
+    };
+
+
+
+    if (ui && ui.clearError) ui.clearError(aiPanel);
+    if (ui && ui.setLoading) {
+      if (!ui.setLoading(btn, true, { text: 'Running...' })) return;
+    } else {
+      btn.disabled = true;
+      btn.innerHTML = '<i data-lucide="loader-2" class="w-4 h-4 mr-2 animate-spin"></i> Running...';
+      lucide.createIcons();
+    }
+
+
+
+    setAnalyzeStatus('loading', `Analyzing with ${selectedLabel}...`, { pulse: true });
+
+    consoleOutput.innerHTML = '';
+
+    consoleContainer.classList.remove('hidden');
+    aiConsoleState.streaming = true;
+    setAiConsoleAutoFollow(true);
+
+
+
+    try {
+
+      const preflightRes = await fetch(preflightUrl, { method: 'POST' });
+
+      if (!preflightRes.ok) {
+
+        let errMsg = `Request failed (${preflightRes.status})`;
+
+        try {
+
+          const body = await preflightRes.json();
+
+          errMsg = body.detail || body.error || errMsg;
+
+        } catch (_err) {
+
+          // ignore JSON parse failure
+
+        }
+
+        throw new Error(errMsg);
+
+      }
+
+    } catch (err) {
+
+      const errMsg = err && err.message ? err.message : 'Model validation failed';
+
+      setAnalyzeStatus('error', errMsg);
+      if (ui && ui.showPanelError) ui.showPanelError(aiPanel, errMsg);
+
+      resetAnalyzeButton('<i data-lucide="cpu" class="w-4 h-4 mr-2"></i> Retry');
+      aiConsoleState.streaming = false;
+
+      return;
+
+    }
+
+
+
+    const evtSource = new EventSource(streamUrl);
+
+
+
+    evtSource.onmessage = function (event) {
+
+      try {
+
+        const data = JSON.parse(event.data);
+
+
+
+        if (data.type === 'error') {
+
+          setAnalyzeStatus('error', data.error || 'Analysis failed');
+          if (ui && ui.showPanelError) ui.showPanelError(aiPanel, data.error || 'Analysis failed');
+
+          resetAnalyzeButton('<i data-lucide="cpu" class="w-4 h-4 mr-2"></i> Retry');
+          aiConsoleState.streaming = false;
+
+          evtSource.close();
+
+        }
+
+        else if (data.type === 'chunk') {
+
+          let symbolDiv = document.getElementById(`ai-console-${data.symbol}`);
+
+          if (!symbolDiv) {
+
+            symbolDiv = document.createElement('div');
+
+            symbolDiv.id = `ai-console-${data.symbol}`;
+
+            symbolDiv.className = 'ai-console-stream mb-3 rounded-r-lg bg-white/[0.02] py-2 pr-2';
+
+            symbolDiv.innerHTML = `<div class="text-[10px] text-cyan-300 font-semibold uppercase mb-1 tracking-wider">[ ${data.symbol} ]</div><div class="stream-text text-slate-300/90 whitespace-pre-wrap break-words leading-6"></div>`;
+
+            symbolDiv.style.display = data.symbol === currentCoin ? '' : 'none';
+
+            consoleOutput.appendChild(symbolDiv);
+
+          }
+
+          const textContainer = symbolDiv.querySelector('.stream-text');
+
+          const lastNode = textContainer.lastChild;
+
+          if (lastNode && lastNode.nodeType === Node.TEXT_NODE) {
+
+            lastNode.appendData(data.text);
+
+          } else {
+
+            textContainer.appendChild(document.createTextNode(data.text));
+
+          }
+
+          if (aiConsoleState.autoFollow && !scrollTimeout) {
+
+            scrollTimeout = setTimeout(() => {
+
+              consoleContainer.scrollTop = consoleContainer.scrollHeight;
+
+              scrollTimeout = null;
+
+            }, 100);
+
+          }
+
+        }
+
+        else if (data.type === 'symbol_done') {
+
+          let symbolDiv = document.getElementById(`ai-console-${data.symbol}`);
+
+          if (symbolDiv) {
+
+            const div = document.createElement('div');
+
+            div.className = 'text-emerald-300/80 text-[10px] mt-2 font-semibold';
+
+            div.textContent = '--- Analysis Completed ---';
+
+            symbolDiv.appendChild(div);
+
+          }
+
+          if (aiConsoleState.autoFollow) {
+            consoleContainer.scrollTop = consoleContainer.scrollHeight;
+          }
+
+
+
+          fetch(location.href)
+
+            .then(res => res.text())
+
+            .then(html => {
+
+              const parser = new DOMParser();
+
+              const doc = parser.parseFromString(html, 'text/html');
+
+
+
+              const newAiContainer = doc.querySelector('#ai-signals-container');
+
+              const oldAiContainer = document.getElementById('ai-signals-container');
+
+              if (newAiContainer && oldAiContainer) {
+
+                const newCards = Array.from(newAiContainer.querySelectorAll('.ai-signal-card'));
+
+                const oldCards = Array.from(oldAiContainer.querySelectorAll('.ai-signal-card'));
+
+
+
+                const newCard = newCards.find(card => card.dataset && card.dataset.symbol === data.symbol);
+
+                const oldCard = oldCards.find(card => card.dataset && card.dataset.symbol === data.symbol);
+
+
+
+                if (newCard && oldCard) {
+
+                  oldCard.replaceWith(newCard);
+
+                  newCard.style.display = newCard.dataset.symbol === currentCoin ? '' : 'none';
+
+                } else if (newCard && !oldCard) {
+
+                  oldAiContainer.appendChild(newCard);
+
+                  newCard.style.display = newCard.dataset.symbol === currentCoin ? '' : 'none';
+
+                }
+
+              }
+
+              lucide.createIcons();
+              if (window.SentinelUI && window.SentinelUI.bootPage) window.SentinelUI.bootPage(oldAiContainer);
+
+            })
+
+            .catch(err => console.error(`Failed to update table for ${data.symbol}:`, err));
+
+        }
+
+        else if (data.type === 'done') {
+
+          setAnalyzeStatus('success', `Analysis completed (${selectedLabel})`);
+          aiConsoleState.streaming = false;
+
+          evtSource.close();
+
+          resetAnalyzeButton('<i data-lucide="cpu" class="w-4 h-4 mr-2"></i> Re-run Analysis');
+
+        }
+
+      } catch (err) {
+
+        console.error('Parse error:', err);
+
+      }
+
+    };
+
+
+
+    evtSource.onerror = function () {
+
+      const msg = 'Stream disconnected. Possible unsupported model or network error.';
+      setAnalyzeStatus('error', msg);
+      if (ui && ui.showPanelError) ui.showPanelError(aiPanel, msg);
+
+      resetAnalyzeButton('<i data-lucide="cpu" class="w-4 h-4 mr-2"></i> Retry');
+      aiConsoleState.streaming = false;
+
+      evtSource.close();
+
+    };
+
+  }
+
+</script>
+{% endblock %}
