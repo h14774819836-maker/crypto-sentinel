@@ -85,6 +85,34 @@ def build_scheduler(runtime) -> AsyncIOScheduler:
         next_run_time=now,
     )
 
+    # --- Intel news ingest/digest ---
+    if runtime.settings.intel_enabled:
+        scheduler.add_job(
+            jobs.supervised_job,
+            "interval",
+            seconds=runtime.settings.intel_poll_seconds,
+            kwargs={"job_name": "intel_news_job", "coro_func": jobs.intel_news_job, "runtime": runtime},
+            id="intel_news_job",
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=120,
+            next_run_time=now,
+        )
+
+        from datetime import timedelta as _td
+
+        scheduler.add_job(
+            jobs.supervised_job,
+            "interval",
+            seconds=runtime.settings.intel_digest_poll_seconds,
+            kwargs={"job_name": "intel_digest_job", "coro_func": jobs.intel_digest_job, "runtime": runtime},
+            id="intel_digest_job",
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=120,
+            next_run_time=now + _td(seconds=30),
+        )
+
     # --- AI analysis (with multi-TF + funding data) ---
     market_config = runtime.settings.resolve_llm_config("market")
     if market_config.enabled and getattr(runtime, "market_analyst", None) is not None:

@@ -165,6 +165,45 @@ class FundingSnapshot(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
 
+# ======== Intel / News ========
+
+
+class NewsItem(Base):
+    __tablename__ = "news_items"
+    __table_args__ = (
+        UniqueConstraint("url_hash", name="uq_news_items_url_hash"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    ts_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True, nullable=False)
+    source: Mapped[str] = mapped_column(String(128), index=True, nullable=False)
+    category: Mapped[str] = mapped_column(String(32), index=True, nullable=False, default="intel")
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    title_hash: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    url: Mapped[str] = mapped_column(Text, nullable=False)
+    url_hash: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    summary: Mapped[str | None] = mapped_column(Text)
+    raw_text: Mapped[str | None] = mapped_column(Text)
+    region: Mapped[str | None] = mapped_column(String(32), index=True)
+    topics_json: Mapped[list | None] = mapped_column(JSON)
+    alert_keyword: Mapped[str | None] = mapped_column(String(64), index=True)
+    severity: Mapped[int] = mapped_column(Integer, index=True, nullable=False, default=0)
+    entities_json: Mapped[list | None] = mapped_column(JSON)
+    metadata_json: Mapped[dict | None] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+
+class IntelDigestCache(Base):
+    __tablename__ = "intel_digest_cache"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    symbol: Mapped[str] = mapped_column(String(20), index=True, nullable=False, default="GLOBAL")
+    lookback_hours: Mapped[int] = mapped_column(Integer, nullable=False, default=24)
+    digest_json: Mapped[dict | None] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True, nullable=False)
+
+
 # ======== YouTube MVP ========
 
 

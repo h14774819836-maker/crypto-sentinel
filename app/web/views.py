@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import asyncio
 import sqlite3
@@ -28,6 +28,7 @@ from app.ai.llm_runtime_reload import (
 from app.db.models import YoutubeVideo
 from app.db.repository import (
     get_latest_ai_signals,
+    get_latest_intel_digest,
     get_latest_market_metrics,
     get_latest_ohlcv,
     get_recent_funding_snapshots_for_symbol,
@@ -39,6 +40,7 @@ from app.db.repository import (
     list_ai_analysis_failures,
     list_alerts,
     list_recent_ohlcv,
+    list_news_items,
     list_youtube_channels,
     list_youtube_videos,
 )
@@ -627,6 +629,19 @@ def overview_page(request: Request, db: Session = Depends(get_db)):
             }
         yt_videos = list_youtube_videos(db, limit=10)
 
+    intel_digest = None
+    if settings.intel_enabled:
+        intel_digest_row = get_latest_intel_digest(
+            db,
+            symbol="GLOBAL",
+            lookback_hours=settings.intel_digest_lookback_hours,
+        )
+        if intel_digest_row is not None:
+            intel_digest = {
+                "data": intel_digest_row.digest_json or {},
+                "created_at": intel_digest_row.created_at,
+            }
+
     return templates.TemplateResponse(
         "overview.html",
         {
@@ -637,11 +652,38 @@ def overview_page(request: Request, db: Session = Depends(get_db)):
             "yt_consensus": yt_consensus,
             "yt_videos": yt_videos,
             "youtube_enabled": settings.youtube_enabled,
+            "intel_enabled": settings.intel_enabled,
+            "intel_digest": intel_digest,
             "model_registry": settings.llm_model_registry,
             "model_catalog": settings.llm_model_catalog,
             "model_tiers": settings.llm_model_tiers,
             "default_model": settings.resolve_llm_config("market").model,
             "generated_at": datetime.now(timezone.utc),
+        },
+    )
+
+
+@router.get("/intel", response_class=HTMLResponse)
+def intel_page(request: Request, db: Session = Depends(get_db)):
+    digest_row = get_latest_intel_digest(
+        db,
+        symbol="GLOBAL",
+        lookback_hours=settings.intel_digest_lookback_hours,
+    )
+    news_rows = list_news_items(
+        db,
+        last_hours=settings.intel_digest_lookback_hours,
+        limit=min(500, max(50, settings.intel_max_items_per_run * 3)),
+    )
+    return templates.TemplateResponse(
+        "intel.html",
+        {
+            "request": request,
+            "digest": (digest_row.digest_json or {}) if digest_row else {},
+            "digest_created_at": (digest_row.created_at if digest_row else None),
+            "items": news_rows,
+            "generated_at": datetime.now(timezone.utc),
+            "intel_enabled": settings.intel_enabled,
         },
     )
 
@@ -662,6 +704,61 @@ def alerts_page(request: Request, db: Session = Depends(get_db)):
 @router.get("/api/market")
 def market_api(db: Session = Depends(get_db)):
     return {"items": _build_market_snapshots(db)}
+
+
+@router.get("/api/intel/news")
+def intel_news_api(
+    last_hours: int = Query(default=24, ge=1, le=168),
+    category: str | None = Query(default=None),
+    severity_min: int | None = Query(default=None, ge=0, le=100),
+    limit: int = Query(default=200, ge=1, le=500),
+    db: Session = Depends(get_db),
+):
+    rows = list_news_items(
+        db,
+        last_hours=last_hours,
+        category=category,
+        severity_min=severity_min,
+        limit=limit,
+    )
+    return {
+        "items": [
+            {
+                "id": row.id,
+                "ts_utc": row.ts_utc,
+                "source": row.source,
+                "category": row.category,
+                "title": row.title,
+                "url": row.url,
+                "summary": row.summary,
+                "region": row.region,
+                "topics": row.topics_json or [],
+                "alert_keyword": row.alert_keyword,
+                "severity": row.severity,
+                "entities": row.entities_json or [],
+            }
+            for row in rows
+        ]
+    }
+
+
+@router.get("/api/intel/digest")
+def intel_digest_api(db: Session = Depends(get_db)):
+    row = get_latest_intel_digest(
+        db,
+        symbol="GLOBAL",
+        lookback_hours=settings.intel_digest_lookback_hours,
+    )
+    return {
+        "item": {
+            "symbol": row.symbol,
+            "lookback_hours": row.lookback_hours,
+            "digest": row.digest_json or {},
+            "created_at": row.created_at,
+        }
+        if row
+        else None
+    }
 
 
 @router.get("/api/alerts")
@@ -2226,6 +2323,12 @@ def _build_market_ai_symbol_inputs(
 
     funding_current = funding_current_by_symbol.get(symbol)
     funding_history = get_recent_funding_snapshots_for_symbol(db, symbol=symbol, limit=72)
+    intel_digest_row = get_latest_intel_digest(
+        db,
+        symbol="GLOBAL",
+        lookback_hours=settings.intel_digest_lookback_hours,
+    )
+    intel_digest_payload = intel_digest_row.digest_json if intel_digest_row and isinstance(intel_digest_row.digest_json, dict) else None
 
     youtube_consensus = None
     youtube_insights = []
@@ -2249,6 +2352,7 @@ def _build_market_ai_symbol_inputs(
         funding_history=funding_history,
         youtube_consensus=youtube_consensus,
         youtube_insights=youtube_insights,
+        intel_digest=intel_digest_payload,
         expected_timeframes=["4h", "1h", "15m", "5m", "1m"],
     )
     return snapshots, context

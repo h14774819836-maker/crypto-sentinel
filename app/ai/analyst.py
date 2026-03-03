@@ -745,6 +745,7 @@ class MarketAnalyst:
                 "alerts_digest": (context or {}).get("alerts_digest") if isinstance(context, dict) else {},
                 # Keep this for anchor compatibility: model occasionally emits facts.youtube_radar.* anchors.
                 "youtube_radar": (context or {}).get("youtube_radar") if isinstance(context, dict) else {},
+                "intel_digest": (context or {}).get("intel_digest") if isinstance(context, dict) else {},
                 "data_quality": (context or {}).get("data_quality") if isinstance(context, dict) else {},
                 "input_budget_meta": (context or {}).get("input_budget_meta") if isinstance(context, dict) else {},
             }
@@ -1085,6 +1086,7 @@ def attach_context_digest_to_analysis_json(
             "missing_timeframes": list(data_quality.get("missing_timeframes") or []),
             "funding_stale": data_quality.get("funding_stale"),
             "youtube_stale": data_quality.get("youtube_stale"),
+            "intel_stale": data_quality.get("intel_stale"),
             "alerts_burst": data_quality.get("alerts_burst"),
             "notes": list(data_quality.get("notes") or [])[:5],
         }
@@ -1094,6 +1096,8 @@ def attach_context_digest_to_analysis_json(
         context_digest["input_budget_meta"] = {
             "youtube_radar_chars_before_clip": input_budget_meta.get("youtube_radar_chars_before_clip"),
             "youtube_radar_chars_after_clip": input_budget_meta.get("youtube_radar_chars_after_clip"),
+            "intel_digest_chars_before_clip": input_budget_meta.get("intel_digest_chars_before_clip"),
+            "intel_digest_chars_after_clip": input_budget_meta.get("intel_digest_chars_after_clip"),
             "alerts_digest_chars": input_budget_meta.get("alerts_digest_chars"),
             "clip_steps_applied": list(input_budget_meta.get("clip_steps_applied") or [])[:8],
         }
@@ -1103,6 +1107,16 @@ def attach_context_digest_to_analysis_json(
         context_digest["tradeable_gate"] = {
             "tradeable": tradeable_gate.get("tradeable"),
             "reasons": list(tradeable_gate.get("reasons") or [])[:5],
+        }
+
+    intel_digest = context.get("intel_digest")
+    if isinstance(intel_digest, dict):
+        context_digest["intel_digest"] = {
+            "risk_temperature": intel_digest.get("risk_temperature"),
+            "high_risk_count": intel_digest.get("high_risk_count"),
+            "total_items": intel_digest.get("total_items"),
+            "top_narratives": list(intel_digest.get("top_narratives") or [])[:3],
+            "main_characters": list(intel_digest.get("main_characters") or [])[:3],
         }
 
     if context_digest:

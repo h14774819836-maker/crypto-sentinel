@@ -57,6 +57,7 @@ def build_analysis_prompt(
     }
     external_views = {
         "youtube_radar": context.get("youtube_radar") or {"available": False},
+        "intel_digest": context.get("intel_digest") or {"available": False},
     }
 
     schema = {

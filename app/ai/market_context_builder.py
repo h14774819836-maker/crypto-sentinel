@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 import math
@@ -11,6 +11,7 @@ EXPECTED_TFS_DEFAULT = ["4h", "1h", "15m", "5m", "1m"]
 
 YOUTUBE_RADAR_MAX_CHARS = 2600
 ALERTS_DIGEST_MAX_CHARS = 1000
+INTEL_DIGEST_MAX_CHARS = 1800
 
 
 def build_market_analysis_context(
@@ -22,6 +23,7 @@ def build_market_analysis_context(
     funding_history: list[Any] | None = None,
     youtube_consensus: Any | None = None,
     youtube_insights: list[Any] | None = None,
+    intel_digest: dict[str, Any] | None = None,
     now: datetime | None = None,
     expected_timeframes: list[str] | None = None,
 ) -> dict[str, Any]:
@@ -47,12 +49,13 @@ def build_market_analysis_context(
         youtube_insights=youtube_insights or [],
         now=now,
     )
-    input_budget_meta = _apply_context_clipping(alerts_digest, youtube_radar)
+    input_budget_meta = _apply_context_clipping(alerts_digest, youtube_radar, intel_digest or {})
     data_quality = _build_data_quality(
         snapshots=snapshots,
         funding_current=funding_current,
         youtube_radar=youtube_radar,
         alerts_digest=alerts_digest,
+        intel_digest=intel_digest or {},
         now=now,
         expected_timeframes=expected_tfs,
     )
@@ -67,6 +70,7 @@ def build_market_analysis_context(
         "brief": brief,
         "alerts_digest": alerts_digest,
         "youtube_radar": youtube_radar,
+        "intel_digest": intel_digest or {},
         "funding_deltas": funding_deltas,
         "data_quality": data_quality,
         "input_budget_meta": input_budget_meta,
@@ -440,7 +444,11 @@ def _build_youtube_radar(
     }
 
 
-def _apply_context_clipping(alerts_digest: dict[str, Any], youtube_radar: dict[str, Any]) -> dict[str, Any]:
+def _apply_context_clipping(
+    alerts_digest: dict[str, Any],
+    youtube_radar: dict[str, Any],
+    intel_digest: dict[str, Any],
+) -> dict[str, Any]:
     clip_steps: list[str] = []
 
     if isinstance(alerts_digest.get("top_events"), list):
@@ -507,9 +515,28 @@ def _apply_context_clipping(alerts_digest: dict[str, Any], youtube_radar: dict[s
         clip_steps.append("youtube:drop_risk_notes")
         after = len(json.dumps(youtube_radar, ensure_ascii=False, separators=(",", ":")))
 
+    intel_before = len(json.dumps(intel_digest, ensure_ascii=False, separators=(",", ":")))
+    intel_after = intel_before
+    if intel_after > INTEL_DIGEST_MAX_CHARS:
+        intel_digest["top_narratives"] = list(intel_digest.get("top_narratives") or [])[:3]
+        intel_digest["main_characters"] = list(intel_digest.get("main_characters") or [])[:3]
+        intel_digest["top_topics"] = list(intel_digest.get("top_topics") or [])[:4]
+        clip_steps.append("intel:top_lists_trimmed")
+        intel_after = len(json.dumps(intel_digest, ensure_ascii=False, separators=(",", ":")))
+    if intel_after > INTEL_DIGEST_MAX_CHARS:
+        intel_digest["top_regions"] = list(intel_digest.get("top_regions") or [])[:3]
+        clip_steps.append("intel:regions_trimmed")
+        intel_after = len(json.dumps(intel_digest, ensure_ascii=False, separators=(",", ":")))
+    if intel_after > INTEL_DIGEST_MAX_CHARS:
+        intel_digest["top_narratives"] = []
+        clip_steps.append("intel:drop_narratives")
+        intel_after = len(json.dumps(intel_digest, ensure_ascii=False, separators=(",", ":")))
+
     return {
         "youtube_radar_chars_before_clip": before,
         "youtube_radar_chars_after_clip": after,
+        "intel_digest_chars_before_clip": intel_before,
+        "intel_digest_chars_after_clip": intel_after,
         "clip_steps_applied": clip_steps,
         "alerts_digest_chars": alerts_chars,
     }
@@ -521,6 +548,7 @@ def _build_data_quality(
     funding_current: dict[str, Any] | None,
     youtube_radar: dict[str, Any],
     alerts_digest: dict[str, Any],
+    intel_digest: dict[str, Any],
     now: datetime,
     expected_timeframes: list[str],
 ) -> dict[str, Any]:
@@ -563,6 +591,10 @@ def _build_data_quality(
         funding_stale = (now - funding_ts).total_seconds() > 2 * 3600
 
     youtube_stale = bool(youtube_radar.get("stale", True))
+    intel_generated_at = _coerce_datetime(intel_digest.get("generated_at")) if isinstance(intel_digest, dict) else None
+    intel_stale = True
+    if intel_generated_at:
+        intel_stale = (now - intel_generated_at).total_seconds() > 6 * 3600
     alerts_burst = bool(alerts_digest.get("alerts_burst", False))
 
     overall = "GOOD"
@@ -576,7 +608,7 @@ def _build_data_quality(
         or (isinstance(snapshot_age_sec.get("4h"), int) and snapshot_age_sec["4h"] > 24 * 3600)
     ):
         overall = "POOR"
-    elif missing or funding_stale or youtube_stale or stale_timeframes:
+    elif missing or funding_stale or youtube_stale or intel_stale or stale_timeframes:
         overall = "DEGRADED"
 
     if missing:
@@ -599,6 +631,8 @@ def _build_data_quality(
             notes.append(f"YouTube 共识较旧{lag_text}")
         else:
             notes.append("YouTube 共识较旧或缺失")
+    if intel_stale:
+        notes.append("Intel 摘要较旧或缺失")
     if alerts_burst:
         notes.append("近期告警密集，噪声风险上升")
 
@@ -608,6 +642,7 @@ def _build_data_quality(
         "missing_timeframes": missing,
         "funding_stale": funding_stale,
         "youtube_stale": youtube_stale,
+        "intel_stale": intel_stale,
         "youtube_has_newer_insights": bool(youtube_radar.get("fresh_content_after_consensus")),
         "alerts_burst": alerts_burst,
         "overall": overall,

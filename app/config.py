@@ -372,6 +372,13 @@ class Settings(BaseSettings):
     youtube_auth_auto_recover_batch: int = Field(default=20, alias="YOUTUBE_AUTH_AUTO_RECOVER_BATCH")
     youtube_auth_auto_recover_max_attempts: int = Field(default=2, alias="YOUTUBE_AUTH_AUTO_RECOVER_MAX_ATTEMPTS")
 
+    # Intel / News
+    intel_enabled: bool = Field(default=False, alias="INTEL_ENABLED")
+    intel_poll_seconds: int = Field(default=900, alias="INTEL_POLL_SECONDS")
+    intel_digest_poll_seconds: int = Field(default=300, alias="INTEL_DIGEST_POLL_SECONDS")
+    intel_max_items_per_run: int = Field(default=200, alias="INTEL_MAX_ITEMS_PER_RUN")
+    intel_digest_lookback_hours: int = Field(default=24, alias="INTEL_DIGEST_LOOKBACK_HOURS")
+
     # ASR (Local)
     asr_enabled: bool = Field(default=False, alias="ASR_ENABLED")
     asr_backend: str = Field(default="local_faster_whisper", alias="ASR_BACKEND")

@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from app.db.models import (
     AiSignal, AlertEvent, AnomalyState, FundingSnapshot, MarketMetric, Ohlcv, WorkerStatus,
     YoutubeChannel, YoutubeConsensus, YoutubeInsight, YoutubeVideo, LlmCall,
+    NewsItem, IntelDigestCache,
 )
 
 YOUTUBE_ANALYSIS_RUNTIME_STALE_SECONDS = 20 * 60
@@ -513,6 +514,82 @@ def get_recent_funding_snapshots_for_symbol(
     )
     rows.reverse()
     return rows
+
+
+# --------------- Intel / News ---------------
+
+
+def upsert_news_item(session: Session, payload: dict[str, Any], commit: bool = True) -> None:
+    values = {**payload, "updated_at": datetime.now(timezone.utc)}
+    if "created_at" not in values:
+        values["created_at"] = datetime.now(timezone.utc)
+    stmt = _upsert_stmt(
+        session,
+        NewsItem,
+        values,
+        conflict_cols=["url_hash"],
+        update_cols=[
+            "ts_utc",
+            "source",
+            "category",
+            "title",
+            "title_hash",
+            "url",
+            "summary",
+            "raw_text",
+            "region",
+            "topics_json",
+            "alert_keyword",
+            "severity",
+            "entities_json",
+            "metadata_json",
+            "updated_at",
+        ],
+    )
+    session.execute(stmt)
+    if commit:
+        session.commit()
+
+
+def list_news_items(
+    session: Session,
+    *,
+    last_hours: int = 24,
+    category: str | None = None,
+    severity_min: int | None = None,
+    limit: int = 200,
+) -> list[NewsItem]:
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=max(1, int(last_hours)))
+    stmt = select(NewsItem).where(NewsItem.ts_utc >= cutoff)
+    if category:
+        stmt = stmt.where(NewsItem.category == category)
+    if severity_min is not None:
+        stmt = stmt.where(NewsItem.severity >= int(severity_min))
+    stmt = stmt.order_by(NewsItem.ts_utc.desc()).limit(max(1, int(limit)))
+    return list(session.scalars(stmt))
+
+
+def save_intel_digest(session: Session, payload: dict[str, Any], commit: bool = True) -> None:
+    values = {**payload}
+    if "created_at" not in values:
+        values["created_at"] = datetime.now(timezone.utc)
+    row = IntelDigestCache(**values)
+    session.add(row)
+    if commit:
+        session.commit()
+
+
+def get_latest_intel_digest(
+    session: Session,
+    *,
+    symbol: str = "GLOBAL",
+    lookback_hours: int | None = None,
+) -> IntelDigestCache | None:
+    stmt = select(IntelDigestCache).where(IntelDigestCache.symbol == symbol)
+    if lookback_hours is not None:
+        stmt = stmt.where(IntelDigestCache.lookback_hours == int(lookback_hours))
+    stmt = stmt.order_by(IntelDigestCache.created_at.desc()).limit(1)
+    return session.scalars(stmt).first()
 
 
 # --------------- Multi-TF helpers ---------------
