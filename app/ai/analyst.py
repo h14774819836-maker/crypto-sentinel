@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 import re
@@ -10,7 +10,8 @@ from typing import Any, Awaitable, Callable
 from app.ai.provider import LLMProvider, LLMRateLimitError, LLMTimeoutError
 from app.ai.prompts import SYSTEM_PROMPT, build_analysis_prompt
 from app.config import LLMConfig, Settings
-from app.logging import logger
+from app.ai.grounding.engine import DEFAULT_GROUNDING_MODE, GroundingEngine, build_facts_index, finding_to_dict
+from app.logging import logger, market_ai_logger
 
 
 @dataclass(slots=True)
@@ -46,6 +47,8 @@ class MarketAnalyst:
             type(self.provider).__name__,
             self.config.use_reasoning,
         )
+        self._prompt_log_max_chars = max(500, int(getattr(settings, "market_ai_prompt_log_max_chars", 12000) or 12000))
+        self._response_log_max_chars = max(500, int(getattr(settings, "market_ai_response_log_max_chars", 8000) or 8000))
 
     async def analyze(
         self,
@@ -58,6 +61,7 @@ class MarketAnalyst:
         """Run a full analysis cycle for one symbol and return parsed trade signals + tracking metadata."""
         if not snapshots:
             logger.warning("AI analysis skipped: no market snapshots for %s", symbol)
+            self._log_market_event("skip_no_snapshots", symbol=symbol)
             return [], None
 
         user_prompt = build_analysis_prompt(symbol=symbol, snapshots=snapshots, context=context)
@@ -66,6 +70,17 @@ class MarketAnalyst:
             self.model,
             symbol,
             user_prompt,
+        )
+        self._log_market_event(
+            "request_prepared",
+            symbol=symbol,
+            model=self.model,
+            provider=self.config.provider,
+            use_reasoning=self.config.use_reasoning,
+            snapshot_timeframes=sorted(list((snapshots or {}).keys())),
+            prompt_chars=len(user_prompt),
+            prompt_excerpt=_clip_text(user_prompt, self._prompt_log_max_chars),
+            system_prompt_excerpt=_clip_text(SYSTEM_PROMPT, min(3000, self._prompt_log_max_chars)),
         )
 
         messages = [
@@ -101,6 +116,13 @@ class MarketAnalyst:
             attempt = int(attempt_spec["attempt"])
             req_model = str(attempt_spec["model"] or self.model)
             attempt_reasoning = bool(attempt_spec["use_reasoning"])
+            self._log_market_event(
+                "attempt_started",
+                symbol=symbol,
+                attempt=attempt,
+                requested_model=req_model,
+                reasoning=attempt_reasoning,
+            )
             model_attempts.append(
                 {
                     "attempt": attempt,
@@ -122,6 +144,14 @@ class MarketAnalyst:
                 status = "429"
                 error_summary = str(exc)
                 logger.error("LLM RateLimit error (attempt=%s, model=%s): %s", attempt, req_model, exc)
+                self._log_market_event(
+                    "upstream_error",
+                    symbol=symbol,
+                    attempt=attempt,
+                    requested_model=req_model,
+                    error_type="LLMRateLimitError",
+                    error=str(exc),
+                )
                 failure_events.append(
                     self._build_failure_event(
                         symbol=symbol,
@@ -140,6 +170,14 @@ class MarketAnalyst:
                 status = "timeout"
                 error_summary = str(exc)
                 logger.error("LLM Timeout error (attempt=%s, model=%s): %s", attempt, req_model, exc)
+                self._log_market_event(
+                    "upstream_error",
+                    symbol=symbol,
+                    attempt=attempt,
+                    requested_model=req_model,
+                    error_type="LLMTimeoutError",
+                    error=str(exc),
+                )
                 failure_events.append(
                     self._build_failure_event(
                         symbol=symbol,
@@ -158,6 +196,14 @@ class MarketAnalyst:
                 status = "error"
                 error_summary = str(exc)
                 logger.error("LLM API call failed (attempt=%s, model=%s): %s", attempt, req_model, exc)
+                self._log_market_event(
+                    "upstream_error",
+                    symbol=symbol,
+                    attempt=attempt,
+                    requested_model=req_model,
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                )
                 failure_events.append(
                     self._build_failure_event(
                         symbol=symbol,
@@ -191,10 +237,29 @@ class MarketAnalyst:
                 completion_tokens,
             )
             logger.debug("LLM raw content: %s", str(content)[:800])
+            self._log_market_event(
+                "response_received",
+                symbol=symbol,
+                attempt=attempt,
+                requested_model=req_model,
+                actual_model=actual_model,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                content_chars=len(str(content or "")),
+                content_excerpt=_clip_text(str(content or ""), self._response_log_max_chars),
+                reasoning_excerpt=_clip_text(str(reasoning_content or ""), min(3000, self._response_log_max_chars)),
+            )
 
             parsed, failure = self._parse_response_strict(content, symbol=symbol, snapshots=snapshots, context=context)
             if parsed:
                 final_signals = parsed
+                self._log_market_event(
+                    "attempt_succeeded",
+                    symbol=symbol,
+                    attempt=attempt,
+                    actual_model=actual_model,
+                    signal_count=len(parsed),
+                )
                 break
 
             if not failure:
@@ -214,9 +279,24 @@ class MarketAnalyst:
                     details={"errors": errors},
                 )
             )
+            self._log_market_event(
+                "attempt_failed",
+                symbol=symbol,
+                attempt=attempt,
+                phase=phase,
+                errors=errors[:8],
+                raw_excerpt=_clip_text(str(failure.get("raw_response_excerpt") or ""), 2000),
+            )
 
             if attempt == 1 and phase in retryable_failure_phases:
                 logger.warning("Market analysis parse/validation failed on attempt#1, retrying once (symbol=%s, phase=%s)", symbol, phase)
+                self._log_market_event(
+                    "retry_scheduled",
+                    symbol=symbol,
+                    attempt=attempt,
+                    phase=phase,
+                    next_model=retry_model,
+                )
                 continue
             break
 
@@ -249,6 +329,16 @@ class MarketAnalyst:
                 sig.completion_tokens = completion_tokens
 
         duration_ms = int((time.perf_counter() - start_time) * 1000)
+        self._log_market_event(
+            "analysis_finished",
+            symbol=symbol,
+            status=status,
+            duration_ms=duration_ms,
+            attempts=len(model_attempts),
+            failure_count=len(failure_events),
+            final_model=actual_model,
+            error_summary=error_summary,
+        )
         return final_signals, {
             "task": "market",
             "provider_name": type(self.provider).__name__,
@@ -559,51 +649,84 @@ class MarketAnalyst:
         snapshots: dict[str, Any],
         context: dict[str, Any] | None,
     ) -> list[str]:
-        errors: list[str] = []
         facts = self._build_grounding_facts(symbol=symbol, snapshots=snapshots, context=context)
-        numeric_facts = _collect_numeric_facts(facts)
+        facts_index = build_facts_index(facts)
+        mode = str(getattr(self.settings, "grounding_mode", DEFAULT_GROUNDING_MODE) or DEFAULT_GROUNDING_MODE)
+        severe_multiplier = float(getattr(self.settings, "grounding_severe_multiplier", 3.0) or 3.0)
 
-        anchors = data.get("anchors") or []
-        if isinstance(anchors, list):
-            for idx, anchor in enumerate(anchors):
-                if not isinstance(anchor, dict):
-                    continue
-                path = str(anchor.get("path") or "")
-                value = anchor.get("value")
-                ok, actual = _resolve_dot_path(facts, path)
-                resolved_path = path
-                if (not ok) and path and not path.startswith("facts."):
-                    resolved_path = f"facts.{path}"
-                    ok, actual = _resolve_dot_path(facts, resolved_path)
-                if not ok:
-                    errors.append(f"anchors[{idx}] path 不存在: {path}")
-                    continue
-                if isinstance(actual, (dict, list, tuple, set)):
-                    errors.append(f"anchors[{idx}] path 必须指向标量: {path}")
-                    continue
-                expected = _scalar_ground_str(actual)
-                if not isinstance(value, str) or value != expected:
-                    errors.append(
-                        f"anchors[{idx}] value 不匹配: path={resolved_path}, expected={expected}, got={value}"
-                    )
+        result = GroundingEngine().validate(
+            data=data,
+            facts=facts,
+            facts_index=facts_index,
+            mode=mode,
+            severe_multiplier=severe_multiplier,
+        )
 
-        evidence = data.get("evidence") or []
-        if isinstance(evidence, list):
-            for ev_idx, ev in enumerate(evidence):
-                if not isinstance(ev, dict):
-                    continue
-                metrics = ev.get("metrics")
-                if not isinstance(metrics, dict):
-                    continue
-                for name, metric_val in metrics.items():
-                    num = _safe_float(metric_val)
-                    if num is None:
-                        # Keep schema permissive for categorical metrics (e.g., trend labels).
-                        continue
-                    canonical = _canonical_num(num)
-                    if canonical not in numeric_facts:
-                        errors.append(f"evidence[{ev_idx}].metrics.{name} 数值未在事实源中找到: {metric_val}")
-        return errors
+        grounding_validation_payload = {
+            "mode": mode,
+            "score": round(result.score, 2),
+            "score_breakdown": result.score_breakdown,
+            "hard_error_count": len(result.hard_errors),
+            "warning_count": len(result.warnings),
+            "stats": result.stats,
+            "hard_errors": [finding_to_dict(item) for item in result.hard_errors[:8]],
+            "top_warnings": [item.message for item in result.warnings[:5]],
+            "warnings": [finding_to_dict(item) for item in result.warnings[:12]],
+        }
+        retry_blocking_hard = [item for item in result.hard_errors if _is_retry_blocking_grounding_finding(item)]
+        non_blocking_hard = [item for item in result.hard_errors if not _is_retry_blocking_grounding_finding(item)]
+        grounding_validation_payload["retry_blocking_error_count"] = len(retry_blocking_hard)
+        grounding_validation_payload["non_blocking_hard_error_count"] = len(non_blocking_hard)
+        grounding_validation_payload["retry_blocking_codes"] = [item.code for item in retry_blocking_hard[:8]]
+        grounding_validation_payload["non_blocking_hard_codes"] = [item.code for item in non_blocking_hard[:8]]
+        validation = data.setdefault("validation", {})
+        if isinstance(validation, dict):
+            validation["grounding"] = grounding_validation_payload
+
+        notes = data.get("validation_notes")
+        if not isinstance(notes, list):
+            notes = []
+            data["validation_notes"] = notes
+        existing_notes = {str(item) for item in notes if isinstance(item, str)}
+        for warning in result.warnings[:5]:
+            if warning.message not in existing_notes:
+                notes.append(warning.message)
+                existing_notes.add(warning.message)
+        for hard in non_blocking_hard[:5]:
+            note = f"[grounding_non_blocking] {hard.message}"
+            if note not in existing_notes:
+                notes.append(note)
+                existing_notes.add(note)
+
+        self._log_market_event(
+            "grounding_evaluated",
+            symbol=symbol,
+            mode=mode,
+            score=round(result.score, 2),
+            hard_error_count=len(result.hard_errors),
+            warning_count=len(result.warnings),
+            hard_codes=[item.code for item in result.hard_errors[:8]],
+            retry_blocking_codes=[item.code for item in retry_blocking_hard[:8]],
+            non_blocking_hard_codes=[item.code for item in non_blocking_hard[:8]],
+            warning_codes=[item.code for item in result.warnings[:12]],
+            hard_messages=[item.message for item in result.hard_errors[:5]],
+            top_warnings=[item.message for item in result.warnings[:5]],
+            score_breakdown=result.score_breakdown,
+        )
+
+        return [item.message for item in retry_blocking_hard]
+
+    def _log_market_event(self, event: str, **payload: Any) -> None:
+        base = {
+            "event": event,
+            "task": "market_analysis",
+            "ts": datetime.now(timezone.utc).isoformat(),
+        }
+        base.update(payload)
+        try:
+            market_ai_logger.info("[AI_MARKET] %s", json.dumps(base, ensure_ascii=False, default=str))
+        except Exception:
+            market_ai_logger.info("[AI_MARKET] %s payload_unserializable=%s", event, str(payload)[:800])
 
     def _build_grounding_facts(
         self,
@@ -620,6 +743,8 @@ class MarketAnalyst:
                 "brief": (context or {}).get("brief") if isinstance(context, dict) else {},
                 "funding_deltas": (context or {}).get("funding_deltas") if isinstance(context, dict) else {},
                 "alerts_digest": (context or {}).get("alerts_digest") if isinstance(context, dict) else {},
+                # Keep this for anchor compatibility: model occasionally emits facts.youtube_radar.* anchors.
+                "youtube_radar": (context or {}).get("youtube_radar") if isinstance(context, dict) else {},
                 "data_quality": (context or {}).get("data_quality") if isinstance(context, dict) else {},
                 "input_budget_meta": (context or {}).get("input_budget_meta") if isinstance(context, dict) else {},
             }
@@ -636,6 +761,7 @@ class MarketAnalyst:
             "scenarios": data.get("scenarios") if isinstance(data.get("scenarios"), dict) else {},
             "validation_notes": data.get("validation_notes") if isinstance(data.get("validation_notes"), list) else [],
             "youtube_reflection": data.get("youtube_reflection") if isinstance(data.get("youtube_reflection"), dict) else {},
+            "validation": data.get("validation") if isinstance(data.get("validation"), dict) else {},
         }
         # Preserve any extra keys for future evolution/debugging
         extra = {k: v for k, v in data.items() if k not in payload}
@@ -860,54 +986,6 @@ def _extract_message_text(message: Any) -> str:
 
 
 
-def _canonical_num(value: float | int) -> str:
-    return format(float(value), ".15g")
-
-
-def _collect_numeric_facts(data: Any) -> set[str]:
-    out: set[str] = set()
-
-    def _walk(node: Any) -> None:
-        if isinstance(node, bool) or node is None:
-            return
-        if isinstance(node, (int, float)):
-            out.add(_canonical_num(node))
-            return
-        if isinstance(node, dict):
-            for v in node.values():
-                _walk(v)
-            return
-        if isinstance(node, (list, tuple, set)):
-            for v in node:
-                _walk(v)
-
-    _walk(data)
-    return out
-
-
-def _resolve_dot_path(payload: dict[str, Any], path: str) -> tuple[bool, Any]:
-    if not isinstance(path, str) or not path.strip():
-        return False, None
-    current: Any = payload
-    for seg in path.split("."):
-        if isinstance(current, dict):
-            if seg not in current:
-                return False, None
-            current = current.get(seg)
-            continue
-        if isinstance(current, list):
-            try:
-                idx = int(seg)
-            except ValueError:
-                return False, None
-            if idx < 0 or idx >= len(current):
-                return False, None
-            current = current[idx]
-            continue
-        return False, None
-    return True, current
-
-
 def _extract_first_balanced_json_object(text: str, start_index: int = 0) -> str | None:
     depth = 0
     obj_start = -1
@@ -941,18 +1019,6 @@ def _extract_first_balanced_json_object(text: str, start_index: int = 0) -> str 
     return None
 
 
-def _scalar_ground_str(value: Any) -> str:
-    if value is None:
-        return "null"
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    if isinstance(value, (int, float)):
-        return _canonical_num(value)
-    if isinstance(value, str):
-        return value
-    return str(value)
-
-
 def _safe_float(value: Any) -> float | None:
     if value is None:
         return None
@@ -960,6 +1026,44 @@ def _safe_float(value: Any) -> float | None:
         return float(value)
     except (ValueError, TypeError):
         return None
+
+
+def _clip_text(text: str, max_chars: int) -> str:
+    if not isinstance(text, str):
+        text = str(text)
+    if max_chars <= 0:
+        return ""
+    if len(text) <= max_chars:
+        return text
+    remain = len(text) - max_chars
+    return text[:max_chars] + f"...(truncated {remain} chars)"
+
+
+def _is_retry_blocking_grounding_finding(finding: Any) -> bool:
+    code = str(getattr(finding, "code", "") or "")
+    path = str(getattr(finding, "path", "") or "")
+    message = str(getattr(finding, "message", "") or "")
+    token = code.upper()
+
+    # Known noisy case: external-view anchor path should not force full retry.
+    combined = f"{path} {message}".lower()
+    if token == "ANCHOR_PATH_MISSING" and "youtube_radar" in combined:
+        return False
+
+    retry_prefixes = {
+        "ANCHOR_PATH_",
+        "ANCHOR_VALUE_",
+        "EVIDENCE_METRIC_OUT_OF_TOL",
+        "METRIC_OUT_OF_RANGE",
+        "PRICE_NON_POSITIVE",
+        "VOLATILITY_NEGATIVE",
+        "FUNDING_RATE_IMPLAUSIBLE",
+        "ZSCORE_IMPLAUSIBLE",
+    }
+    for prefix in retry_prefixes:
+        if token.startswith(prefix):
+            return True
+    return False
 
 
 def attach_context_digest_to_analysis_json(

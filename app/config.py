@@ -256,6 +256,11 @@ class Settings(BaseSettings):
     app_env: str = Field(default="dev", alias="APP_ENV")
     app_version: str = Field(default="0.1.0", alias="APP_VERSION")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
+    market_ai_log_file: str = Field(default="data/logs/market_ai.log", alias="MARKET_AI_LOG_FILE")
+    market_ai_log_max_bytes: int = Field(default=5_000_000, alias="MARKET_AI_LOG_MAX_BYTES")
+    market_ai_log_backup_count: int = Field(default=5, alias="MARKET_AI_LOG_BACKUP_COUNT")
+    market_ai_prompt_log_max_chars: int = Field(default=12000, alias="MARKET_AI_PROMPT_LOG_MAX_CHARS")
+    market_ai_response_log_max_chars: int = Field(default=8000, alias="MARKET_AI_RESPONSE_LOG_MAX_CHARS")
     timezone: str = Field(default="UTC", alias="TIMEZONE")
 
     database_url: str = Field(default="sqlite:///./data/crypto_sentinel.db", alias="DATABASE_URL")
@@ -312,6 +317,8 @@ class Settings(BaseSettings):
     ai_signal_confidence_threshold: int = Field(default=70, alias="AI_SIGNAL_CONFIDENCE_THRESHOLD")
     ai_history_candles: int = Field(default=50, alias="AI_HISTORY_CANDLES")
     llm_market_temperature: float = Field(default=0.1, alias="LLM_MARKET_TEMPERATURE")
+    grounding_mode: str = Field(default="balanced", alias="GROUNDING_MODE")
+    grounding_severe_multiplier: float = Field(default=3.0, alias="GROUNDING_SEVERE_MULTIPLIER")
 
     # Multi-timeframe
     multi_tf_intervals: str = Field(default="5m,15m,1h,4h", alias="MULTI_TF_INTERVALS")

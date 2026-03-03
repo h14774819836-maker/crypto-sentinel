@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
@@ -115,7 +115,8 @@ def build_analysis_prompt(
         "1. direction=HOLD 时，entry_price/take_profit/stop_loss 这三个字段必须原样输出 null，禁止给 0 或占位符。",
         "2. 当 direction 是 LONG 或 SHORT 时，请务必检验你的止盈止损方向相对入场价数学关系合法。",
         "3. evidence 至少包含 2 条对系统传入指标数据的提炼引用。",
-        "4. anchors 至少包含 2 条；锚定路径 path 必须指向具体参数路径（例如 'facts.brief.tradeable_gate.tradeable'）。",
+        "4. anchors 至少包含 2 条；锚定路径 path 必须指向事实源中的具体标量路径（例如 'facts.brief.tradeable_gate.tradeable'）。",
+        "4.1 anchors 禁止引用观点源路径（例如 youtube_radar.*），仅允许锚定 facts.multi_tf_snapshots / facts.brief / facts.funding_deltas / facts.alerts_digest / facts.data_quality 等事实字段。",
         "5. 如果 context 中的 data_quality.overall 为 POOR，优先 HOLD 观望并输出低置信度（<40）。",
         "6. 在分析期间，将下面提供的“事实源”视为最高优先级数据来源，“观点源”仅作为旁证，发生冲突立即采取降低 confidence 和保守观望处理（同时标识 'conflicted'）。",
         "",
