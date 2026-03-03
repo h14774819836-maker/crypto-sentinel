@@ -104,6 +104,7 @@ sentinel doctor
 | `DEEPSEEK_API_KEY` | DeepSeek 原厂 API 密钥（便宜，适合聊天/轻任务） | 可选 |
 | `OPENROUTER_API_KEY` | OpenRouter API 密钥（适合高级模型/多模型路由） | 可选 |
 | `ARK_API_KEY` | Ark API 密钥（火山引擎 OpenAI-compatible 通道） | 可选 |
+| `NVIDIA_NIM_API_KEY` | NVIDIA NIM API 密钥（VLM/多模态通道） | 可选 |
 | `LLM_PROFILES_JSON` | LLM profile 定义（provider/model/并发/重试） | JSON |
 | `LLM_TASK_ROUTING_JSON` | 任务到 profile 的映射（如 `telegram_chat -> general`） | JSON |
 | `WATCHLIST` | 监控币对 | `BTCUSDT,ETHUSDT,SOLUSDT` |
@@ -125,6 +126,7 @@ sentinel doctor
 DEEPSEEK_API_KEY=your_deepseek_key
 OPENROUTER_API_KEY=your_openrouter_key
 ARK_API_KEY=your_ark_key
+NVIDIA_NIM_API_KEY=your_nvidia_nim_key
 
 LLM_PROFILES_JSON={"general":{"provider":"deepseek","model":"deepseek-chat","use_reasoning":"auto","enabled":true},"market":{"provider":"openrouter","model":"google/gemini-3.1-pro-preview","use_reasoning":"auto","enabled":true},"youtube":{"provider":"deepseek","model":"deepseek-chat","use_reasoning":"auto","enabled":true}}
 LLM_TASK_ROUTING_JSON={"telegram_chat":"general","market":"market","youtube":"youtube","selfcheck":"general"}
@@ -142,6 +144,8 @@ LLM_HOT_RELOAD_ACK_FILE=data/llm_hot_reload_ack.json
 - `provider=deepseek` 会自动使用 `DEEPSEEK_API_KEY` 和 DeepSeek 官方 Base URL
 - `provider=openrouter` 会自动使用 `OPENROUTER_API_KEY` 和 OpenRouter Base URL
 - `provider=ark` 会自动使用 `ARK_API_KEY` 和 `https://ark.cn-beijing.volces.com/api/v3`
+- `provider=nvidia_nim` 会自动使用 `NVIDIA_NIM_API_KEY` 和 `https://integrate.api.nvidia.com/v1`
+- `nvidia_nim/qwen3.5-397b-a17b` 会在请求上游时自动映射为 `qwen/qwen3.5-397b-a17b`
 - 业务代码只按任务取配置（例如 `market` / `youtube` / `telegram_chat`），无需手写 API 地址
 
 ## Telegram 本地交互调试（Polling 模式）

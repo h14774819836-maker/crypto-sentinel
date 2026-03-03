@@ -9,9 +9,25 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
 from app.db.models import (
-    AiSignal, AlertEvent, AnomalyState, FundingSnapshot, MarketMetric, Ohlcv, WorkerStatus,
-    YoutubeChannel, YoutubeConsensus, YoutubeInsight, YoutubeVideo, LlmCall,
-    NewsItem, IntelDigestCache,
+    AiSignal,
+    AlertEvent,
+    AnomalyState,
+    DecisionEval,
+    DecisionExecution,
+    FundingSnapshot,
+    IntelDigestCache,
+    LlmCall,
+    MarketMetric,
+    NewsItem,
+    Ohlcv,
+    StrategyDecision,
+    StrategyFeatureStat,
+    StrategyScore,
+    WorkerStatus,
+    YoutubeChannel,
+    YoutubeConsensus,
+    YoutubeInsight,
+    YoutubeVideo,
 )
 
 YOUTUBE_ANALYSIS_RUNTIME_STALE_SECONDS = 20 * 60
@@ -437,6 +453,8 @@ def insert_ai_signal(session: Session, payload: dict[str, Any], commit: bool = T
     filtered_payload.setdefault("timeframe", "1m")
     signal = AiSignal(**filtered_payload)
     session.add(signal)
+    session.flush()
+    write_decision_from_ai_signal(session, signal, commit=False)
     if commit:
         session.commit()
     return signal
@@ -463,6 +481,587 @@ def get_latest_ai_signals(session: Session, symbols: list[str]) -> list[AiSignal
         if row:
             results.append(row)
     return results
+
+
+# --------------- Strategy Decisions ---------------
+
+def _to_epoch_seconds(dt: datetime | None) -> int | None:
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return int(dt.timestamp())
+
+
+def _to_float_or_none(value: Any) -> float | None:
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _to_int_or_none(value: Any) -> int | None:
+    try:
+        if value is None:
+            return None
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _extract_trade_plan(analysis_json: Any) -> dict[str, Any]:
+    if not isinstance(analysis_json, dict):
+        return {}
+    trade_plan = analysis_json.get("trade_plan")
+    if isinstance(trade_plan, dict):
+        return trade_plan
+    signal = analysis_json.get("signal")
+    if isinstance(signal, dict):
+        return {
+            "entry_mode": "market",
+            "entry_price": signal.get("entry_price"),
+            "take_profit": signal.get("take_profit"),
+            "stop_loss": signal.get("stop_loss"),
+            "capital_alloc_usdt": None,
+            "leverage": None,
+            "margin_mode": None,
+            "expiration_ts_utc": None,
+            "max_hold_bars": None,
+            "liq_price_est": None,
+            "fees_bps_assumption": None,
+            "slippage_bps_assumption": None,
+        }
+    return {}
+
+
+def write_decision_from_ai_signal(session: Session, signal: AiSignal, commit: bool = True) -> StrategyDecision | None:
+    if signal is None or signal.id is None:
+        return None
+
+    analysis_json = getattr(signal, "analysis_json", None)
+    if not isinstance(analysis_json, dict):
+        analysis_json = {}
+    trade_plan = _extract_trade_plan(analysis_json)
+    side = str(getattr(signal, "direction", "HOLD") or "HOLD").upper()
+    if side not in {"LONG", "SHORT", "HOLD"}:
+        side = "HOLD"
+
+    decision_ts = _to_epoch_seconds(getattr(signal, "ts", None) or getattr(signal, "created_at", None))
+    if decision_ts is None:
+        decision_ts = int(datetime.now(timezone.utc).timestamp())
+
+    expiration_ts = _to_int_or_none(trade_plan.get("expiration_ts_utc"))
+    max_hold_bars = _to_int_or_none(trade_plan.get("max_hold_bars"))
+    if expiration_ts is None and (max_hold_bars is None or max_hold_bars <= 0):
+        # Make timeout semantics explicit even for legacy outputs.
+        max_hold_bars = 60
+
+    entry_mode_raw = str(trade_plan.get("entry_mode") or "market").upper()
+    entry_mode = entry_mode_raw if entry_mode_raw in {"MARKET", "LIMIT"} else "MARKET"
+    margin_mode_raw = str(trade_plan.get("margin_mode") or "").upper()
+    margin_mode = margin_mode_raw if margin_mode_raw in {"ISOLATED", "CROSS"} else None
+
+    account_snapshot = trade_plan.get("account_snapshot")
+    if not isinstance(account_snapshot, dict):
+        account_snapshot = {}
+
+    values = {
+        "symbol": str(getattr(signal, "symbol", "") or "").upper(),
+        "exchange": "binance",
+        "market_type": str(trade_plan.get("market_type") or "futures").lower(),
+        "base_timeframe": str(getattr(signal, "timeframe", "1m") or "1m"),
+        "decision_ts": decision_ts,
+        "manifest_id": getattr(signal, "manifest_id", None) or "legacy_unknown",
+        "analysis_id": signal.id,
+        "account_equity": _to_float_or_none(account_snapshot.get("equity")),
+        "capital_alloc": _to_float_or_none(trade_plan.get("capital_alloc_usdt")),
+        "leverage": _to_float_or_none(trade_plan.get("leverage")),
+        "margin_mode": margin_mode,
+        "position_side": side,
+        "qty": _to_float_or_none(trade_plan.get("qty")),
+        "notional": _to_float_or_none(trade_plan.get("notional")),
+        "entry_mode": entry_mode,
+        "entry_price": _to_float_or_none(trade_plan.get("entry_price")) if trade_plan else _to_float_or_none(getattr(signal, "entry_price", None)),
+        "take_profit": _to_float_or_none(trade_plan.get("take_profit")) if trade_plan else _to_float_or_none(getattr(signal, "take_profit", None)),
+        "stop_loss": _to_float_or_none(trade_plan.get("stop_loss")) if trade_plan else _to_float_or_none(getattr(signal, "stop_loss", None)),
+        "expiration_ts": expiration_ts,
+        "max_hold_bars": max_hold_bars,
+        "fee_bps_assumption": _to_float_or_none(trade_plan.get("fees_bps_assumption")),
+        "slippage_bps_assumption": _to_float_or_none(trade_plan.get("slippage_bps_assumption")),
+        "liq_price_est": _to_float_or_none(trade_plan.get("liq_price_est")),
+        "risk_notes": str(trade_plan.get("risk_notes") or "")[:500] or None,
+        "regime_calc_mode": str(((analysis_json.get("meta") or {}).get("regime_calc_mode")) or "online").lower(),
+        "confidence": (
+            max(0.0, min(1.0, float(getattr(signal, "confidence", 0) or 0) / 100.0))
+            if getattr(signal, "confidence", None) is not None
+            else None
+        ),
+        "reason_brief": (str(getattr(signal, "reasoning", "") or "").strip()[:280] or None),
+        "updated_at": datetime.now(timezone.utc),
+    }
+    if values["market_type"] != "futures":
+        values["market_type"] = "futures"
+    if values["regime_calc_mode"] not in {"online", "offline"}:
+        values["regime_calc_mode"] = "online"
+
+    existing = session.scalar(select(StrategyDecision).where(StrategyDecision.analysis_id == signal.id).limit(1))
+    if existing:
+        for k, v in values.items():
+            setattr(existing, k, v)
+        row = existing
+    else:
+        values["created_at"] = datetime.now(timezone.utc)
+        row = StrategyDecision(**values)
+        session.add(row)
+    if commit:
+        session.commit()
+    return row
+
+
+def _serialize_decision_row(decision: StrategyDecision, execution: DecisionExecution | None, eval_row: DecisionEval | None) -> dict[str, Any]:
+    return {
+        "id": decision.id,
+        "symbol": decision.symbol,
+        "exchange": decision.exchange,
+        "market_type": decision.market_type,
+        "base_timeframe": decision.base_timeframe,
+        "decision_ts": decision.decision_ts,
+        "manifest_id": decision.manifest_id,
+        "analysis_id": decision.analysis_id,
+        "position_side": decision.position_side,
+        "entry_mode": decision.entry_mode,
+        "entry_price": decision.entry_price,
+        "take_profit": decision.take_profit,
+        "stop_loss": decision.stop_loss,
+        "expiration_ts": decision.expiration_ts,
+        "max_hold_bars": decision.max_hold_bars,
+        "leverage": decision.leverage,
+        "margin_mode": decision.margin_mode,
+        "capital_alloc": decision.capital_alloc,
+        "fee_bps_assumption": decision.fee_bps_assumption,
+        "slippage_bps_assumption": decision.slippage_bps_assumption,
+        "liq_price_est": decision.liq_price_est,
+        "regime_calc_mode": decision.regime_calc_mode,
+        "confidence": decision.confidence,
+        "reason_brief": decision.reason_brief,
+        "execution": {
+            "status": execution.status,
+            "filled": execution.filled,
+            "filled_ts": execution.filled_ts,
+            "filled_price": execution.filled_price,
+            "filled_qty": execution.filled_qty,
+            "avg_fill_price": execution.avg_fill_price,
+            "source": execution.source,
+            "notes": execution.notes,
+        }
+        if execution
+        else None,
+        "eval": {
+            "eval_replay_tf": eval_row.eval_replay_tf,
+            "intrabar_flag": eval_row.intrabar_flag,
+            "tp_hit": eval_row.tp_hit,
+            "sl_hit": eval_row.sl_hit,
+            "first_hit_ts": eval_row.first_hit_ts,
+            "exit_ts": eval_row.exit_ts,
+            "exit_price": eval_row.exit_price,
+            "outcome_raw": eval_row.outcome_raw,
+            "r_multiple_raw": eval_row.r_multiple_raw,
+            "mfe": eval_row.mfe,
+            "mae": eval_row.mae,
+            "bars_to_outcome": eval_row.bars_to_outcome,
+        }
+        if eval_row
+        else None,
+    }
+
+
+def list_strategy_decisions_raw(
+    session: Session,
+    *,
+    symbol: str,
+    from_ts: int,
+    to_ts: int,
+    manifest_id: str | None = None,
+    side: str | None = None,
+    outcome: str | None = None,
+    regime: str | None = None,
+    cursor: int | None = None,
+    limit: int = 200,
+) -> tuple[list[dict[str, Any]], bool, int | None]:
+    query = (
+        select(StrategyDecision, DecisionExecution, DecisionEval)
+        .outerjoin(DecisionExecution, DecisionExecution.decision_id == StrategyDecision.id)
+        .outerjoin(DecisionEval, DecisionEval.decision_id == StrategyDecision.id)
+        .where(
+            StrategyDecision.symbol == symbol.upper(),
+            StrategyDecision.decision_ts >= int(from_ts),
+            StrategyDecision.decision_ts <= int(to_ts),
+        )
+    )
+    if manifest_id:
+        query = query.where(StrategyDecision.manifest_id == manifest_id)
+    if side:
+        query = query.where(StrategyDecision.position_side == side.upper())
+    if regime:
+        query = query.outerjoin(AiSignal, AiSignal.id == StrategyDecision.analysis_id).where(
+            func.upper(func.coalesce(AiSignal.market_regime, "")) == regime.upper()
+        )
+    if outcome:
+        outcome_u = outcome.upper()
+        if outcome_u == "NO_FILL":
+            query = query.where(
+                or_(
+                    DecisionExecution.status == "NO_FILL",
+                    DecisionEval.outcome_raw == "NO_FILL",
+                )
+            )
+        else:
+            query = query.where(DecisionEval.outcome_raw == outcome_u)
+    if cursor:
+        query = query.where(StrategyDecision.id < int(cursor))
+    query = query.order_by(StrategyDecision.decision_ts.desc(), StrategyDecision.id.desc()).limit(max(1, int(limit)) + 1)
+
+    rows = list(session.execute(query).all())
+    has_more = len(rows) > limit
+    rows = rows[: max(1, int(limit))]
+    next_cursor = rows[-1][0].id if (has_more and rows) else None
+    items = [_serialize_decision_row(decision, execution, eval_row) for decision, execution, eval_row in rows]
+    return items, has_more, next_cursor
+
+
+def list_strategy_decisions_densified(
+    session: Session,
+    *,
+    symbol: str,
+    from_ts: int,
+    to_ts: int,
+    manifest_id: str | None = None,
+    side: str | None = None,
+    outcome: str | None = None,
+    regime: str | None = None,
+    bucket_seconds: int = 900,
+) -> list[dict[str, Any]]:
+    query = (
+        select(StrategyDecision.decision_ts, DecisionExecution.status, DecisionEval.outcome_raw)
+        .outerjoin(DecisionExecution, DecisionExecution.decision_id == StrategyDecision.id)
+        .outerjoin(DecisionEval, DecisionEval.decision_id == StrategyDecision.id)
+        .where(
+            StrategyDecision.symbol == symbol.upper(),
+            StrategyDecision.decision_ts >= int(from_ts),
+            StrategyDecision.decision_ts <= int(to_ts),
+        )
+    )
+    if manifest_id:
+        query = query.where(StrategyDecision.manifest_id == manifest_id)
+    if side:
+        query = query.where(StrategyDecision.position_side == side.upper())
+    if regime:
+        query = query.outerjoin(AiSignal, AiSignal.id == StrategyDecision.analysis_id).where(
+            func.upper(func.coalesce(AiSignal.market_regime, "")) == regime.upper()
+        )
+    if outcome:
+        query = query.where(DecisionEval.outcome_raw == outcome.upper())
+    rows = list(session.execute(query.order_by(StrategyDecision.decision_ts.asc())).all())
+
+    bucket = max(60, int(bucket_seconds))
+    buckets: dict[int, dict[str, Any]] = {}
+    for decision_ts, exec_status, outcome_raw in rows:
+        ts = int(decision_ts)
+        bucket_ts = (ts // bucket) * bucket
+        item = buckets.setdefault(
+            bucket_ts,
+            {
+                "bucket_ts": bucket_ts,
+                "count": 0,
+                "tp": 0,
+                "sl": 0,
+                "ambiguous": 0,
+                "timeout": 0,
+                "no_fill": 0,
+                "open": 0,
+            },
+        )
+        item["count"] += 1
+        if exec_status == "NO_FILL":
+            item["no_fill"] += 1
+            continue
+        out = str(outcome_raw or "OPEN").upper()
+        if out == "TP":
+            item["tp"] += 1
+        elif out == "SL":
+            item["sl"] += 1
+        elif out == "AMBIGUOUS":
+            item["ambiguous"] += 1
+        elif out == "TIMEOUT":
+            item["timeout"] += 1
+        elif out == "NO_FILL":
+            item["no_fill"] += 1
+        else:
+            item["open"] += 1
+    return [buckets[k] for k in sorted(buckets.keys())]
+
+
+def get_strategy_decision_detail(session: Session, decision_id: int) -> dict[str, Any] | None:
+    row = session.execute(
+        select(StrategyDecision, DecisionExecution, DecisionEval)
+        .outerjoin(DecisionExecution, DecisionExecution.decision_id == StrategyDecision.id)
+        .outerjoin(DecisionEval, DecisionEval.decision_id == StrategyDecision.id)
+        .where(StrategyDecision.id == int(decision_id))
+        .limit(1)
+    ).first()
+    if not row:
+        return None
+    decision, execution, eval_row = row
+    return _serialize_decision_row(decision, execution, eval_row)
+
+
+def list_strategy_scores(
+    session: Session,
+    *,
+    manifest_id: str | None = None,
+    split_type: str | None = None,
+    scoring_mode: str | None = None,
+    limit: int = 200,
+) -> list[StrategyScore]:
+    query = select(StrategyScore)
+    if manifest_id:
+        query = query.where(StrategyScore.manifest_id == manifest_id)
+    if split_type:
+        query = query.where(StrategyScore.split_type == split_type.upper())
+    if scoring_mode:
+        query = query.where(StrategyScore.scoring_mode == scoring_mode.upper())
+    query = query.order_by(StrategyScore.window_end_ts.desc(), StrategyScore.id.desc()).limit(max(1, int(limit)))
+    return list(session.scalars(query))
+
+
+def list_strategy_feature_stats(
+    session: Session,
+    *,
+    manifest_id: str | None = None,
+    split_type: str | None = None,
+    scoring_mode: str | None = None,
+    regime_id: str | None = None,
+    status: str | None = None,
+    limit: int = 500,
+) -> list[StrategyFeatureStat]:
+    query = select(StrategyFeatureStat)
+    if manifest_id:
+        query = query.where(StrategyFeatureStat.manifest_id == manifest_id)
+    if split_type:
+        query = query.where(StrategyFeatureStat.split_type == split_type.upper())
+    if scoring_mode:
+        query = query.where(StrategyFeatureStat.scoring_mode == scoring_mode.upper())
+    if regime_id:
+        query = query.where(StrategyFeatureStat.regime_id == regime_id)
+    if status:
+        query = query.where(StrategyFeatureStat.status == status.upper())
+    query = query.order_by(StrategyFeatureStat.n.desc(), StrategyFeatureStat.id.desc()).limit(max(1, int(limit)))
+    return list(session.scalars(query))
+
+
+def list_manifest_ids_for_strategy(session: Session, *, limit: int = 1000) -> list[str]:
+    rows = session.execute(
+        select(StrategyDecision.manifest_id)
+        .where(StrategyDecision.manifest_id.is_not(None))
+        .group_by(StrategyDecision.manifest_id)
+        .order_by(func.max(StrategyDecision.decision_ts).desc())
+        .limit(max(1, int(limit)))
+    ).all()
+    return [str(r[0]) for r in rows if r and r[0]]
+
+
+def list_strategy_decisions_for_eval(
+    session: Session,
+    *,
+    limit: int = 200,
+) -> list[tuple[StrategyDecision, DecisionExecution | None, DecisionEval | None]]:
+    expiry_expr = func.coalesce(
+        StrategyDecision.expiration_ts,
+        StrategyDecision.decision_ts + (func.coalesce(StrategyDecision.max_hold_bars, 60) * 60),
+    )
+    rows = session.execute(
+        select(StrategyDecision, DecisionExecution, DecisionEval)
+        .outerjoin(DecisionExecution, DecisionExecution.decision_id == StrategyDecision.id)
+        .outerjoin(DecisionEval, DecisionEval.decision_id == StrategyDecision.id)
+        .where(
+            StrategyDecision.market_type == "futures",
+            or_(
+                DecisionEval.id.is_(None),
+                DecisionEval.outcome_raw == "OPEN",
+            ),
+        )
+        .order_by(expiry_expr.asc(), StrategyDecision.decision_ts.asc(), StrategyDecision.id.asc())
+        .limit(max(1, int(limit)))
+    ).all()
+    return [(d, e, v) for d, e, v in rows]
+
+
+def upsert_decision_execution(
+    session: Session,
+    *,
+    decision_id: int,
+    payload: dict[str, Any],
+    commit: bool = True,
+) -> None:
+    values = {**payload, "decision_id": int(decision_id), "updated_at": datetime.now(timezone.utc)}
+    if "created_at" not in values:
+        values["created_at"] = datetime.now(timezone.utc)
+    stmt = _upsert_stmt(
+        session,
+        DecisionExecution,
+        values,
+        conflict_cols=["decision_id"],
+        update_cols=[
+            "status",
+            "filled",
+            "filled_ts",
+            "filled_price",
+            "filled_qty",
+            "avg_fill_price",
+            "source",
+            "notes",
+            "updated_at",
+        ],
+    )
+    session.execute(stmt)
+    if commit:
+        session.commit()
+
+
+def upsert_decision_eval(
+    session: Session,
+    *,
+    decision_id: int,
+    payload: dict[str, Any],
+    commit: bool = True,
+) -> None:
+    values = {**payload, "decision_id": int(decision_id), "updated_at": datetime.now(timezone.utc)}
+    if "created_at" not in values:
+        values["created_at"] = datetime.now(timezone.utc)
+    if "evaluated_at" not in values:
+        values["evaluated_at"] = datetime.now(timezone.utc)
+    stmt = _upsert_stmt(
+        session,
+        DecisionEval,
+        values,
+        conflict_cols=["decision_id"],
+        update_cols=[
+            "eval_replay_tf",
+            "intrabar_flag",
+            "tp_hit",
+            "sl_hit",
+            "first_hit_ts",
+            "exit_ts",
+            "exit_price",
+            "outcome_raw",
+            "r_multiple_raw",
+            "mfe",
+            "mae",
+            "bars_to_outcome",
+            "evaluated_at",
+            "updated_at",
+        ],
+    )
+    session.execute(stmt)
+    if commit:
+        session.commit()
+
+
+def list_strategy_rows_for_window(
+    session: Session,
+    *,
+    manifest_id: str,
+    window_start_ts: int,
+    window_end_ts: int,
+) -> list[tuple[StrategyDecision, DecisionExecution | None, DecisionEval | None, AiSignal | None]]:
+    rows = session.execute(
+        select(StrategyDecision, DecisionExecution, DecisionEval, AiSignal)
+        .outerjoin(DecisionExecution, DecisionExecution.decision_id == StrategyDecision.id)
+        .outerjoin(DecisionEval, DecisionEval.decision_id == StrategyDecision.id)
+        .outerjoin(AiSignal, AiSignal.id == StrategyDecision.analysis_id)
+        .where(
+            StrategyDecision.manifest_id == manifest_id,
+            StrategyDecision.decision_ts >= int(window_start_ts),
+            StrategyDecision.decision_ts <= int(window_end_ts),
+        )
+        .order_by(StrategyDecision.decision_ts.asc(), StrategyDecision.id.asc())
+    ).all()
+    return [(d, e, v, s) for d, e, v, s in rows]
+
+
+def upsert_strategy_score(
+    session: Session,
+    payload: dict[str, Any],
+    *,
+    commit: bool = True,
+) -> None:
+    values = {**payload}
+    if "created_at" not in values:
+        values["created_at"] = datetime.now(timezone.utc)
+    stmt = _upsert_stmt(
+        session,
+        StrategyScore,
+        values,
+        conflict_cols=["manifest_id", "window_start_ts", "window_end_ts", "split_type", "scoring_mode"],
+        update_cols=[
+            "status",
+            "n_trades",
+            "n_resolved",
+            "n_ambiguous",
+            "n_timeout",
+            "win_rate",
+            "avg_r",
+            "win_rate_ci_low",
+            "win_rate_ci_high",
+            "avg_r_ci_low",
+            "avg_r_ci_high",
+            "timeout_rate",
+            "created_at",
+        ],
+    )
+    session.execute(stmt)
+    if commit:
+        session.commit()
+
+
+def upsert_strategy_feature_stat(
+    session: Session,
+    payload: dict[str, Any],
+    *,
+    commit: bool = True,
+) -> None:
+    values = {**payload}
+    if "created_at" not in values:
+        values["created_at"] = datetime.now(timezone.utc)
+    stmt = _upsert_stmt(
+        session,
+        StrategyFeatureStat,
+        values,
+        conflict_cols=[
+            "manifest_id",
+            "window_start_ts",
+            "window_end_ts",
+            "split_type",
+            "regime_id",
+            "scoring_mode",
+            "feature_key",
+            "bucket_key",
+        ],
+        update_cols=[
+            "status",
+            "n",
+            "win_rate",
+            "avg_r",
+            "ci_low",
+            "ci_high",
+            "created_at",
+        ],
+    )
+    session.execute(stmt)
+    if commit:
+        session.commit()
 
 
 # --------------- Funding Snapshots ---------------

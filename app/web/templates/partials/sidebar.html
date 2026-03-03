@@ -42,6 +42,11 @@
       <span>Intel</span>
     </a>
 
+    <a href="/strategy" class="nav-link {% if current_path == '/strategy' %}is-active{% endif %}">
+      <i data-lucide="candlestick-chart" class="w-5 h-5"></i>
+      <span>Strategy Replay</span>
+    </a>
+
     <a href="/llm" class="nav-link mt-4 {% if current_path == '/llm' %}is-active{% endif %}">
       <i data-lucide="cpu" class="w-5 h-5"></i>
       <span data-i18n="nav.llm_debug">LLM Debug</span>
@@ -60,6 +65,10 @@
     <a href="/api/ai-signals" class="nav-link nav-link-api">
       <i data-lucide="braces" class="w-4 h-4"></i>
       <span data-i18n="nav.ai_signals_api">AI Signals API</span>
+    </a>
+    <a href="/api/strategy/decisions?symbol=BTCUSDT&from=0&to=9999999999&mode=raw&limit=10" class="nav-link nav-link-api">
+      <i data-lucide="braces" class="w-4 h-4"></i>
+      <span>Strategy Decisions API</span>
     </a>
     <a href="/api/health" class="nav-link nav-link-api">
       <i data-lucide="activity" class="w-4 h-4"></i>

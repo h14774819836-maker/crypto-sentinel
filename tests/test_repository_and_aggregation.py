@@ -6,7 +6,7 @@ import pytest
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import sessionmaker
 
-from app.db.models import AiSignal, Ohlcv, WorkerStatus
+from app.db.models import AiSignal, Ohlcv, StrategyDecision, WorkerStatus
 from app.db.repository import insert_ai_signal, list_recent_sent_ai_signals, upsert_ohlcv, upsert_worker_status
 from app.db.session import Base
 from app.features.aggregator import aggregate_10m_from_1m
@@ -193,3 +193,43 @@ def test_list_recent_sent_ai_signals_filters_by_time_and_sent(session):
     assert len(rows) == 1
     assert rows[0].sent_to_telegram is True
     assert rows[0].reasoning == "sent recent"
+
+
+def test_insert_ai_signal_also_writes_strategy_decision(session):
+    ts = datetime(2026, 3, 3, 10, 0, tzinfo=timezone.utc)
+    row = insert_ai_signal(
+        session,
+        {
+            "symbol": "BTCUSDT",
+            "timeframe": "1m",
+            "ts": ts,
+            "direction": "LONG",
+            "entry_price": 100.0,
+            "take_profit": 110.0,
+            "stop_loss": 95.0,
+            "confidence": 80,
+            "reasoning": "strategy write",
+            "analysis_json": {
+                "trade_plan": {
+                    "market_type": "futures",
+                    "entry_mode": "market",
+                    "entry_price": 100.0,
+                    "take_profit": 110.0,
+                    "stop_loss": 95.0,
+                    "expiration_ts_utc": int(ts.timestamp()) + 3600,
+                    "leverage": 5,
+                    "margin_mode": "isolated",
+                    "capital_alloc_usdt": 50,
+                }
+            },
+            "manifest_id": "m-test",
+        },
+    )
+
+    assert row.id is not None
+    decision = session.scalar(select(StrategyDecision).where(StrategyDecision.analysis_id == row.id))
+    assert decision is not None
+    assert decision.symbol == "BTCUSDT"
+    assert decision.market_type == "futures"
+    assert decision.position_side == "LONG"
+    assert decision.manifest_id == "m-test"

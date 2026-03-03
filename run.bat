@@ -5,14 +5,24 @@ title Crypto Sentinel
 cd /d "%~dp0"
 
 echo.
-echo  ╔══════════════════════════════════╗
-echo  ║    Crypto Sentinel V0.2         ║
-echo  ║    AI 加密货币分析系统           ║
-echo  ╚══════════════════════════════════╝
+echo [Crypto Sentinel V0.2] AI 加密货币分析系统
 echo.
 
-REM --- Check Python ---
-python -c "import sys; raise SystemExit(0 if sys.version_info >= (3,11) else 1)" 2>nul
+REM --- Resolve Python ---
+set "PYTHON="
+where python >nul 2>&1 && set "PYTHON=python"
+if "%PYTHON%"=="" (
+    where py >nul 2>&1 && set "PYTHON=py -3.11"
+)
+if "%PYTHON%"=="" (
+    echo [ERROR] Python 3.11+ is required.
+    echo         Download from https://www.python.org/downloads/
+    pause
+    exit /b 1
+)
+
+REM --- Check Python Version ---
+call %PYTHON% -c "import sys; raise SystemExit(0 if sys.version_info >= (3,11) else 1)" 2>nul
 if errorlevel 1 (
     echo [ERROR] Python 3.11+ is required.
     echo         Download from https://www.python.org/downloads/
@@ -23,7 +33,7 @@ if errorlevel 1 (
 REM --- Setup venv (first run only) ---
 if not exist ".venv\Scripts\python.exe" (
     echo [SETUP] Creating virtual environment...
-    python -m venv .venv
+    call %PYTHON% -m venv .venv
     if errorlevel 1 (
         echo [ERROR] Failed to create venv
         pause
@@ -46,7 +56,7 @@ if "%NEEDS_INSTALL%"=="0" (
 
 if "%NEEDS_INSTALL%"=="1" (
     echo [SETUP] Installing dependencies...
-    python -m pip install --quiet -e .[dev]
+    call %PYTHON% -m pip install --quiet -e .[dev]
     if errorlevel 1 (
         echo [ERROR] pip install failed
         pause
@@ -73,5 +83,5 @@ echo         Dashboard: http://127.0.0.1:8000
 echo         Press Ctrl+C to stop
 echo.
 
-python -m app.cli up --open-browser --db-init --backfill-days 1
+call %PYTHON% -m app.cli up --open-browser --db-init --backfill-days 1
 exit /b %errorlevel%

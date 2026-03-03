@@ -9,6 +9,7 @@ data/
 *.db
 *.sqlite
 .DS_Store
+node_modules/
 
 # Executable data and logs
 *.log

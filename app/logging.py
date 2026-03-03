@@ -18,7 +18,10 @@ def setup_logging() -> None:
             "formatters": {
                 "default": {
                     "format": "%(asctime)s %(levelname)s [%(name)s] %(message)s",
-                }
+                },
+                "market_ai": {
+                    "format": "%(message)s",
+                },
             },
             "handlers": {
                 "default": {
@@ -26,13 +29,15 @@ def setup_logging() -> None:
                     "formatter": "default",
                 },
                 "market_ai_file": {
-                    "class": "logging.handlers.RotatingFileHandler",
-                    "formatter": "default",
+                    "class": "logging.handlers.TimedRotatingFileHandler",
+                    "formatter": "market_ai",
                     "filename": market_ai_log_file,
-                    "maxBytes": max(100_000, int(settings.market_ai_log_max_bytes or 5_000_000)),
-                    "backupCount": max(1, int(settings.market_ai_log_backup_count or 5)),
+                    "when": "midnight",
+                    "interval": 1,
+                    "backupCount": max(1, int(settings.market_ai_log_backup_count or 7)),
                     "encoding": "utf-8",
-                }
+                    "utc": True,
+                },
             },
             "root": {
                 "level": settings.log_level,
@@ -50,7 +55,7 @@ def setup_logging() -> None:
                     "propagate": False,
                 },
                 "crypto_sentinel.ai.market": {
-                    "level": settings.log_level,
+                    "level": settings.market_ai_log_level,
                     "handlers": ["default", "market_ai_file"],
                     "propagate": False,
                 },

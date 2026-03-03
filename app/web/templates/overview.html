@@ -38,9 +38,85 @@
     padding-left: 0.7rem;
   }
 
+  .ai-run-progress-wrap {
+    border: 1px solid rgba(56, 189, 248, 0.2);
+    background: rgba(15, 23, 42, 0.35);
+    border-radius: 0.75rem;
+    padding: 0.55rem 0.7rem 0.6rem;
+  }
+
+  .ai-run-progress-meta {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 0.35rem;
+    gap: 0.75rem;
+  }
+
+  .ai-run-progress-track {
+    width: 100%;
+    height: 0.4rem;
+    border-radius: 999px;
+    background: rgba(148, 163, 184, 0.22);
+    overflow: hidden;
+  }
+
+  .ai-run-progress-bar {
+    height: 100%;
+    border-radius: 999px;
+    background: linear-gradient(90deg, rgba(56, 189, 248, 0.85), rgba(16, 185, 129, 0.85));
+    box-shadow: 0 0 12px rgba(34, 197, 94, 0.35);
+    transition: width 260ms ease, filter 180ms ease;
+  }
+
+  .ai-run-progress-wrap.is-error .ai-run-progress-bar {
+    background: linear-gradient(90deg, rgba(248, 113, 113, 0.9), rgba(239, 68, 68, 0.88));
+    box-shadow: 0 0 10px rgba(248, 113, 113, 0.35);
+    filter: saturate(0.95);
+  }
+
+  .stream-text.is-streaming::after {
+    content: "▋";
+    margin-left: 0.2rem;
+    color: rgba(56, 189, 248, 0.95);
+    animation: ai-cursor-blink 0.9s steps(1, end) infinite;
+  }
+
+  .ai-console-system {
+    font-size: 11px;
+    color: rgba(148, 163, 184, 0.95);
+    margin-bottom: 0.55rem;
+    line-height: 1.45;
+  }
+
+  .ai-console-system strong {
+    color: rgba(125, 211, 252, 0.95);
+  }
+
   @media (prefers-reduced-motion: reduce) {
     .ai-console-live-dot .animate-ping {
       animation: none !important;
+    }
+
+    .stream-text.is-streaming::after {
+      animation: none !important;
+    }
+
+    .ai-run-progress-bar {
+      transition: none !important;
+    }
+  }
+
+  @keyframes ai-cursor-blink {
+
+    0%,
+    49% {
+      opacity: 1;
+    }
+
+    50%,
+    100% {
+      opacity: 0.2;
     }
   }
 </style>
@@ -258,6 +334,8 @@
 
           <span id="analyze-status" class="text-sm font-medium text-muted-foreground status-chip-row"
             aria-live="polite"></span>
+          <span id="analyze-status-polite" class="visually-hidden" aria-live="polite"></span>
+          <span id="analyze-status-alert" class="visually-hidden" aria-live="assertive"></span>
 
           <button id="btn-analyze" onclick="runAiAnalysis()" class="btn btn-primary" data-loading-text="Running...">
             <i data-lucide="cpu" class="w-4 h-4 mr-2"></i> <span data-i18n="overview.ai.btn">开始分析</span>
@@ -269,6 +347,19 @@
 
       <div class="px-4 pt-4">
         <div id="overview-ai-panel-error" class="panel-error hidden"></div>
+      </div>
+
+      <div id="ai-run-feedback" class="px-4 pb-1 hidden">
+        <div class="ai-run-progress-wrap">
+          <div class="ai-run-progress-meta">
+            <span id="ai-run-stage" class="text-xs text-muted-foreground">准备中...</span>
+            <span id="ai-run-progress-text" class="mono text-[11px] text-slate-300">0%</span>
+          </div>
+          <div class="ai-run-progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"
+            aria-valuetext="0%" aria-label="AI analysis progress">
+            <div id="ai-run-progress-bar" class="ai-run-progress-bar" style="width:0%;"></div>
+          </div>
+        </div>
       </div>
 
       <div id="ai-signals-container" class="space-y-4 mt-4">
@@ -811,25 +902,25 @@
           <div>
             <div class="text-muted-foreground mb-1">Top Narratives</div>
             {% if intel.top_narratives %}
-              {% for n in intel.top_narratives[:3] %}
-              <div class="flex items-center justify-between mb-1">
-                <span>{{ n.id }}</span><span class="mono text-muted-foreground">{{ n.count }}</span>
-              </div>
-              {% endfor %}
+            {% for n in intel.top_narratives[:3] %}
+            <div class="flex items-center justify-between mb-1">
+              <span>{{ n.id }}</span><span class="mono text-muted-foreground">{{ n.count }}</span>
+            </div>
+            {% endfor %}
             {% else %}
-              <div class="text-muted-foreground">-</div>
+            <div class="text-muted-foreground">-</div>
             {% endif %}
           </div>
           <div>
             <div class="text-muted-foreground mb-1">Main Characters</div>
             {% if intel.main_characters %}
-              {% for p in intel.main_characters[:3] %}
-              <div class="flex items-center justify-between mb-1">
-                <span>{{ p.name }}</span><span class="mono text-muted-foreground">{{ p.count }}</span>
-              </div>
-              {% endfor %}
+            {% for p in intel.main_characters[:3] %}
+            <div class="flex items-center justify-between mb-1">
+              <span>{{ p.name }}</span><span class="mono text-muted-foreground">{{ p.count }}</span>
+            </div>
+            {% endfor %}
             {% else %}
-              <div class="text-muted-foreground">-</div>
+            <div class="text-muted-foreground">-</div>
             {% endif %}
           </div>
         </div>
@@ -1123,37 +1214,119 @@
     }
   }
 
+  const AI_FEEDBACK_PHASES = {
+    idle: { status: 'neutral', label: '等待任务', progress: 0 },
+    preflight: { status: 'loading', label: '检查模型与参数...', progress: 8 },
+    connecting: { status: 'loading', label: '连接流式通道...', progress: 18 },
+    streaming: { status: 'loading', label: '正在生成分析内容...', progress: 36 },
+    finalizing: { status: 'loading', label: '收尾中，正在刷新卡片...', progress: 94 },
+    done: { status: 'success', label: '分析完成', progress: 100 },
+    error: { status: 'error', label: '分析失败', progress: 100 },
+  };
+
+  function clampProgress(v) {
+    const n = Number(v);
+    if (!Number.isFinite(n)) return 0;
+    return Math.max(0, Math.min(100, Math.round(n)));
+  }
+
+  function announceAnalyzeStatus(message, { urgent = false } = {}) {
+    const polite = document.getElementById('analyze-status-polite');
+    const alert = document.getElementById('analyze-status-alert');
+    if (urgent) {
+      if (polite) polite.textContent = '';
+      if (alert) alert.textContent = message || '';
+    } else {
+      if (alert) alert.textContent = '';
+      if (polite) polite.textContent = message || '';
+    }
+  }
+
+  function setAnalyzeProgress(phase, options = {}) {
+    const root = document.getElementById('ai-run-feedback');
+    const stage = document.getElementById('ai-run-stage');
+    const progressText = document.getElementById('ai-run-progress-text');
+    const bar = document.getElementById('ai-run-progress-bar');
+    const track = root ? root.querySelector('.ai-run-progress-track') : null;
+    const phaseMeta = AI_FEEDBACK_PHASES[phase] || AI_FEEDBACK_PHASES.idle;
+    const progress = clampProgress(options.progress ?? phaseMeta.progress);
+    const label = options.label || phaseMeta.label;
+
+    if (root) {
+      root.classList.remove('hidden');
+      const wrap = root.querySelector('.ai-run-progress-wrap');
+      if (wrap) wrap.classList.toggle('is-error', !!options.error);
+    }
+
+    if (stage) stage.textContent = label;
+    if (progressText) progressText.textContent = `${progress}%`;
+    if (bar) bar.style.width = `${progress}%`;
+    if (track) {
+      track.setAttribute('aria-valuenow', String(progress));
+      track.setAttribute('aria-valuetext', `${progress}%`);
+    }
+  }
+
+  function appendConsoleSystemMessage(consoleOutput, message, tone = 'info') {
+    if (!consoleOutput || !message) return;
+    const line = document.createElement('div');
+    line.className = 'ai-console-system';
+    if (tone === 'warning') {
+      line.style.color = 'rgba(253, 224, 71, 0.95)';
+    } else if (tone === 'error') {
+      line.style.color = 'rgba(252, 165, 165, 0.95)';
+    } else if (tone === 'success') {
+      line.style.color = 'rgba(110, 231, 183, 0.95)';
+    }
+    line.innerHTML = `<strong>[System]</strong> ${message}`;
+    consoleOutput.appendChild(line);
+  }
+
+  function setStreamCursorState(symbolDiv, active) {
+    if (!symbolDiv) return;
+    const textContainer = symbolDiv.querySelector('.stream-text');
+    if (!textContainer) return;
+    textContainer.classList.toggle('is-streaming', !!active);
+  }
+
+  function clearAllStreamCursors(consoleOutput) {
+    if (!consoleOutput) return;
+    consoleOutput.querySelectorAll('.stream-text.is-streaming').forEach((el) => {
+      el.classList.remove('is-streaming');
+    });
+  }
+
 
 
   async function runAiAnalysis() {
-
     const btn = document.getElementById('btn-analyze');
-
     const consoleContainer = document.getElementById('ai-console-container');
-
     const consoleOutput = document.getElementById('ai-console-output');
     const followBtn = document.getElementById('ai-console-follow');
     const clearBtn = document.getElementById('ai-console-clear');
     const aiPanel = document.getElementById('overview-ai-panel');
     const ui = window.SentinelUI;
+    const totalSymbols = 1; // Only analyzing the currently selected coin
+    const runState = {
+      pseudoTimer: null,
+      silenceTimer: null,
+      firstChunkSeen: false,
+      symbolDoneCount: 0,
+      runFinished: false,
+      progress: 0,
+    };
 
     const modelSelector = document.getElementById('modelSelector');
-
     const selectedModel = modelSelector && modelSelector.value ? modelSelector.value : '{{ default_model }}';
-
     const selectedLabel = modelSelector && modelSelector.selectedIndex >= 0
-
       ? modelSelector.options[modelSelector.selectedIndex].text
-
       : selectedModel;
-
     const encodedModel = encodeURIComponent(selectedModel);
-
-    const streamUrl = `/api/ai-analyze/stream?model=${encodedModel}`;
-
-    const preflightUrl = `/api/ai-analyze?dry_run=1&model=${encodedModel}`;
-
+    const encodedSymbol = encodeURIComponent(currentCoin);
+    const streamUrl = `/api/ai-analyze/stream?model=${encodedModel}&symbol=${encodedSymbol}`;
+    const preflightUrl = `/api/ai-analyze?dry_run=1&model=${encodedModel}&symbol=${encodedSymbol}`;
     let scrollTimeout = null;
+    let evtSource = null;
 
     if (consoleContainer && !consoleContainer.dataset.boundScrollWatcher) {
       consoleContainer.dataset.boundScrollWatcher = '1';
@@ -1179,10 +1352,7 @@
       });
     }
 
-
-
     const resetAnalyzeButton = (labelHtml) => {
-
       if (ui && typeof ui.setLoading === 'function') {
         ui.setLoading(btn, false);
       } else {
@@ -1193,10 +1363,56 @@
         btn.dataset.originalHtml = labelHtml;
       }
       lucide.createIcons();
-
     };
 
+    const stopPseudoProgress = () => {
+      if (runState.pseudoTimer) {
+        clearInterval(runState.pseudoTimer);
+        runState.pseudoTimer = null;
+      }
+    };
 
+    const startPseudoProgress = (cap = 70) => {
+      stopPseudoProgress();
+      runState.pseudoTimer = setInterval(() => {
+        if (runState.runFinished) return;
+        if (runState.progress >= cap) return;
+        runState.progress = clampProgress(runState.progress + (runState.progress < 40 ? 2 : 1));
+        setAnalyzeProgress('streaming', { progress: runState.progress });
+      }, 320);
+    };
+
+    const clearSilenceWatchdog = () => {
+      if (runState.silenceTimer) {
+        clearTimeout(runState.silenceTimer);
+        runState.silenceTimer = null;
+      }
+    };
+
+    const armSilenceWatchdog = (ms, callback) => {
+      clearSilenceWatchdog();
+      runState.silenceTimer = setTimeout(() => {
+        if (!runState.runFinished && typeof callback === 'function') callback();
+      }, ms);
+    };
+
+    const handleFailure = (message) => {
+      const msg = message || 'Analysis failed';
+      runState.runFinished = true;
+      stopPseudoProgress();
+      clearSilenceWatchdog();
+      clearAllStreamCursors(consoleOutput);
+      setAnalyzeStatus('error', msg);
+      setAnalyzeProgress('error', { error: true, label: msg, progress: runState.progress || 100 });
+      announceAnalyzeStatus(msg, { urgent: true });
+      appendConsoleSystemMessage(consoleOutput, msg, 'error');
+      if (ui && ui.showPanelError) {
+        ui.showPanelError(aiPanel, msg, { retryAction: () => runAiAnalysis(), retryLabel: '重试分析' });
+      }
+      resetAnalyzeButton('<i data-lucide="cpu" class="w-4 h-4 mr-2"></i> Retry');
+      aiConsoleState.streaming = false;
+      if (evtSource) evtSource.close();
+    };
 
     if (ui && ui.clearError) ui.clearError(aiPanel);
     if (ui && ui.setLoading) {
@@ -1207,241 +1423,197 @@
       lucide.createIcons();
     }
 
-
-
-    setAnalyzeStatus('loading', `Analyzing with ${selectedLabel}...`, { pulse: true });
-
+    const initialLabel = `Analyzing with ${selectedLabel}...`;
+    setAnalyzeStatus('loading', initialLabel, { pulse: true });
+    announceAnalyzeStatus(initialLabel);
+    runState.progress = AI_FEEDBACK_PHASES.preflight.progress;
+    setAnalyzeProgress('preflight', { progress: runState.progress });
     consoleOutput.innerHTML = '';
+    appendConsoleSystemMessage(consoleOutput, `模型已选择：${selectedLabel}，正在执行请求预检...`);
 
     consoleContainer.classList.remove('hidden');
     aiConsoleState.streaming = true;
     setAiConsoleAutoFollow(true);
 
-
-
     try {
-
       const preflightRes = await fetch(preflightUrl, { method: 'POST' });
-
       if (!preflightRes.ok) {
-
         let errMsg = `Request failed (${preflightRes.status})`;
-
         try {
-
           const body = await preflightRes.json();
-
           errMsg = body.detail || body.error || errMsg;
-
         } catch (_err) {
-
           // ignore JSON parse failure
-
         }
-
         throw new Error(errMsg);
-
       }
-
     } catch (err) {
-
       const errMsg = err && err.message ? err.message : 'Model validation failed';
-
-      setAnalyzeStatus('error', errMsg);
-      if (ui && ui.showPanelError) ui.showPanelError(aiPanel, errMsg);
-
-      resetAnalyzeButton('<i data-lucide="cpu" class="w-4 h-4 mr-2"></i> Retry');
-      aiConsoleState.streaming = false;
-
+      handleFailure(errMsg);
       return;
-
     }
 
+    runState.progress = AI_FEEDBACK_PHASES.connecting.progress;
+    setAnalyzeProgress('connecting', { progress: runState.progress, label: '预检通过，连接流式通道中...' });
+    setAnalyzeStatus('loading', `Connecting ${selectedLabel} stream...`, { pulse: true });
+    announceAnalyzeStatus(`已通过预检，正在连接 ${selectedLabel} 流式输出。`);
+    appendConsoleSystemMessage(consoleOutput, '预检通过，正在连接流式输出通道...');
+    startPseudoProgress(68);
+    evtSource = new EventSource(streamUrl);
 
-
-    const evtSource = new EventSource(streamUrl);
-
-
+    evtSource.onopen = function () {
+      runState.progress = Math.max(runState.progress, 24);
+      setAnalyzeProgress('connecting', {
+        progress: runState.progress,
+        label: '模型已连接，等待首批输出...'
+      });
+      setAnalyzeStatus('loading', 'Connected. Waiting first output...', { pulse: true });
+      announceAnalyzeStatus('模型已连接，等待首批输出。');
+      appendConsoleSystemMessage(consoleOutput, 'SSE 通道已建立，正在等待首批内容...');
+      armSilenceWatchdog(8000, () => {
+        const msg = '模型仍在运行，首批输出稍后到达...';
+        setAnalyzeStatus('warning', msg, { pulse: true });
+        setAnalyzeProgress('connecting', {
+          progress: Math.max(runState.progress, 28),
+          label: '模型已连接，正在准备首批输出...'
+        });
+        announceAnalyzeStatus(msg);
+        appendConsoleSystemMessage(consoleOutput, msg, 'warning');
+        if (ui && ui.showToast) ui.showToast('分析任务仍在运行，请稍候...', 'warning', { ttl_ms: 2800 });
+      });
+    };
 
     evtSource.onmessage = function (event) {
-
       try {
-
         const data = JSON.parse(event.data);
-
-
-
-        if (data.type === 'error') {
-
-          setAnalyzeStatus('error', data.error || 'Analysis failed');
-          if (ui && ui.showPanelError) ui.showPanelError(aiPanel, data.error || 'Analysis failed');
-
-          resetAnalyzeButton('<i data-lucide="cpu" class="w-4 h-4 mr-2"></i> Retry');
-          aiConsoleState.streaming = false;
-
-          evtSource.close();
-
+        clearSilenceWatchdog();
+        if (!runState.runFinished) {
+          armSilenceWatchdog(15000, () => {
+            const msg = '分析仍在继续，等待下一段输出...';
+            setAnalyzeStatus('warning', msg, { pulse: true });
+            setAnalyzeProgress('streaming', {
+              progress: Math.max(runState.progress, 48),
+              label: '分析进行中，正在等待新片段...'
+            });
+            announceAnalyzeStatus(msg);
+            appendConsoleSystemMessage(consoleOutput, msg, 'warning');
+          });
         }
 
-        else if (data.type === 'chunk') {
+        if (data.type === 'error') {
+          handleFailure(data.error || 'Analysis failed');
+        } else if (data.type === 'chunk') {
+          if (!runState.firstChunkSeen) {
+            runState.firstChunkSeen = true;
+            runState.progress = Math.max(runState.progress, 36);
+            setAnalyzeProgress('streaming', { progress: runState.progress });
+            setAnalyzeStatus('loading', `Streaming analysis with ${selectedLabel}...`, { pulse: true });
+            announceAnalyzeStatus('已收到首批分析输出。');
+            appendConsoleSystemMessage(consoleOutput, '已收到首批输出，开始流式生成。', 'success');
+          }
 
           let symbolDiv = document.getElementById(`ai-console-${data.symbol}`);
-
           if (!symbolDiv) {
-
             symbolDiv = document.createElement('div');
-
             symbolDiv.id = `ai-console-${data.symbol}`;
-
             symbolDiv.className = 'ai-console-stream mb-3 rounded-r-lg bg-white/[0.02] py-2 pr-2';
-
             symbolDiv.innerHTML = `<div class="text-[10px] text-cyan-300 font-semibold uppercase mb-1 tracking-wider">[ ${data.symbol} ]</div><div class="stream-text text-slate-300/90 whitespace-pre-wrap break-words leading-6"></div>`;
-
             symbolDiv.style.display = data.symbol === currentCoin ? '' : 'none';
-
             consoleOutput.appendChild(symbolDiv);
-
           }
 
           const textContainer = symbolDiv.querySelector('.stream-text');
-
+          setStreamCursorState(symbolDiv, true);
           const lastNode = textContainer.lastChild;
-
           if (lastNode && lastNode.nodeType === Node.TEXT_NODE) {
-
             lastNode.appendData(data.text);
-
           } else {
-
             textContainer.appendChild(document.createTextNode(data.text));
-
           }
 
           if (aiConsoleState.autoFollow && !scrollTimeout) {
-
             scrollTimeout = setTimeout(() => {
-
               consoleContainer.scrollTop = consoleContainer.scrollHeight;
-
               scrollTimeout = null;
-
             }, 100);
-
           }
-
-        }
-
-        else if (data.type === 'symbol_done') {
+        } else if (data.type === 'symbol_done') {
+          runState.symbolDoneCount += 1;
+          const symbolProgress = 38 + Math.round((Math.min(runState.symbolDoneCount, totalSymbols) / totalSymbols) * 48);
+          runState.progress = Math.max(runState.progress, Math.min(symbolProgress, 90));
+          setAnalyzeProgress('streaming', {
+            progress: runState.progress,
+            label: `分币种收尾中 (${Math.min(runState.symbolDoneCount, totalSymbols)}/${totalSymbols})`
+          });
+          setAnalyzeStatus('loading', `Finalizing symbol updates (${Math.min(runState.symbolDoneCount, totalSymbols)}/${totalSymbols})`, { pulse: true });
+          announceAnalyzeStatus(`已完成 ${Math.min(runState.symbolDoneCount, totalSymbols)} / ${totalSymbols} 个币种分析。`);
 
           let symbolDiv = document.getElementById(`ai-console-${data.symbol}`);
-
           if (symbolDiv) {
-
             const div = document.createElement('div');
-
             div.className = 'text-emerald-300/80 text-[10px] mt-2 font-semibold';
-
             div.textContent = '--- Analysis Completed ---';
-
             symbolDiv.appendChild(div);
-
+            setStreamCursorState(symbolDiv, false);
           }
 
           if (aiConsoleState.autoFollow) {
             consoleContainer.scrollTop = consoleContainer.scrollHeight;
           }
 
-
-
           fetch(location.href)
-
             .then(res => res.text())
-
             .then(html => {
-
               const parser = new DOMParser();
-
               const doc = parser.parseFromString(html, 'text/html');
-
-
-
               const newAiContainer = doc.querySelector('#ai-signals-container');
-
               const oldAiContainer = document.getElementById('ai-signals-container');
-
               if (newAiContainer && oldAiContainer) {
-
                 const newCards = Array.from(newAiContainer.querySelectorAll('.ai-signal-card'));
-
                 const oldCards = Array.from(oldAiContainer.querySelectorAll('.ai-signal-card'));
-
-
-
                 const newCard = newCards.find(card => card.dataset && card.dataset.symbol === data.symbol);
-
                 const oldCard = oldCards.find(card => card.dataset && card.dataset.symbol === data.symbol);
-
-
-
                 if (newCard && oldCard) {
-
                   oldCard.replaceWith(newCard);
-
                   newCard.style.display = newCard.dataset.symbol === currentCoin ? '' : 'none';
-
                 } else if (newCard && !oldCard) {
-
                   oldAiContainer.appendChild(newCard);
-
                   newCard.style.display = newCard.dataset.symbol === currentCoin ? '' : 'none';
-
                 }
-
               }
-
               lucide.createIcons();
               if (window.SentinelUI && window.SentinelUI.bootPage) window.SentinelUI.bootPage(oldAiContainer);
-
             })
-
             .catch(err => console.error(`Failed to update table for ${data.symbol}:`, err));
-
-        }
-
-        else if (data.type === 'done') {
-
-          setAnalyzeStatus('success', `Analysis completed (${selectedLabel})`);
+        } else if (data.type === 'done') {
+          runState.runFinished = true;
+          stopPseudoProgress();
+          clearSilenceWatchdog();
+          clearAllStreamCursors(consoleOutput);
+          runState.progress = 96;
+          setAnalyzeProgress('finalizing', { progress: runState.progress, label: '分析完成，正在收尾刷新界面...' });
+          setAnalyzeStatus('loading', 'Finalizing UI updates...', { pulse: true });
+          announceAnalyzeStatus('分析已完成，正在收尾刷新界面。');
+          appendConsoleSystemMessage(consoleOutput, '分析完成，正在回填结果...', 'success');
           aiConsoleState.streaming = false;
-
           evtSource.close();
-
-          resetAnalyzeButton('<i data-lucide="cpu" class="w-4 h-4 mr-2"></i> Re-run Analysis');
-
+          setTimeout(() => {
+            setAnalyzeProgress('done', { progress: 100, label: '分析完成，信号已更新。' });
+            setAnalyzeStatus('success', `Analysis completed (${selectedLabel})`);
+            announceAnalyzeStatus('分析完成，结果已刷新。');
+            resetAnalyzeButton('<i data-lucide="cpu" class="w-4 h-4 mr-2"></i> Re-run Analysis');
+            if (ui && ui.showToast) ui.showToast('AI 分析已完成', 'success', { ttl_ms: 2200 });
+          }, 220);
         }
-
       } catch (err) {
-
         console.error('Parse error:', err);
-
       }
-
     };
-
-
 
     evtSource.onerror = function () {
-
-      const msg = 'Stream disconnected. Possible unsupported model or network error.';
-      setAnalyzeStatus('error', msg);
-      if (ui && ui.showPanelError) ui.showPanelError(aiPanel, msg);
-
-      resetAnalyzeButton('<i data-lucide="cpu" class="w-4 h-4 mr-2"></i> Retry');
-      aiConsoleState.streaming = false;
-
-      evtSource.close();
-
+      if (runState.runFinished) return;
+      handleFailure('Stream disconnected. Please retry or switch model.');
     };
-
   }
 
 </script>

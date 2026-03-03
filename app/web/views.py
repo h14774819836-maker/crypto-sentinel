@@ -27,6 +27,7 @@ from app.ai.llm_runtime_reload import (
 )
 from app.db.models import YoutubeVideo
 from app.db.repository import (
+    get_strategy_decision_detail,
     get_latest_ai_signals,
     get_latest_intel_digest,
     get_latest_market_metrics,
@@ -36,9 +37,14 @@ from app.db.repository import (
     get_latest_youtube_consensus,
     get_worker_last_seen,
     insert_ai_signal,
+    list_ohlcv_range,
     list_ai_signals,
     list_ai_analysis_failures,
     list_alerts,
+    list_strategy_decisions_densified,
+    list_strategy_decisions_raw,
+    list_strategy_feature_stats,
+    list_strategy_scores,
     list_recent_ohlcv,
     list_news_items,
     list_youtube_channels,
@@ -66,6 +72,20 @@ def format_bj_time(dt: datetime | None, fmt: str = "%Y-%m-%d %H:%M:%S") -> str:
 templates.env.filters["bj_time"] = format_bj_time
 YT_ANALYSIS_STALL_RUNNING_SECONDS_DEFAULT = 420
 YT_ANALYSIS_STALL_WAITING_SECONDS_MIN = 420
+
+
+def _epoch_seconds(dt: datetime | None) -> int | None:
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return int(dt.timestamp())
+
+
+def _datetime_from_epoch(ts: int | None) -> datetime | None:
+    if ts is None:
+        return None
+    return datetime.fromtimestamp(int(ts), tz=timezone.utc)
 
 YOUTUBE_QUEUE_REASON_LABELS: dict[str, str] = {
     "done": "完成",
@@ -558,7 +578,13 @@ def _clone_llm_config_with_model(config: LLMConfig, model: str) -> LLMConfig:
 
 
 def _resolve_market_ai_request_options(model: str | None) -> MarketAIRequestOptions:
-    from app.config import _guess_provider_for_model, DEEPSEEK_BASE_URL_DEFAULT, OPENROUTER_BASE_URL_DEFAULT, ARK_BASE_URL_DEFAULT
+    from app.config import (
+        _guess_provider_for_model,
+        DEEPSEEK_BASE_URL_DEFAULT,
+        OPENROUTER_BASE_URL_DEFAULT,
+        ARK_BASE_URL_DEFAULT,
+        NVIDIA_NIM_BASE_URL_DEFAULT,
+    )
 
     requested_model = model.strip() if isinstance(model, str) else None
     if requested_model == "":
@@ -581,11 +607,13 @@ def _resolve_market_ai_request_options(model: str | None) -> MarketAIRequestOpti
             "deepseek": DEEPSEEK_BASE_URL_DEFAULT,
             "openrouter": OPENROUTER_BASE_URL_DEFAULT,
             "ark": ARK_BASE_URL_DEFAULT,
+            "nvidia_nim": NVIDIA_NIM_BASE_URL_DEFAULT,
         }
         provider_api_keys = {
             "deepseek": settings.deepseek_api_key,
             "openrouter": settings.openrouter_api_key,
             "ark": settings.ark_api_key,
+            "nvidia_nim": settings.nvidia_nim_api_key,
             "openai": settings.openai_api_key,
         }
         effective_config = LLMConfig(
@@ -701,9 +729,216 @@ def alerts_page(request: Request, db: Session = Depends(get_db)):
     )
 
 
+@router.get("/strategy", response_class=HTMLResponse)
+def strategy_page(request: Request):
+    symbols = settings.watchlist_symbols or ["BTCUSDT"]
+    return templates.TemplateResponse(
+        "strategy.html",
+        {
+            "request": request,
+            "symbols": symbols,
+            "default_symbol": symbols[0],
+            "base_timeframes": ["1m", "5m", "15m", "1h", "4h"],
+            "scoring_modes": ["STRICT", "REALISTIC", "OPTIMISTIC"],
+            "generated_at": datetime.now(timezone.utc),
+        },
+    )
+
+
 @router.get("/api/market")
 def market_api(db: Session = Depends(get_db)):
     return {"items": _build_market_snapshots(db)}
+
+
+@router.get("/api/ohlcv")
+def ohlcv_api(
+    symbol: str = Query(..., min_length=3, max_length=20),
+    timeframe: str = Query(default="1m"),
+    from_ts: int | None = Query(default=None, alias="from"),
+    to_ts: int | None = Query(default=None, alias="to"),
+    limit: int = Query(default=2000, ge=100, le=5000),
+    db: Session = Depends(get_db),
+):
+    symbol_u = symbol.upper()
+    if from_ts is not None and to_ts is not None and from_ts <= to_ts:
+        start_dt = _datetime_from_epoch(from_ts)
+        end_dt = _datetime_from_epoch(to_ts)
+        if start_dt is None or end_dt is None:
+            raise HTTPException(status_code=400, detail="invalid time range")
+        rows = list_ohlcv_range(db, symbol=symbol_u, timeframe=timeframe, start_ts=start_dt, end_ts=end_dt)
+    else:
+        rows = list_recent_ohlcv(db, symbol=symbol_u, timeframe=timeframe, limit=limit)
+    if len(rows) > limit:
+        rows = rows[-limit:]
+    return {
+        "items": [
+            {
+                "ts": _epoch_seconds(row.ts),
+                "open": row.open,
+                "high": row.high,
+                "low": row.low,
+                "close": row.close,
+                "volume": row.volume,
+            }
+            for row in rows
+        ]
+    }
+
+
+@router.get("/api/strategy/decisions")
+def strategy_decisions_api(
+    symbol: str = Query(..., min_length=3, max_length=20),
+    from_ts: int = Query(..., alias="from"),
+    to_ts: int = Query(..., alias="to"),
+    manifest_id: str | None = Query(default=None),
+    side: str | None = Query(default=None),
+    outcome: str | None = Query(default=None),
+    regime: str | None = Query(default=None),
+    mode: str = Query(default="raw"),
+    cursor: int | None = Query(default=None),
+    limit: int = Query(default=200, ge=1, le=500),
+    bucket_seconds: int = Query(default=900, ge=60, le=86400),
+    db: Session = Depends(get_db),
+):
+    symbol_u = symbol.upper()
+    mode_norm = mode.lower()
+    if mode_norm not in {"raw", "densified"}:
+        raise HTTPException(status_code=400, detail="mode must be raw or densified")
+    if from_ts > to_ts:
+        raise HTTPException(status_code=400, detail="from must be <= to")
+
+    if mode_norm == "densified":
+        items = list_strategy_decisions_densified(
+            db,
+            symbol=symbol_u,
+            from_ts=from_ts,
+            to_ts=to_ts,
+            manifest_id=manifest_id,
+            side=side,
+            outcome=outcome,
+            regime=regime,
+            bucket_seconds=bucket_seconds,
+        )
+        return {
+            "mode": "densified",
+            "items": items,
+            "has_more": False,
+            "next_cursor": None,
+        }
+
+    items, has_more, next_cursor = list_strategy_decisions_raw(
+        db,
+        symbol=symbol_u,
+        from_ts=from_ts,
+        to_ts=to_ts,
+        manifest_id=manifest_id,
+        side=side,
+        outcome=outcome,
+        regime=regime,
+        cursor=cursor,
+        limit=limit,
+    )
+    return {
+        "mode": "raw",
+        "items": items,
+        "has_more": has_more,
+        "next_cursor": next_cursor,
+    }
+
+
+@router.get("/api/strategy/decisions/{decision_id}")
+def strategy_decision_detail_api(decision_id: int, db: Session = Depends(get_db)):
+    item = get_strategy_decision_detail(db, decision_id=decision_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="decision not found")
+    return {"item": item}
+
+
+@router.get("/api/strategy/scores")
+def strategy_scores_api(
+    manifest_id: str | None = Query(default=None),
+    split_type: str | None = Query(default=None),
+    scoring_mode: str | None = Query(default=None),
+    limit: int = Query(default=200, ge=1, le=1000),
+    db: Session = Depends(get_db),
+):
+    rows = list_strategy_scores(
+        db,
+        manifest_id=manifest_id,
+        split_type=split_type,
+        scoring_mode=scoring_mode,
+        limit=limit,
+    )
+    return {
+        "items": [
+            {
+                "id": row.id,
+                "manifest_id": row.manifest_id,
+                "window_start_ts": row.window_start_ts,
+                "window_end_ts": row.window_end_ts,
+                "split_type": row.split_type,
+                "scoring_mode": row.scoring_mode,
+                "status": row.status,
+                "n_trades": row.n_trades,
+                "n_resolved": row.n_resolved,
+                "n_ambiguous": row.n_ambiguous,
+                "n_timeout": row.n_timeout,
+                "win_rate": row.win_rate,
+                "avg_r": row.avg_r,
+                "win_rate_ci_low": row.win_rate_ci_low,
+                "win_rate_ci_high": row.win_rate_ci_high,
+                "avg_r_ci_low": row.avg_r_ci_low,
+                "avg_r_ci_high": row.avg_r_ci_high,
+                "timeout_rate": row.timeout_rate,
+                "created_at": row.created_at,
+            }
+            for row in rows
+        ]
+    }
+
+
+@router.get("/api/strategy/feature-stats")
+def strategy_feature_stats_api(
+    manifest_id: str | None = Query(default=None),
+    split_type: str | None = Query(default=None),
+    scoring_mode: str | None = Query(default=None),
+    regime_id: str | None = Query(default=None),
+    status: str | None = Query(default="OK"),
+    limit: int = Query(default=500, ge=1, le=2000),
+    db: Session = Depends(get_db),
+):
+    rows = list_strategy_feature_stats(
+        db,
+        manifest_id=manifest_id,
+        split_type=split_type,
+        scoring_mode=scoring_mode,
+        regime_id=regime_id,
+        status=status,
+        limit=limit,
+    )
+    return {
+        "items": [
+            {
+                "id": row.id,
+                "manifest_id": row.manifest_id,
+                "window_start_ts": row.window_start_ts,
+                "window_end_ts": row.window_end_ts,
+                "split_type": row.split_type,
+                "regime_id": row.regime_id,
+                "scoring_mode": row.scoring_mode,
+                "feature_key": row.feature_key,
+                "bucket_key": row.bucket_key,
+                "status": row.status,
+                "n": row.n,
+                "win_rate": row.win_rate,
+                "avg_r": row.avg_r,
+                "ci_low": row.ci_low,
+                "ci_high": row.ci_high,
+                "created_at": row.created_at,
+            }
+            for row in rows
+        ]
+    }
 
 
 @router.get("/api/intel/news")
@@ -1586,6 +1821,7 @@ def _provider_labels() -> dict[str, str]:
         "openrouter": "OpenRouter",
         "openai_compatible": "OpenAI 兼容",
         "ark": "Ark（火山引擎）",
+        "nvidia_nim": "NVIDIA NIM",
     }
 
 
@@ -1597,6 +1833,7 @@ def _field_hints() -> dict[str, str]:
         "api_key_override": "Leave empty to use provider default API key.",
         "routing": "Task routing decides which profile each task uses.",
         "openrouter_headers": "Optional OpenRouter HTTP-Referer / X-Title headers.",
+        "nvidia_nim_model": "NVIDIA NIM for VLMs default model: nvidia_nim/qwen3.5-397b-a17b (mapped upstream to qwen/qwen3.5-397b-a17b).",
     }
 
 
@@ -1691,14 +1928,19 @@ def _build_llm_model_presets(s) -> dict:
     openrouter_balanced = _flat(provider="openrouter", tier="balanced", limit=8) or _flat(provider="openrouter", limit=8)
     deepseek_recommended = _flat(provider="deepseek", limit=8)
     ark_recommended = _flat(provider="ark", limit=8)
+    nvidia_nim_recommended = _flat(provider="nvidia_nim", limit=8)
 
     premium_model = openrouter_advanced[0]["id"] if openrouter_advanced else "google/gemini-3.1-pro-preview"
     balanced_model = openrouter_balanced[0]["id"] if openrouter_balanced else "deepseek/deepseek-r1"
     ark_model = ark_recommended[0]["id"] if ark_recommended else "doubao-seed-2-0-pro-260215"
+    nvidia_nim_model = (
+        nvidia_nim_recommended[0]["id"] if nvidia_nim_recommended else "nvidia_nim/qwen3.5-397b-a17b"
+    )
 
     return {
         "deepseek_recommended": deepseek_recommended,
         "ark_recommended": ark_recommended,
+        "nvidia_nim_recommended": nvidia_nim_recommended,
         "openrouter_recommended": {
             "advanced": openrouter_advanced,
             "balanced": openrouter_balanced,
@@ -1739,6 +1981,18 @@ def _build_llm_model_presets(s) -> dict:
                 "label": "高级 Ark",
                 "description": "适合对效果要求高，对成本不敏感的任务",
                 "config": {"provider": "ark", "model": ark_model, "use_reasoning": "true", "base_url": "", "enabled": True},
+            },
+            "premium_nvidia_nim": {
+                "id": "premium_nvidia_nim",
+                "label": "高级 NVIDIA NIM",
+                "description": "适合视觉理解和复杂多模态任务",
+                "config": {
+                    "provider": "nvidia_nim",
+                    "model": nvidia_nim_model,
+                    "use_reasoning": "auto",
+                    "base_url": "",
+                    "enabled": True,
+                },
             },
         },
     }
@@ -1815,6 +2069,7 @@ def llm_get_config():
             "openrouter": _mask_api_key(s.openrouter_api_key),
             "openai": _mask_api_key(s.openai_api_key),
             "ark": _mask_api_key(s.ark_api_key),
+            "nvidia_nim": _mask_api_key(s.nvidia_nim_api_key),
         },
         "task_routing": s.llm_task_routing,
         "profiles": profiles_payload,
@@ -1886,6 +2141,7 @@ async def llm_update_config(req: Request):
                 "openai": "OPENAI_API_KEY",
                 "openai_compatible": "OPENAI_API_KEY",
                 "ark": "ARK_API_KEY",
+                "nvidia_nim": "NVIDIA_NIM_API_KEY",
             }
             for provider, key in keys_data.items():
                 if isinstance(key, str) and "****" not in key and key.strip() != "":
@@ -2444,6 +2700,7 @@ async def _refresh_market_data_before_ai_analysis() -> dict[str, Any]:
 @router.post("/api/ai-analyze")
 async def ai_analyze_now(
     model: str | None = Query(default=None),
+    symbol: str | None = Query(default=None),
     dry_run: bool = Query(default=False),
     db: Session = Depends(get_db),
 ):
@@ -2477,14 +2734,21 @@ async def ai_analyze_now(
 
     recent_alerts_by_symbol = _build_recent_alerts_by_symbol(db, limit=60)
     funding_current_by_symbol = _build_funding_current_by_symbol(db)
+    
+    target_symbols = [symbol] if symbol and symbol.upper() in [s.upper() for s in settings.watchlist_symbols] else settings.watchlist_symbols
+    _resolved_target_symbol = symbol.upper() if symbol else None
+    if _resolved_target_symbol and _resolved_target_symbol not in target_symbols:
+        # User specified a symbol but it's not in the watchlist, we might still want to try or just fallback
+        target_symbols = [_resolved_target_symbol]
+        
     symbol_inputs: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {
-        symbol: _build_market_ai_symbol_inputs(
+        sym: _build_market_ai_symbol_inputs(
             db,
-            symbol,
+            sym,
             recent_alerts_by_symbol=recent_alerts_by_symbol,
             funding_current_by_symbol=funding_current_by_symbol,
         )
-        for symbol in settings.watchlist_symbols
+        for sym in target_symbols
     }
     available_symbols = [symbol for symbol, (snaps, _ctx) in symbol_inputs.items() if snaps]
     if not available_symbols:
@@ -2547,6 +2811,7 @@ async def ai_analyze_now(
 async def ai_analyze_stream(
     request: Request,
     model: str | None = Query(default=None),
+    symbol: str | None = Query(default=None),
 ):
     """Streaming endpoint for AI analysis using Server-Sent Events (SSE)."""
     import asyncio
@@ -2583,14 +2848,20 @@ async def ai_analyze_stream(
     with SessionLocal() as preload_db:
         recent_alerts_by_symbol = _build_recent_alerts_by_symbol(preload_db, limit=60)
         funding_current_by_symbol = _build_funding_current_by_symbol(preload_db)
+        
+        target_symbols = [symbol] if symbol and symbol.upper() in [s.upper() for s in settings.watchlist_symbols] else settings.watchlist_symbols
+        _resolved_target_symbol = symbol.upper() if symbol else None
+        if _resolved_target_symbol and _resolved_target_symbol not in target_symbols:
+            target_symbols = [_resolved_target_symbol]
+            
         symbol_inputs: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {
-            symbol: _build_market_ai_symbol_inputs(
+            sym: _build_market_ai_symbol_inputs(
                 preload_db,
-                symbol,
+                sym,
                 recent_alerts_by_symbol=recent_alerts_by_symbol,
                 funding_current_by_symbol=funding_current_by_symbol,
             )
-            for symbol in settings.watchlist_symbols
+            for sym in target_symbols
         }
     available_symbols = [symbol for symbol, (snaps, _ctx) in symbol_inputs.items() if snaps]
     if not available_symbols:

@@ -1,0 +1,595 @@
+(function () {
+  const bootstrap = window.STRATEGY_BOOTSTRAP || {};
+  const MAX_LINES = Number(bootstrap.maxLines || 20);
+  const DENSIFIED_RANGE_SECONDS = 3 * 24 * 3600;
+
+  const state = {
+    symbol: String(bootstrap.defaultSymbol || "BTCUSDT").toUpperCase(),
+    baseTf: "1h",
+    scoringMode: "REALISTIC",
+    side: "",
+    outcome: "",
+    regime: "",
+    manifestId: "",
+    fromTs: Math.floor(Date.now() / 1000) - 24 * 3600,
+    toTs: Math.floor(Date.now() / 1000),
+    cursor: null,
+    rawItems: [],
+    detailCache: new Map(),
+    selectedDecisionIds: [],
+    ohlcv: [],
+    densified: [],
+    mode: "raw",
+    isLoading: false,
+  };
+
+  let chart;
+  let candleSeries;
+  let densitySeries;
+  let priceLines = [];
+  let rangeDebounceTimer = null;
+  let lastFetchedFrom = 0;
+  let lastFetchedTo = 0;
+  let loadedOhlcvFrom = 0;
+  let loadedOhlcvTo = 0;
+  let skipRangeEvent = false;
+  const DETAIL_CACHE_MAX = 200;
+  const OHLCV_EXTEND_PAD = 0.3; // fetch 30% extra on each side when extending
+
+  const els = {
+    symbol: document.getElementById("strategy-symbol"),
+    baseTf: document.getElementById("strategy-base-tf"),
+    scoringMode: document.getElementById("strategy-scoring-mode"),
+    side: document.getElementById("strategy-side"),
+    outcome: document.getElementById("strategy-outcome"),
+    regime: document.getElementById("strategy-regime"),
+    manifestId: document.getElementById("strategy-manifest-id"),
+    refresh: document.getElementById("strategy-refresh"),
+    chart: document.getElementById("strategy-chart"),
+    viewMeta: document.getElementById("strategy-view-meta"),
+    decisionsMeta: document.getElementById("strategy-decisions-meta"),
+    decisionList: document.getElementById("strategy-decision-list"),
+    decisionDetail: document.getElementById("strategy-decision-detail"),
+    loadMore: document.getElementById("strategy-load-more"),
+    scores: document.getElementById("strategy-scores"),
+    featureStats: document.getElementById("strategy-feature-stats"),
+    maxLines: document.getElementById("strategy-max-lines"),
+  };
+
+  function esc(value) {
+    return window.SentinelUI ? window.SentinelUI.esc(value) : String(value ?? "");
+  }
+
+  function numberOrNull(value) {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : null;
+  }
+
+  function parseControlState() {
+    state.symbol = String(els.symbol?.value || state.symbol || "BTCUSDT").toUpperCase();
+    state.baseTf = String(els.baseTf?.value || "1h");
+    state.scoringMode = String(els.scoringMode?.value || "REALISTIC").toUpperCase();
+    state.side = String(els.side?.value || "").toUpperCase();
+    state.outcome = String(els.outcome?.value || "").toUpperCase();
+    state.regime = String(els.regime?.value || "").toUpperCase();
+    state.manifestId = String(els.manifestId?.value || "").trim();
+  }
+
+  function formatTs(ts) {
+    if (!ts) return "-";
+    const d = new Date(Number(ts) * 1000);
+    if (!Number.isFinite(d.getTime())) return "-";
+    const Y = d.getFullYear();
+    const M = String(d.getMonth() + 1).padStart(2, "0");
+    const D = String(d.getDate()).padStart(2, "0");
+    const h = String(d.getHours()).padStart(2, "0");
+    const m = String(d.getMinutes()).padStart(2, "0");
+    const s = String(d.getSeconds()).padStart(2, "0");
+    return `${Y}-${M}-${D} ${h}:${m}:${s}`;
+  }
+
+  function buildApiUrl(path, params) {
+    const qp = new URLSearchParams();
+    Object.entries(params || {}).forEach(([k, v]) => {
+      if (v === undefined || v === null || v === "") return;
+      qp.set(k, String(v));
+    });
+    const s = qp.toString();
+    return s ? `${path}?${s}` : path;
+  }
+
+  async function fetchJson(path, params) {
+    const url = buildApiUrl(path, params);
+    const resp = await fetch(url, { headers: { Accept: "application/json" } });
+    if (!resp.ok) throw new Error(`${resp.status} ${resp.statusText}`);
+    return resp.json();
+  }
+
+  function setChartLoading(loading) {
+    const overlay = document.getElementById("strategy-chart-loading");
+    if (overlay) overlay.classList.toggle("hidden", !loading);
+  }
+
+  function ensureChart() {
+    if (chart) return;
+    chart = LightweightCharts.createChart(els.chart, {
+      autoSize: true,
+      layout: {
+        background: { type: 'solid', color: "rgba(2,6,23,0)" },
+        textColor: "rgba(226,232,240,0.9)",
+      },
+      grid: {
+        vertLines: { color: "rgba(148,163,184,0.1)" },
+        horzLines: { color: "rgba(148,163,184,0.1)" },
+      },
+      crosshair: { mode: 0 },
+      rightPriceScale: { borderColor: "rgba(148,163,184,0.2)" },
+      timeScale: { borderColor: "rgba(148,163,184,0.2)", timeVisible: true, secondsVisible: false },
+    });
+    candleSeries = chart.addCandlestickSeries({
+      upColor: "#22c55e",
+      downColor: "#ef4444",
+      borderVisible: false,
+      wickUpColor: "#22c55e",
+      wickDownColor: "#ef4444",
+    });
+    densitySeries = chart.addHistogramSeries({
+      color: "rgba(56,189,248,0.35)",
+      priceFormat: { type: "volume" },
+      priceScaleId: "",
+      lastValueVisible: false,
+      priceLineVisible: false,
+    });
+    densitySeries.priceScale().applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } });
+
+    chart.timeScale().subscribeVisibleLogicalRangeChange(() => {
+      if (skipRangeEvent) return;
+      clearTimeout(rangeDebounceTimer);
+      rangeDebounceTimer = setTimeout(onViewportChange, 350);
+    });
+
+    chart.subscribeClick((param) => {
+      if (!param || !param.time || !state.rawItems.length) return;
+      const time = Number(param.time);
+      if (!Number.isFinite(time)) return;
+      const exact = state.rawItems.find((item) => Number(item.decision_ts) === time);
+      if (exact) {
+        selectDecision(exact.id);
+        return;
+      }
+      let nearest = null;
+      let minDiff = Number.POSITIVE_INFINITY;
+      for (const item of state.rawItems) {
+        const diff = Math.abs(Number(item.decision_ts) - time);
+        if (diff < minDiff) {
+          nearest = item;
+          minDiff = diff;
+        }
+      }
+      if (nearest && minDiff <= 1800) selectDecision(nearest.id);
+    });
+  }
+
+  function updateViewMeta() {
+    const modeText = state.mode === "densified" ? "聚合" : "原始";
+    const rangeHours = Math.max(0, ((state.toTs - state.fromTs) / 3600)).toFixed(1);
+    if (els.viewMeta) {
+      els.viewMeta.textContent = `${state.symbol} | ${state.baseTf} | 模式=${modeText} | 窗口=${rangeHours}h`;
+    }
+  }
+
+  function renderDensitySeries() {
+    if (!densitySeries) return;
+    const data = (state.densified || []).map((b) => ({
+      time: Number(b.bucket_ts),
+      value: Number(b.count || 0),
+      color: "rgba(56,189,248,0.35)",
+    }));
+    densitySeries.setData(data);
+  }
+
+  function markerColorForItem(item) {
+    const side = String(item.position_side || "").toUpperCase();
+    return side === "LONG" ? "rgba(34,197,94,1)" : side === "SHORT" ? "rgba(239,68,68,1)" : "rgba(148,163,184,0.9)";
+  }
+
+  function renderDecisionMarkers() {
+    if (!candleSeries) return;
+    const markers = (state.rawItems || []).slice(0, 500).map((item) => {
+      const side = String(item.position_side || "").toUpperCase();
+      const isLong = side === "LONG";
+      const isShort = side === "SHORT";
+      return {
+        time: Number(item.decision_ts),
+        position: isShort ? "aboveBar" : "belowBar",
+        color: markerColorForItem(item),
+        shape: isLong ? "arrowUp" : isShort ? "arrowDown" : "circle",
+        text: isLong ? "多" : isShort ? "空" : "平",
+        size: 1.5,
+      };
+    }).sort((a, b) => a.time - b.time);
+    candleSeries.setMarkers(markers);
+  }
+
+  function clearPriceLines() {
+    if (!candleSeries) return;
+    for (const line of priceLines) {
+      try {
+        candleSeries.removePriceLine(line);
+      } catch (_e) {
+        // ignore
+      }
+    }
+    priceLines = [];
+  }
+
+  function redrawSelectedLines() {
+    clearPriceLines();
+    if (!candleSeries) return;
+    // Limit to only 1 max selected feature block to reduce chart clutter
+    const maxDecisions = Math.max(1, Math.floor((MAX_LINES || 4) / 4));
+    state.selectedDecisionIds = state.selectedDecisionIds.slice(-maxDecisions);
+
+    const defs = [];
+    for (const id of state.selectedDecisionIds) {
+      const d = state.detailCache.get(id);
+      if (!d) continue;
+      if (d.entry_price) defs.push({ price: d.entry_price, color: "rgba(56,189,248,0.8)", title: `入场#${id}` });
+      if (d.take_profit) defs.push({ price: d.take_profit, color: "rgba(34,197,94,0.8)", title: `止盈#${id}` });
+      if (d.stop_loss) defs.push({ price: d.stop_loss, color: "rgba(239,68,68,0.8)", title: `止损#${id}` });
+      if (d.liq_price_est) defs.push({ price: d.liq_price_est, color: "rgba(249,115,22,0.8)", title: `强平#${id}` });
+    }
+
+    const limits = MAX_LINES || 20;
+    for (const def of defs.slice(0, limits)) {
+      if (!Number.isFinite(def.price)) continue;
+      const line = candleSeries.createPriceLine({
+        price: Number(def.price),
+        color: def.color,
+        lineWidth: 1,
+        lineStyle: 1,
+        axisLabelVisible: true,
+        title: def.title,
+      });
+      priceLines.push(line);
+    }
+  }
+
+  function renderDecisionList(hasMore) {
+    if (!els.decisionList) return;
+    if (!state.rawItems.length) {
+      els.decisionList.innerHTML = `<div class="text-xs text-slate-500 p-3 italic text-center">当前视图无决策记录。</div>`;
+      if (els.loadMore) els.loadMore.classList.add("hidden");
+      return;
+    }
+    const rows = state.rawItems
+      .map((item) => {
+        const outcome = String(item?.eval?.outcome_raw || item?.execution?.status || "OPEN").toUpperCase();
+        const cls = state.selectedDecisionIds.includes(item.id) ? "bg-white/10 border-primary/40" : "bg-black/20 border-white/10";
+        return (
+          `<button type="button" class="w-full text-left border rounded px-2 py-1.5 hover:bg-white/10 ${cls}" data-decision-id="${item.id}">` +
+          `<div class="flex justify-between items-center gap-2">` +
+          `<span class="text-[11px] text-muted-foreground">${esc(formatTs(item.decision_ts))}</span>` +
+          `<span class="text-[11px]">${esc(item.position_side || "-")} / ${esc(outcome)}</span>` +
+          `</div>` +
+          `<div class="text-xs mono mt-1">E:${esc(item.entry_price ?? "-")} TP:${esc(item.take_profit ?? "-")} SL:${esc(item.stop_loss ?? "-")}</div>` +
+          `</button>`
+        );
+      })
+      .join("");
+    els.decisionList.innerHTML = rows;
+    if (els.decisionsMeta) {
+      els.decisionsMeta.textContent = `${state.rawItems.length} 条记录`;
+    }
+    els.decisionList.querySelectorAll("[data-decision-id]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const id = Number(btn.getAttribute("data-decision-id"));
+        if (Number.isFinite(id)) selectDecision(id);
+      });
+    });
+    if (els.loadMore) {
+      els.loadMore.classList.toggle("hidden", !hasMore || state.mode !== "raw");
+    }
+  }
+
+  function renderDetail(item) {
+    if (!els.decisionDetail) return;
+    els.decisionDetail.textContent = item ? JSON.stringify(item, null, 2) : "";
+  }
+
+  async function loadScores() {
+    if (!els.scores || !els.featureStats) return;
+    try {
+      const common = {
+        manifest_id: state.manifestId || undefined,
+        scoring_mode: state.scoringMode,
+      };
+      const [scoresResp, statsResp] = await Promise.all([
+        fetchJson("/api/strategy/scores", { ...common, limit: 8 }),
+        fetchJson("/api/strategy/feature-stats", {
+          ...common,
+          regime_id: state.regime || undefined,
+          status: "OK",
+          limit: 20,
+        }),
+      ]);
+      const scoreItems = scoresResp.items || [];
+      const statItems = statsResp.items || [];
+
+      els.scores.innerHTML = scoreItems.length
+        ? scoreItems
+          .map((s) => {
+            const ci = `${Number(s.win_rate_ci_low ?? 0).toFixed(3)} ~ ${Number(s.win_rate_ci_high ?? 0).toFixed(3)}`;
+            const badge = s.status === "INSUFFICIENT_DATA" ? "text-amber-300" : "text-emerald-300";
+            return (
+              `<div class="border border-white/10 rounded px-2 py-1 bg-black/20">` +
+              `<div class="flex justify-between"><span>${esc(s.split_type)} / ${esc(s.scoring_mode)}</span><span class="${badge}">${esc(s.status)}</span></div>` +
+              `<div class="text-muted-foreground">n=${esc(s.n_trades)} 胜率=${esc(s.win_rate ?? "-")} 置信区间=[${esc(ci)}]</div>` +
+              `</div>`
+            );
+          })
+          .join("")
+        : `<div class="text-slate-500 text-center italic py-2">暂无评分数据。</div>`;
+
+      els.featureStats.innerHTML = statItems.length
+        ? statItems
+          .map(
+            (r) =>
+              `<div class="border border-white/10 rounded px-2 py-1 bg-black/20">` +
+              `<div>${esc(r.feature_key)} / ${esc(r.bucket_key)}</div>` +
+              `<div class="text-muted-foreground">n=${esc(r.n)} win=${esc(r.win_rate ?? "-")} ci=[${esc(r.ci_low ?? "-")}, ${esc(r.ci_high ?? "-")}]</div>` +
+              `</div>`,
+          )
+          .join("")
+        : `<div class="text-slate-500 text-center italic py-2">暂无特征统计数据。</div>`;
+    } catch (err) {
+      els.scores.textContent = `scores load failed: ${err.message || err}`;
+      els.featureStats.textContent = "";
+    }
+  }
+
+  function parseOhlcvItems(respItems) {
+    return (respItems || [])
+      .map((row) => ({
+        time: Number(row.ts),
+        open: Number(row.open),
+        high: Number(row.high),
+        low: Number(row.low),
+        close: Number(row.close),
+      }))
+      .filter((row) => Number.isFinite(row.time));
+  }
+
+  function mergeOhlcv(existing, incoming) {
+    const map = new Map();
+    for (const c of existing) map.set(c.time, c);
+    for (const c of incoming) map.set(c.time, c);
+    const merged = Array.from(map.values()).sort((a, b) => a.time - b.time);
+    return merged;
+  }
+
+  async function loadOhlcv(forceFullReplace) {
+    const fetchFrom = state.fromTs;
+    const fetchTo = state.toTs;
+    const resp = await fetchJson("/api/ohlcv", {
+      symbol: state.symbol,
+      timeframe: state.baseTf,
+      from: fetchFrom,
+      to: fetchTo,
+      limit: 5000,
+    });
+    const incoming = parseOhlcvItems(resp.items);
+    if (forceFullReplace || !state.ohlcv.length) {
+      state.ohlcv = incoming;
+    } else {
+      state.ohlcv = mergeOhlcv(state.ohlcv, incoming);
+    }
+    loadedOhlcvFrom = Math.min(loadedOhlcvFrom || fetchFrom, fetchFrom);
+    loadedOhlcvTo = Math.max(loadedOhlcvTo || fetchTo, fetchTo);
+    skipRangeEvent = true;
+    candleSeries.setData(state.ohlcv);
+    requestAnimationFrame(() => { skipRangeEvent = false; });
+  }
+
+  async function loadRawDecisions(append) {
+    const params = {
+      symbol: state.symbol,
+      from: state.fromTs,
+      to: state.toTs,
+      manifest_id: state.manifestId || undefined,
+      side: state.side || undefined,
+      outcome: state.outcome || undefined,
+      regime: state.regime || undefined,
+      mode: "raw",
+      limit: 200,
+      cursor: append ? state.cursor : undefined,
+    };
+    const resp = await fetchJson("/api/strategy/decisions", params);
+    const items = Array.isArray(resp.items) ? resp.items : [];
+    state.rawItems = append ? state.rawItems.concat(items) : items;
+    state.cursor = resp.next_cursor || null;
+    state.mode = "raw";
+    renderDecisionMarkers();
+    renderDecisionList(Boolean(resp.has_more));
+  }
+
+  async function loadDensified() {
+    const range = state.toTs - state.fromTs;
+    let bucketSeconds = 900;
+    if (range > 14 * 24 * 3600) bucketSeconds = 3600;
+    else if (range > 7 * 24 * 3600) bucketSeconds = 1800;
+    const resp = await fetchJson("/api/strategy/decisions", {
+      symbol: state.symbol,
+      from: state.fromTs,
+      to: state.toTs,
+      manifest_id: state.manifestId || undefined,
+      side: state.side || undefined,
+      outcome: state.outcome || undefined,
+      regime: state.regime || undefined,
+      mode: "densified",
+      bucket_seconds: bucketSeconds,
+    });
+    state.densified = resp.items || [];
+    state.mode = "densified";
+    renderDensitySeries();
+  }
+
+  async function loadViewportData(forceOhlcv) {
+    if (state.isLoading) return;
+    state.isLoading = true;
+    setChartLoading(true);
+    updateViewMeta();
+    try {
+      // Only fetch OHLCV if forced or viewport extends beyond loaded range
+      const needOhlcv = forceOhlcv
+        || loadedOhlcvTo === 0
+        || state.fromTs < loadedOhlcvFrom
+        || state.toTs > loadedOhlcvTo;
+      if (needOhlcv) {
+        // Extend the fetch range with padding to reduce future fetches
+        const span = state.toTs - state.fromTs;
+        const pad = Math.floor(span * OHLCV_EXTEND_PAD);
+        const savedFrom = state.fromTs;
+        const savedTo = state.toTs;
+        state.fromTs = Math.min(state.fromTs, loadedOhlcvFrom || state.fromTs) - pad;
+        state.toTs = Math.max(state.toTs, loadedOhlcvTo || state.toTs) + pad;
+        try {
+          await loadOhlcv(forceOhlcv);
+        } catch (ohlcvErr) {
+          if (window.SentinelUI) window.SentinelUI.showToast(`OHLCV load failed: ${ohlcvErr.message || ohlcvErr}`, "error");
+        }
+        // Restore viewport range for decisions (decisions filter by visible range)
+        state.fromTs = savedFrom;
+        state.toTs = savedTo;
+      }
+      const range = Math.max(0, state.toTs - state.fromTs);
+      try {
+        if (range >= DENSIFIED_RANGE_SECONDS) {
+          await Promise.all([loadDensified(), loadRawDecisions(false)]);
+        } else {
+          skipRangeEvent = true;
+          densitySeries.setData([]);
+          requestAnimationFrame(() => { skipRangeEvent = false; });
+          state.densified = [];
+          await loadRawDecisions(false);
+        }
+      } catch (decErr) {
+        if (window.SentinelUI) window.SentinelUI.showToast(`decisions load failed: ${decErr.message || decErr}`, "error");
+      }
+      lastFetchedFrom = state.fromTs;
+      lastFetchedTo = state.toTs;
+    } finally {
+      state.isLoading = false;
+      setChartLoading(false);
+      updateViewMeta();
+    }
+  }
+
+  async function selectDecision(decisionId) {
+    if (!Number.isFinite(decisionId)) return;
+    try {
+      let detail = state.detailCache.get(decisionId);
+      if (!detail) {
+        const resp = await fetchJson(`/api/strategy/decisions/${decisionId}`);
+        detail = resp.item;
+        // Cap cache size
+        if (state.detailCache.size >= DETAIL_CACHE_MAX) {
+          const oldest = state.detailCache.keys().next().value;
+          state.detailCache.delete(oldest);
+        }
+        state.detailCache.set(decisionId, detail);
+      }
+      if (!state.selectedDecisionIds.includes(decisionId)) {
+        state.selectedDecisionIds.push(decisionId);
+      }
+      renderDetail(detail);
+      redrawSelectedLines();
+      renderDecisionList(Boolean(state.cursor));
+    } catch (err) {
+      if (window.SentinelUI) window.SentinelUI.showToast(`detail load failed: ${err.message || err}`, "error");
+    }
+  }
+
+  function onViewportChange() {
+    if (!chart || skipRangeEvent) return;
+    const range = chart.timeScale().getVisibleRange();
+    if (!range || range.from == null || range.to == null) return;
+    const from = Math.floor(Number(range.from));
+    const to = Math.ceil(Number(range.to));
+    if (!Number.isFinite(from) || !Number.isFinite(to) || from >= to) return;
+    // Skip if decision range barely changed (< 5% shift)
+    const span = to - from;
+    const shift = Math.abs(from - lastFetchedFrom) + Math.abs(to - lastFetchedTo);
+    if (lastFetchedTo > 0 && shift < span * 0.05) return;
+    state.fromTs = from;
+    state.toTs = to;
+    state.cursor = null;
+    // loadViewportData will only fetch OHLCV if panning beyond loaded range
+    // Zoom-in is safe — data already loaded
+    loadViewportData(false);
+  }
+
+  function bindEvents() {
+    [els.symbol, els.baseTf, els.scoringMode, els.side, els.outcome, els.regime].forEach((el) => {
+      if (!el) return;
+      el.addEventListener("change", async () => {
+        parseControlState();
+        state.cursor = null;
+        state.selectedDecisionIds = [];
+        state.detailCache.clear();
+        clearPriceLines();
+        // Reset OHLCV bounds on filter/symbol change
+        loadedOhlcvFrom = 0;
+        loadedOhlcvTo = 0;
+        state.ohlcv = [];
+        await loadViewportData(true);
+        await loadScores();
+      });
+    });
+    if (els.manifestId) {
+      els.manifestId.addEventListener("change", async () => {
+        parseControlState();
+        state.cursor = null;
+        await loadViewportData(true);
+        await loadScores();
+      });
+    }
+    if (els.refresh) {
+      els.refresh.addEventListener("click", async () => {
+        parseControlState();
+        state.cursor = null;
+        // Force full reload on manual Refresh
+        loadedOhlcvFrom = 0;
+        loadedOhlcvTo = 0;
+        state.ohlcv = [];
+        await loadViewportData(true);
+        await loadScores();
+      });
+    }
+    if (els.loadMore) {
+      els.loadMore.addEventListener("click", async () => {
+        if (!state.cursor || state.mode !== "raw") return;
+        await loadRawDecisions(true);
+      });
+    }
+  }
+
+  async function boot() {
+    try {
+      if (!els.chart) { els.viewMeta.textContent = 'NO CHART EL'; return; }
+      if (typeof LightweightCharts === "undefined") { els.viewMeta.textContent = 'NO LWC LIB'; return; }
+      if (els.maxLines) els.maxLines.textContent = String(MAX_LINES);
+      parseControlState();
+      ensureChart();
+      bindEvents();
+      await loadViewportData(true);
+      await loadScores();
+      if (chart) chart.timeScale().fitContent();
+    } catch (e) {
+      if (els.viewMeta) els.viewMeta.textContent = 'CRASH: ' + String(e.message || e);
+      console.error(e);
+    }
+  }
+
+  document.addEventListener("DOMContentLoaded", boot);
+})();

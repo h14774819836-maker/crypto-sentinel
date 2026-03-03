@@ -1,4 +1,4 @@
-﻿import asyncio
+import asyncio
 import json
 import random
 from datetime import datetime, timezone
@@ -95,6 +95,17 @@ class OpenAICompatibleProvider(LLMProvider):
     def _is_reasoner_model(self, model: str | None = None) -> bool:
         model_l = (model or self.model or "").lower()
         return "reasoner" in model_l or "r1" in model_l
+
+    def _resolve_upstream_model(self, model: str | None) -> str:
+        model_norm = (model or self.model or "").strip()
+        provider = (self.config.provider or "").strip().lower()
+        if provider != "nvidia_nim":
+            return model_norm
+        aliases = {
+            "nvidia_nim/qwen3.5-397b-a17b": "qwen/qwen3.5-397b-a17b",
+            "nvidia_nim/kimi-k2.5": "moonshotai/kimi-k2.5",
+        }
+        return aliases.get(model_norm.lower(), model_norm)
 
     def _normalize_max_tokens(self, requested: Any, use_reasoning: bool, model: str | None = None) -> int:
         try:
@@ -478,10 +489,11 @@ class OpenAICompatibleProvider(LLMProvider):
         model_override: Optional[str] = None,
     ) -> Dict[str, Any]:
         effective_model = (model_override or self.model or "").strip() or self.model
-        max_tokens_norm = self._normalize_max_tokens(max_tokens, use_reasoning, model=effective_model)
+        upstream_model = self._resolve_upstream_model(effective_model)
+        max_tokens_norm = self._normalize_max_tokens(max_tokens, use_reasoning, model=upstream_model)
 
         request_summary = self._request_summary(
-            model=effective_model,
+            model=upstream_model,
             messages=messages,
             use_reasoning=use_reasoning,
             final_max_tokens=max_tokens_norm,
@@ -489,6 +501,7 @@ class OpenAICompatibleProvider(LLMProvider):
             tools=tools,
             stream_callback=stream_callback,
         )
+        request_summary["configured_model"] = effective_model
         logger.debug("LLM upstream request summary: %s", request_summary)
 
         retries = 0
@@ -506,7 +519,7 @@ class OpenAICompatibleProvider(LLMProvider):
                             stream_callback=stream_callback,
                             tools=tools,
                             tool_choice=tool_choice,
-                            effective_model=effective_model,
+                            effective_model=upstream_model,
                         )
                     return await self._call_chat_completions(
                         messages=messages,
@@ -517,7 +530,7 @@ class OpenAICompatibleProvider(LLMProvider):
                         stream_callback=stream_callback,
                         tools=tools,
                         tool_choice=tool_choice,
-                        effective_model=effective_model,
+                        effective_model=upstream_model,
                     )
             except RateLimitError as e:
                 logger.warning("LLM Rate Limit Error (429) for model %s: %s | req=%s", self.model, str(e), request_summary)

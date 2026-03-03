@@ -127,6 +127,40 @@ def build_scheduler(runtime) -> AsyncIOScheduler:
             misfire_grace_time=60,
         )
 
+        scheduler.add_job(
+            jobs.supervised_job,
+            "interval",
+            seconds=runtime.settings.strategy_eval_job_seconds,
+            kwargs={"job_name": "decision_eval_job", "coro_func": jobs.decision_eval_job, "runtime": runtime},
+            id="decision_eval_job",
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=60,
+            next_run_time=now,
+        )
+        scheduler.add_job(
+            jobs.supervised_job,
+            "interval",
+            seconds=runtime.settings.strategy_scores_job_seconds,
+            kwargs={"job_name": "strategy_scores_job", "coro_func": jobs.strategy_scores_job, "runtime": runtime},
+            id="strategy_scores_job",
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=120,
+            next_run_time=now,
+        )
+        scheduler.add_job(
+            jobs.supervised_job,
+            "interval",
+            seconds=runtime.settings.strategy_research_job_seconds,
+            kwargs={"job_name": "strategy_research_job", "coro_func": jobs.strategy_research_job, "runtime": runtime},
+            id="strategy_research_job",
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=120,
+            next_run_time=now,
+        )
+
     # --- YouTube MVP ---
     if runtime.settings.youtube_enabled:
         scheduler.add_job(

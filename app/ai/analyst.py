@@ -489,6 +489,8 @@ class MarketAnalyst:
         if not isinstance(item, dict):
             logger.warning("AI response missing 'signal' object")
             return []
+        trade_plan = data.get("trade_plan") if isinstance(data.get("trade_plan"), dict) else {}
+        meta = data.get("meta") if isinstance(data.get("meta"), dict) else {}
 
         parsed_symbol = str(item.get("symbol", symbol)).upper() or symbol.upper()
         direction = str(item.get("direction", "HOLD")).upper()
@@ -497,20 +499,31 @@ class MarketAnalyst:
 
         confidence = item.get("confidence", 0)
         if not isinstance(confidence, (int, float)):
-            confidence = 0
+            meta_conf = meta.get("confidence")
+            confidence = float(meta_conf) * 100 if isinstance(meta_conf, (int, float)) else 0
         confidence = max(0, min(100, int(confidence)))
 
-        reasoning = str(item.get("reasoning", "") or "").strip()
+        reasoning = str(item.get("reasoning", "") or meta.get("reason_brief") or "").strip()
         analysis_json = self._build_analysis_json(data, market_regime, symbol=parsed_symbol)
         if not reasoning:
             reasoning = self._derive_reasoning_summary(analysis_json)
 
+        entry_price = _safe_float(item.get("entry_price"))
+        take_profit = _safe_float(item.get("take_profit"))
+        stop_loss = _safe_float(item.get("stop_loss"))
+        if entry_price is None:
+            entry_price = _safe_float(trade_plan.get("entry_price"))
+        if take_profit is None:
+            take_profit = _safe_float(trade_plan.get("take_profit"))
+        if stop_loss is None:
+            stop_loss = _safe_float(trade_plan.get("stop_loss"))
+
         signal = AiTradeSignal(
             symbol=parsed_symbol,
             direction=direction,
-            entry_price=_safe_float(item.get("entry_price")),
-            take_profit=_safe_float(item.get("take_profit")),
-            stop_loss=_safe_float(item.get("stop_loss")),
+            entry_price=entry_price,
+            take_profit=take_profit,
+            stop_loss=stop_loss,
             confidence=confidence,
             reasoning=reasoning,
             model_requested=None,
@@ -538,6 +551,17 @@ class MarketAnalyst:
                         "reasoning": signal.reasoning,
                     }
                 )
+            trade_plan = signal.analysis_json.setdefault("trade_plan", {})
+            if isinstance(trade_plan, dict):
+                trade_plan["entry_price"] = signal.entry_price
+                trade_plan["take_profit"] = signal.take_profit
+                trade_plan["stop_loss"] = signal.stop_loss
+                trade_plan["market_type"] = str(trade_plan.get("market_type") or "futures").lower()
+            meta = signal.analysis_json.setdefault("meta", {})
+            if isinstance(meta, dict):
+                meta.setdefault("base_timeframe", "1m")
+                meta["confidence"] = round(max(0.0, min(1.0, float(signal.confidence) / 100.0)), 3)
+                meta.setdefault("reason_brief", signal.reasoning[:180])
 
         return [signal]
 
@@ -564,6 +588,27 @@ class MarketAnalyst:
                 "stop_loss": None,
                 "confidence": 35,
                 "reasoning": "结构化解析/校验失败，已降级为HOLD。",
+            },
+            "trade_plan": {
+                "market_type": "futures",
+                "margin_mode": None,
+                "leverage": None,
+                "capital_alloc_usdt": None,
+                "entry_mode": "market",
+                "entry_price": None,
+                "take_profit": None,
+                "stop_loss": None,
+                "expiration_ts_utc": int(datetime.now(timezone.utc).timestamp()) + 3600,
+                "max_hold_bars": 60,
+                "liq_price_est": None,
+                "fees_bps_assumption": None,
+                "slippage_bps_assumption": None,
+            },
+            "meta": {
+                "base_timeframe": "1m",
+                "confidence": 0.35,
+                "reason_brief": "结构化解析失败，降级 HOLD",
+                "regime_calc_mode": "online",
             },
             "evidence": [],
             "anchors": [],
@@ -601,12 +646,23 @@ class MarketAnalyst:
         signal = data.get("signal")
         if not isinstance(signal, dict):
             return ["缺少 signal 对象"]
+        trade_plan = data.get("trade_plan")
+        if not isinstance(trade_plan, dict):
+            errors.append("缺少 trade_plan 对象")
+            trade_plan = {}
         direction = str(signal.get("direction") or "").upper()
         if direction not in {"LONG", "SHORT", "HOLD"}:
             errors.append("signal.direction 非法")
         confidence = signal.get("confidence")
         if not isinstance(confidence, (int, float)):
             errors.append("signal.confidence 必须为数值")
+        market_type = str(trade_plan.get("market_type") or "futures").lower()
+        if market_type != "futures":
+            errors.append("trade_plan.market_type 必须为 futures")
+        has_exp = isinstance(trade_plan.get("expiration_ts_utc"), (int, float))
+        has_max_hold = isinstance(trade_plan.get("max_hold_bars"), (int, float))
+        if not (has_exp or has_max_hold):
+            errors.append("trade_plan 必须包含 expiration_ts_utc 或 max_hold_bars")
         evidence = data.get("evidence")
         if not isinstance(evidence, list) or len(evidence) < 2:
             errors.append("evidence 至少需要 2 条")
@@ -722,6 +778,17 @@ class MarketAnalyst:
             "task": "market_analysis",
             "ts": datetime.now(timezone.utc).isoformat(),
         }
+        if not bool(getattr(self.settings, "market_ai_log_verbose", False)):
+            for key in (
+                "prompt_excerpt",
+                "system_prompt_excerpt",
+                "content_excerpt",
+                "reasoning_excerpt",
+                "raw_excerpt",
+                "raw_response_excerpt",
+                "score_breakdown",
+            ):
+                payload.pop(key, None)
         base.update(payload)
         try:
             market_ai_logger.info("[AI_MARKET] %s", json.dumps(base, ensure_ascii=False, default=str))
@@ -755,6 +822,8 @@ class MarketAnalyst:
         payload = {
             "market_regime": market_regime,
             "signal": data.get("signal") if isinstance(data.get("signal"), dict) else {},
+            "trade_plan": data.get("trade_plan") if isinstance(data.get("trade_plan"), dict) else {},
+            "meta": data.get("meta") if isinstance(data.get("meta"), dict) else {},
             "evidence": data.get("evidence") if isinstance(data.get("evidence"), list) else [],
             "anchors": data.get("anchors") if isinstance(data.get("anchors"), list) else [],
             "levels": data.get("levels") if isinstance(data.get("levels"), dict) else {"supports": [], "resistances": []},
@@ -863,6 +932,25 @@ class MarketAnalyst:
                 status = "downgraded"
                 downgrade_reason = f"止损距离 ATR 异常（{sl_atr_multiple:.2f} ATR）"
                 warnings.append(f"止损距离 ATR 异常（{sl_atr_multiple:.2f} ATR），已降级为HOLD")
+                self._downgrade_to_hold(signal, confidence_cap=45)
+
+        trade_plan = analysis_json.get("trade_plan") if isinstance(analysis_json, dict) else {}
+        if not isinstance(trade_plan, dict):
+            trade_plan = {}
+        if signal.direction in ("LONG", "SHORT"):
+            leverage = trade_plan.get("leverage")
+            margin_mode = str(trade_plan.get("margin_mode") or "").upper()
+            if not isinstance(leverage, (int, float)) or margin_mode not in {"ISOLATED", "CROSS"}:
+                status = "downgraded"
+                downgrade_reason = "缺少关键合约字段（leverage/margin_mode）"
+                warnings.append("缺少 leverage 或 margin_mode，已降级为HOLD")
+                self._downgrade_to_hold(signal, confidence_cap=45)
+            has_exp = isinstance(trade_plan.get("expiration_ts_utc"), (int, float))
+            has_hold = isinstance(trade_plan.get("max_hold_bars"), (int, float))
+            if not (has_exp or has_hold):
+                status = "downgraded"
+                downgrade_reason = "缺少 expiration_ts_utc/max_hold_bars"
+                warnings.append("缺少 expiration_ts_utc 或 max_hold_bars，已降级为HOLD")
                 self._downgrade_to_hold(signal, confidence_cap=45)
 
         data_quality = (context or {}).get("data_quality") if isinstance(context, dict) else None

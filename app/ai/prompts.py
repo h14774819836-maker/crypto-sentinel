@@ -45,15 +45,29 @@ def build_analysis_prompt(
     if context is None:
         return _build_analysis_prompt_legacy(symbol, snapshots, current_time)
 
+    data_asof = _build_data_asof_by_tf(snapshots)
+    decision_ts = _pick_decision_ts(data_asof=data_asof, fallback_ts=current_time)
+    valid_until = int(decision_ts + 3600)
+
     facts_payload = {
         "symbol": symbol,
         "current_time_utc": current_time.isoformat(),
+        "data_asof": data_asof,
+        "decision_ts": decision_ts,
+        "valid_until_utc": valid_until,
         "multi_tf_snapshots": _sanitize_snapshots_for_prompt(snapshots),
         "brief": context.get("brief") or {},
         "funding_deltas": context.get("funding_deltas") or {},
         "alerts_digest": context.get("alerts_digest") or {},
         "data_quality": context.get("data_quality") or {},
         "input_budget_meta": context.get("input_budget_meta") or {},
+        "account_snapshot": context.get("account_snapshot") or {},
+        "constraints": context.get("constraints")
+        or {
+            "market_type": "futures",
+            "max_leverage": 50,
+            "requires_margin_mode": True,
+        },
     }
     external_views = {
         "youtube_radar": context.get("youtube_radar") or {"available": False},
@@ -70,6 +84,27 @@ def build_analysis_prompt(
             "stop_loss": "number|null",
             "confidence": "0-100",
             "reasoning": "一句简洁中文总结（给首页展示）",
+        },
+        "trade_plan": {
+            "market_type": "futures",
+            "margin_mode": "isolated|cross|null",
+            "leverage": "number|null",
+            "capital_alloc_usdt": "number|null",
+            "entry_mode": "market|limit",
+            "entry_price": "number|null",
+            "take_profit": "number|null",
+            "stop_loss": "number|null",
+            "expiration_ts_utc": "epoch seconds|null",
+            "max_hold_bars": "int|null",
+            "liq_price_est": "number|null",
+            "fees_bps_assumption": "number|null",
+            "slippage_bps_assumption": "number|null",
+        },
+        "meta": {
+            "base_timeframe": "1m|5m|15m|1h|4h",
+            "confidence": "0~1",
+            "reason_brief": "短理由",
+            "regime_calc_mode": "online|offline",
         },
         "evidence": [
             {
@@ -120,6 +155,8 @@ def build_analysis_prompt(
         "4.1 anchors 禁止引用观点源路径（例如 youtube_radar.*），仅允许锚定 facts.multi_tf_snapshots / facts.brief / facts.funding_deltas / facts.alerts_digest / facts.data_quality 等事实字段。",
         "5. 如果 context 中的 data_quality.overall 为 POOR，优先 HOLD 观望并输出低置信度（<40）。",
         "6. 在分析期间，将下面提供的“事实源”视为最高优先级数据来源，“观点源”仅作为旁证，发生冲突立即采取降低 confidence 和保守观望处理（同时标识 'conflicted'）。",
+        "7. 若关键交易字段缺失（如 leverage/margin_mode 无法确定）必须输出 HOLD，并在 validation_notes 说明缺失项。",
+        "8. trade_plan 中必须至少提供 expiration_ts_utc 或 max_hold_bars 之一。",
         "",
         "# 事实源与观点源数据 (巨量上下文，仔细阅读数值)",
         "--------------------- 事实源开始 ---------------------",
@@ -175,6 +212,28 @@ def _build_analysis_prompt_legacy(symbol: str, snapshots: dict[str, Any], curren
         "{\"market_regime\":\"...\",\"signal\":{\"symbol\":\"BTCUSDT\",\"direction\":\"LONG|SHORT|HOLD\",\"entry_price\":null,\"take_profit\":null,\"stop_loss\":null,\"confidence\":0,\"reasoning\":\"...\"}}",
     ])
     return "\n".join(lines)
+
+
+def _build_data_asof_by_tf(snapshots: dict[str, Any]) -> dict[str, int]:
+    out: dict[str, int] = {}
+    for tf, snap in (snapshots or {}).items():
+        latest = (snap or {}).get("latest") or {}
+        ts = latest.get("ts")
+        if isinstance(ts, datetime):
+            ts_utc = ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+            out[str(tf)] = int(ts_utc.timestamp())
+    return out
+
+
+def _pick_decision_ts(*, data_asof: dict[str, int], fallback_ts: datetime) -> int:
+    base_pref = ["1h", "15m", "5m", "1m", "4h"]
+    for tf in base_pref:
+        if tf in data_asof:
+            return int(data_asof[tf])
+    if data_asof:
+        return int(max(data_asof.values()))
+    ts = fallback_ts if fallback_ts.tzinfo else fallback_ts.replace(tzinfo=timezone.utc)
+    return int(ts.timestamp())
 
 
 def _sanitize_snapshots_for_prompt(snapshots: dict[str, Any]) -> dict[str, Any]:

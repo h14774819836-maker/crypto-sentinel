@@ -1,7 +1,7 @@
 # Crypto Sentinel 系统架构与协作分析报告
 
-> 文档版本：`v2.0`  
-> 更新时间：`2026-03-02`  
+> 文档版本：`v2.2`  
+> 更新时间：`2026-03-03`  
 > 生成口径：基于当前仓库代码实现（As-Is），并补充建议演进方向（To-Be）  
 > 适用范围：`crypto_sentinel` 单体代码库（API + Worker 双进程协作）
 
@@ -18,19 +18,22 @@
 9. [关键代码路径时序分析](#关键代码路径时序分析)
 10. [状态机分析](#状态机分析)
 11. [环境配置差异与部署策略](#环境配置差异与部署策略)
-12. [性能瓶颈与优化方案](#性能瓶颈与优化方案)
-13. [安全机制实现与风险分析](#安全机制实现与风险分析)
-14. [错误处理与监控告警体系](#错误处理与监控告警体系)
-15. [程序可改进的地方（全面问题清单）](#程序可改进的地方全面问题清单)
-16. [后期拓展方向](#后期拓展方向)
-17. [附录](#附录)
+12. [非功能性设计](#非功能性设计)
+13. [性能瓶颈与优化方案](#性能瓶颈与优化方案)
+14. [安全机制实现与风险分析](#安全机制实现与风险分析)
+15. [错误处理与监控告警体系](#错误处理与监控告警体系)
+16. [质量保障与测试策略](#质量保障与测试策略)
+17. [交付物标准与验收条件](#交付物标准与验收条件)
+18. [程序可改进的地方（全面问题清单）](#程序可改进的地方全面问题清单)
+19. [后期拓展方向](#后期拓展方向)
+20. [附录](#附录)
 
 ## 摘要
 
 - `Crypto Sentinel` 代码形态是单体仓库，但运行态为 `CLI 编排 + API 进程 + Worker 进程 + 共享数据库` 的协作系统。
 - 前端为 `FastAPI + Jinja2 模板 + 原生 JavaScript + SSE` 的服务端渲染方案，覆盖市场总览、告警中心、YouTube 观点与 LLM 调试。
 - 核心技术栈：`FastAPI/Uvicorn`、`APScheduler`、`SQLAlchemy/Alembic`、`httpx/websockets`、`pandas/numpy`、`OpenAI-compatible LLM SDK`、`Pydantic Settings`。
-- 主业务链路包含：行情采集/聚合 → 指标计算 → 异常检测/告警 → AI 市场分析 → Telegram 推送；YouTube 链路含视频发现 → 字幕/ASR → VTA 洞察 → 共识 → 注入 AI 上下文。
+- 主业务链路包含：行情采集/聚合 → 指标计算 → 异常检测/告警 → AI 市场分析 → Telegram 推送；YouTube 链路含视频发现 → 字幕/ASR → VTA 洞察 → 共识 → 注入 AI 上下文；Intel 链路覆盖 RSS 情报采集 → 关键词/实体标注 → 风险温度摘要 → 前端看板。
 - 跨进程协作依赖数据库与 LLM 热更新的 signal/ack 文件协议；运维观测覆盖 `llm_calls`、`ai_analysis_failures` 与 `job_metrics` 文件快照。
 
 ## 总体架构与技术栈
@@ -55,7 +58,42 @@
 - 行情：Binance `REST + WebSocket`（`app/providers/binance_provider.py`）
 - AI：`openai` SDK + 自定义 Provider 封装（`app/ai/openai_provider.py`）
 - YouTube：`RSS / Transcript API / yt-dlp / faster-whisper`（`app/providers/youtube_provider.py`）
+- Intel 情报：`RSS` 聚合 + 关键词标注（`app/news/service.py`）
 - 消息：Telegram Bot API（Webhook + Polling）
+
+### 分层结构与模块划分
+
+| 层级 | 职责 | 关键模块 |
+|---|---|---|
+| 表现层 | 页面渲染、交互与流式展示 | `app/web/templates/*`, `app/web/static/*` |
+| API 层 | 路由编排、参数校验、SSE 流 | `app/web/views.py`, `app/web/router.py` |
+| 业务层 | 行情处理、告警、AI 评估、YouTube 分析、Intel 情报 | `app/scheduler/*`, `app/features/*`, `app/ai/*`, `app/alerts/*`, `app/news/*` |
+| 数据层 | ORM、迁移、仓储访问 | `app/db/*` |
+| 集成层 | Binance/Telegram/YouTube/LLM 接入 | `app/providers/*`, `app/ai/openai_provider.py` |
+| 运维层 | CLI 启动、健康诊断、日志 | `app/cli.py`, `app/logging.py` |
+
+### 技术栈明细与选型对比
+
+| 类别 | 当前选型（版本） | 选型理由（现状） | 替代方案对比 |
+|---|---|---|---|
+| 语言/运行时 | Python `>=3.11` | 生态完整、数据处理与 AI SDK 成熟 | Go/Rust（性能更高但生态与研发成本更大） |
+| Web 框架 | FastAPI `>=0.115.0` | 内置 OpenAPI、异步友好、模板渲染可用 | Flask + extensions / Django（更传统但更重） |
+| ASGI Server | Uvicorn `>=0.30.0` | 与 FastAPI 配套、部署简化 | Hypercorn / Gunicorn+uvicorn |
+| 前端 | Jinja2 `>=3.1.4` + 原生 JS | 服务端渲染，改造成本低 | React/Vue SPA（开发复杂度更高） |
+| ORM | SQLAlchemy `>=2.0.30` | 成熟 ORM + 可迁移 | Django ORM / Peewee |
+| 迁移 | Alembic `>=1.13.1` | 与 SQLAlchemy 集成紧密 | Django migrations |
+| 调度 | APScheduler `>=3.10.4` | 轻量定时任务，适合单进程 Worker | Celery Beat（需 MQ） |
+| 数据分析 | pandas `>=2.2.2`, numpy `>=2.0.0` | 指标计算与聚合便利 | Polars（性能高但需要改写） |
+| LLM SDK | openai `>=1.40.0` | 兼容多 Provider 通道 | LangChain（更重） |
+| 网络客户端 | httpx `>=0.27.0`, websockets `>=12.0` | 异步请求/WS 友好 | requests + websocket-client |
+| 数据库 | SQLite（默认）/ Postgres `16`（Compose） | 本地易用 + 生产可迁移 | MySQL / ClickHouse |
+| 容器 | Docker (python:3.11-slim) | 统一运行环境 | Distroless/Alpine（更轻但调试成本高） |
+| 缓存 | 未引入 | 单机规模，低复杂度 | Redis（缓存/队列） |
+| 消息队列 | 未引入 | 任务规模有限 | RabbitMQ / Kafka / Redis Streams |
+| 网关 | 未引入 | 直接暴露 FastAPI | Nginx/Traefik/API Gateway |
+| 监控/告警 | logging + `job_metrics.json` + `/api/health` | 轻量可用 | Prometheus + Grafana + Sentry |
+| CI/CD | 未引入 | 尚无流水线 | GitHub Actions / GitLab CI |
+| 测试 | pytest `>=8.3.0`, pytest-cov `>=5.0.0` | 现有测试基于 pytest | unittest / nose |
 
 ### 关键代码路径/模块
 
@@ -63,12 +101,14 @@
 - 配置中心：`app/config.py`
 - 调度器：`app/scheduler/scheduler.py`
 - 定时任务：`app/scheduler/jobs.py`
+- Intel 情报：`app/news/service.py`
 
 ### 数据/控制流
 
 - `CLI` 启动 API 与 Worker 两个子进程（`app/cli.py`）。
 - API 负责页面渲染、管理接口、手动触发、SSE 流。
 - Worker 负责行情订阅、周期任务、外部轮询、告警推送。
+- Intel RSS 采集与摘要生成在 Worker 内以定时任务运行，结果提供给 API 展示与 AI 上下文。
 - 两进程通过共享数据库和 LLM 热更新文件信号协作。
 
 ### 风险与边界
@@ -112,6 +152,7 @@ flowchart LR
         LLM["LLM Providers"]
         TGAPI["Telegram Bot API"]
         YT["YouTube RSS/Transcript/Media"]
+        RSS["Intel RSS Feeds"]
         HF["HuggingFace / Whisper Model Cache"]
     end
 
@@ -134,6 +175,7 @@ flowchart LR
     Worker --> TGAPI
     API --> YT
     Worker --> YT
+    Worker --> RSS
     API --> HF
     Worker --> HF
 ```
@@ -142,6 +184,26 @@ flowchart LR
 - API 与 Worker 不直接 RPC，主要通过 DB 和文件信号协作。
 - 浏览器与 API 的长任务交互依赖 `SSE`。
 - Telegram 入站支持 `Webhook`（API）与 `Polling`（Worker）两条链路。
+
+### 目录结构说明
+
+```
+app/                # 核心业务代码
+  ai/               # LLM 调用与校对
+  alerts/           # 告警推送与 Telegram 交互
+  db/               # ORM/迁移/仓储
+  features/         # 指标与特征
+  news/             # Intel/RSS 情报聚合
+  providers/        # 外部集成（Binance/YouTube）
+  scheduler/        # APScheduler 与任务
+  signals/          # 信号/决策/异常检测
+  web/              # 路由、模板与静态资源
+  worker/           # Worker 进程入口
+docs/               # 项目文档
+docker/             # Dockerfile 与旧 compose 提示
+scripts/            # 启动与工具脚本
+tests/              # pytest 测试
+```
 
 ## 前端技术选型与渲染流程
 
@@ -153,6 +215,7 @@ flowchart LR
 - 页面模板：
 - `app/web/templates/overview.html`
 - `app/web/templates/alerts.html`
+- `app/web/templates/intel.html`
 - `app/web/templates/youtube.html`
 - `app/web/templates/llm_debug.html`
 - 样式：
@@ -173,12 +236,12 @@ flowchart LR
 ### 关键代码路径/模块
 
 - 路由与模板上下文：`app/web/views.py`
-- 页面脚本：`app/web/templates/overview.html`, `app/web/templates/youtube.html`, `app/web/templates/llm_debug.html`
+- 页面脚本：`app/web/templates/overview.html`, `app/web/templates/intel.html`, `app/web/templates/youtube.html`, `app/web/templates/llm_debug.html`
 - I18N：`app/web/static/i18n.js`
 
 ### 数据/控制流
 
-- API 从 DB 拉取快照、告警、AI 信号、YouTube 状态，渲染模板。
+- API 从 DB 拉取快照、告警、AI 信号、YouTube 状态与 Intel 摘要，渲染模板。
 - 浏览器加载后以原生 JS 进行操作：
 - 本地 DOM 过滤/排序
 - 调用 `/api/*` 接口刷新
@@ -257,6 +320,7 @@ sequenceDiagram
 |---|---|---|---|---|
 | 页面 | GET | `/` | HTML | 市场总览页 |
 | 页面 | GET | `/alerts` | HTML | 告警中心 |
+| 页面 | GET | `/intel` | HTML | Intel 情报中心 |
 | 页面 | GET | `/youtube` | HTML | YouTube 管理与分析页 |
 | 页面 | GET | `/llm` | HTML | LLM 调试页 |
 | 核心 | GET | `/api/market` | JSON | 市场快照 |
@@ -264,6 +328,8 @@ sequenceDiagram
 | 核心 | GET | `/api/health` | JSON | API/DB/Worker 健康状态 |
 | 核心 | GET | `/api/models` | JSON | LLM 模型列表 |
 | 核心 | GET | `/api/ai-signals` | JSON | AI 信号列表 |
+| Intel | GET | `/api/intel/news` | JSON | Intel 新闻列表 |
+| Intel | GET | `/api/intel/digest` | JSON | Intel 摘要与风险温度 |
 | AI | POST | `/api/ai-analyze` | JSON | 手动触发 AI 分析（含 dry_run） |
 | AI | GET | `/api/ai-analyze/stream` | SSE | 手动 AI 分析流 |
 | YouTube | POST | `/api/youtube/sync` | JSON | 手动同步视频/字幕 |
@@ -285,6 +351,11 @@ sequenceDiagram
 | LLM | POST | `/api/llm/selfcheck` | JSON | LLM 连通性自检 |
 | Telegram | POST | `/api/telegram/webhook` | JSON | Telegram Webhook 入站 |
 | Ops | GET | `/api/ops/jobs` | JSON | 任务执行统计与快照 |
+
+### API 定义与文档
+
+- FastAPI 默认提供 OpenAPI 文档（`/docs`, `/redoc`）。
+- 详细返回结构以路由实现为准：`app/web/views.py`, `app/web/api_telegram.py`。
 
 ### 数据/控制流
 
@@ -366,6 +437,8 @@ sequenceDiagram
 | 资金费率 | `funding_snapshots` | Funding/OI 快照 |
 | AI 信号 | `ai_signals` | LLM 信号与分析 JSON |
 | Worker 状态 | `worker_status` | 心跳/版本/运行状态 |
+| Intel | `news_items` | 新闻条目、标签、风险评分 |
+| Intel | `intel_digest_cache` | Intel 摘要与风险温度缓存 |
 | YouTube | `youtube_channels` | 频道配置 |
 | YouTube | `youtube_videos` | 视频元数据/字幕/ASR 状态 |
 | YouTube | `youtube_insights` | 单视频 AI 洞察（VTA） |
@@ -376,6 +449,18 @@ sequenceDiagram
 | Telegram 审计 | `telegram_message_log` | 对话与工具调用日志 |
 | 模型版本 | `model_versions` | 预留模型版本登记 |
 
+### 表结构摘要（关键表字段）
+
+| 表 | 关键字段（摘录） | 说明 |
+|---|---|---|
+| `ohlcv` | `symbol`, `timeframe`, `ts`, `open/high/low/close`, `volume` | K 线基础数据 |
+| `market_metrics` | `symbol`, `timeframe`, `ts`, `rsi_14`, `macd_hist`, `atr_14`, `bb_bandwidth`, `ema_ribbon_trend` | 指标结果 |
+| `ai_signals` | `symbol`, `ts`, `direction`, `entry_price`, `stop_loss`, `take_profit`, `analysis_json` | AI 信号落库 |
+| `alert_events` | `event_uid`, `symbol`, `ts`, `alert_type`, `severity`, `reason` | 告警事件 |
+| `news_items` | `ts_utc`, `source`, `category`, `title`, `url`, `severity`, `topics_json` | Intel 新闻条目 |
+| `intel_digest_cache` | `symbol`, `lookback_hours`, `digest_json`, `created_at` | Intel 摘要缓存 |
+| `youtube_videos` | `video_id`, `channel_id`, `published_at`, `transcript_text`, `analysis_runtime_*` | 视频与分析状态 |
+
 ### 数据/控制流
 
 - 行情数据：
@@ -384,6 +469,8 @@ sequenceDiagram
 - `ohlcv` + `market_metrics` + `funding_snapshots` + `alert_events` + `youtube_consensus` -> `ai_signals`
 - YouTube 分析：
 - `youtube_channels` -> `youtube_videos` -> transcript/ASR -> `youtube_insights` -> `youtube_consensus`
+- Intel 情报：
+- RSS feeds -> `news_items` -> `intel_digest_cache`
 - 运维观测：
 - LLM 调用 -> `llm_calls`
 - LLM 失败 -> `ai_analysis_failures`
@@ -410,12 +497,16 @@ flowchart TD
     Alert --> AICTX
     Funding["funding_snapshots"] --> AICTX
     YTCons["youtube_consensus"] --> AICTX
+    IntelDigest["intel_digest_cache"] --> AICTX
     AICTX --> AISig["ai_signals"]
 
     Channels["youtube_channels"] --> Videos["youtube_videos"]
     YTData["YouTube RSS/CC/ASR"] --> Videos
     Videos --> Insights["youtube_insights"]
     Insights --> YTCons
+
+    IntelFeeds["RSS Feeds"] --> NewsItems["news_items"]
+    NewsItems --> IntelDigest
 
     LLMCalls["llm_calls"]:::obs
     WorkerStatus["worker_status"]:::obs
@@ -478,6 +569,8 @@ flowchart TD
 | `anomaly_job` | interval | 异常评分、状态机、推送 | 总是启用 |
 | `multi_tf_sync_job` | interval | 1h/4h 同步与指标 | 总是启用 |
 | `funding_rate_job` | interval | Funding/OI 快照同步 | 总是启用 |
+| `intel_news_job` | interval | Intel RSS 新闻采集 | `intel_enabled` |
+| `intel_digest_job` | interval | Intel 摘要与风险温度生成 | `intel_enabled` |
 | `ai_analysis_job` | interval | 定时 AI 市场分析 | LLM 启用 |
 | `youtube_sync_job` | interval | 视频发现/字幕抓取 | `youtube_enabled` |
 | `youtube_analyze_job` | interval | 视频 AI 分析/共识 | `youtube_enabled` |
@@ -530,16 +623,42 @@ flowchart TD
 ### 4. AI 市场分析（LLM）
 
 #### 现状实现
-- 上下文：`build_market_analysis_context()`（`app/ai/market_context_builder.py`）
-- Prompt：`build_analysis_prompt()`（`app/ai/prompts.py`）
-- 分析器：`MarketAnalyst.analyze()` 负责调用 LLM、解析 JSON、校验/降级（`app/ai/analyst.py`）
 - 触发入口：
 - 定时任务 `ai_analysis_job()`
 - 手动 API `/api/ai-analyze`、`/api/ai-analyze/stream`
+- 上下文构建：`build_market_analysis_context()` 汇总多周期快照、告警、资金费率、YouTube 共识与情报摘要，并产出 `brief`、`data_quality`、`input_budget_meta`（`app/ai/market_context_builder.py`）
+- 输入裁剪：`_apply_context_clipping()` 对告警/YouTube/情报摘要进行字符预算裁剪与字段精简
+- Prompt：`build_analysis_prompt()` 以事实源 + 观点源分层注入，使用严格 JSON Schema（`app/ai/prompts.py`）
+- 分析器：`MarketAnalyst.analyze()` 负责调用 LLM、解析 JSON、校验/降级与落库（`app/ai/analyst.py`）
 
 #### 风险与边界
 - 上游 LLM 质量、延迟、限流直接影响结果稳定性。
 - 输出 schema 演化对 JSON 解析兼容性要求高。
+- 当前上下文体量较大（多周期指标 + 规则 Schema + 观点文本），存在输入过载导致注意力稀释风险。
+
+#### 输入结构与事实分层
+- 事实源（facts）：`multi_tf_snapshots`（latest + history_summary）、`funding_deltas`、`alerts_digest`、`data_quality`、`brief`
+- 观点源（external_views）：`youtube_radar`、`intel_digest`（仅作为辅助参考）
+- 事实源在 Prompt 中被明确声明为高优先级，若与观点源冲突则强制降级并要求输出 HOLD
+
+#### 输出结构与解析策略
+- 输出字段：`market_regime`、`signal`、`evidence`、`anchors`、`risk`、`scenarios`、`youtube_reflection`、`validation_notes`
+- 解析流程：抽取 JSON → Schema 校验 → 事实校对 → 失败降级（HOLD）
+- 降级输出会附带 `validation` 与 `context_digest`，便于 UI 与运维追踪
+
+#### 事实校对（Grounding）
+- `GroundingEngine` 使用 7 组验证器校验 anchors/evidence 与事实源的一致性：
+- Anchor 路径/数值校验、Evidence 数值邻近匹配、区间合理性、时间周期一致性、跨字段一致性、覆盖度评分
+
+#### 信息过载问题与优化建议
+- 现状问题：
+- 五周期指标 + 细粒度 Schema + 观点文本叠加，导致 Token 压力与注意力稀释
+- YouTube/情报文本虽然裁剪，但在高频分析场景仍偏重
+- 优化建议（短中期）：
+- 精简每个时间周期的指标集合，仅保留动量/趋势/波动核心指标
+- 动态上下文：`data_quality=POOR` 或 `tradeable=false` 时仅提供最小事实集
+- 观点源按需加载：只在模型犹豫或冲突时追加 YouTube/情报摘要
+- 两阶段分析：轻量模型先做机会筛选，主模型仅处理候选符号
 
 ### 5. YouTube 观点链路
 
@@ -561,7 +680,32 @@ flowchart TD
 - 外部平台变化、字幕缺失、ASR 资源耗费大。
 - 手动 ASR 路径的线程与 DB session 使用需要重点治理（见改进项）。
 
-### 6. Telegram 告警与交互
+### 6. Intel 情报中心
+
+#### 现状实现
+- `intel_news_job()`：
+- `IntelService` 聚合 RSS Feed，解析 XML、生成关键词/实体/地区/话题标签（`app/news/service.py`）
+- 通过 `upsert_news_item()` 幂等写入 `news_items`
+- `intel_digest_job()`：
+- 读取近期 `news_items`，生成 `risk_temperature`、`top_narratives`、`main_characters` 等摘要并写入 `intel_digest_cache`
+- 页面与 API：
+- `/intel` 展示风险温度计、叙事与新闻列表（`app/web/templates/intel.html`）
+- `/api/intel/news`、`/api/intel/digest` 提供 JSON 视图（`app/web/views.py`）
+
+#### 数据/控制流
+- RSS -> `IntelService.fetch_news_items()` -> `news_items`
+- `news_items` -> `IntelService.build_digest()` -> `intel_digest_cache` -> UI/API
+
+#### 异常处理与容错
+- `ResilientHttpClient` 提供 TTL 缓存 + stale 兜底 + 熔断（`failure_threshold`/`open_seconds`）
+- Feed 拉取失败时保留 stale 缓存数据，避免完全断流
+- 入库以 `url_hash` 唯一约束去重，降低重复写入
+
+#### 风险与边界
+- RSS 源可用性不可控，可能出现延迟/重复/格式变更。
+- 标签与风险评分规则基于关键词启发式，准确率依赖词表维护。
+
+### 7. Telegram 告警与交互
 
 #### 现状实现
 - 出站消息：`app/alerts/telegram.py`
@@ -574,7 +718,7 @@ flowchart TD
 #### 风险与边界
 - Polling 使用 at-most-once 语义（先推进 offset，再处理 update），失败消息会被跳过。
 
-### 7. LLM 调试与热更新
+### 8. LLM 调试与热更新
 
 #### 现状实现
 - `/api/llm/config` 修改 `.env` 中 LLM 配置（`app/web/views.py`）
@@ -719,7 +863,43 @@ sequenceDiagram
 - 该链路是多阶段异步流水线，允许局部失败停留并人工重试。
 - 视频“状态”由 `youtube_videos + youtube_insights` 联合推导，而非单字段状态机。
 
-### 4. LLM 热更新链路（UI -> API -> Worker）
+### 4. Intel 情报链路（RSS -> Digest -> UI）
+
+图示：Intel 情报从 RSS 拉取、结构化标注、摘要生成到前端展示。
+
+```mermaid
+sequenceDiagram
+    participant S as APScheduler
+    participant J as `intel_news_job`
+    participant RSS as RSS Feeds
+    participant IS as IntelService
+    participant DB as DB
+    participant D as `intel_digest_job`
+    participant API as `/intel` + `/api/intel/*`
+
+    S->>J: trigger
+    J->>IS: fetch_news_items()
+    IS->>RSS: GET feeds
+    RSS-->>IS: XML items
+    IS->>IS: parse/label/score
+    IS-->>J: items
+    J->>DB: upsert news_items
+
+    S->>D: trigger
+    D->>DB: list news_items (lookback)
+    D->>IS: build_digest()
+    IS-->>D: digest_json
+    D->>DB: insert intel_digest_cache
+
+    API->>DB: read digest/news
+    API-->>API: render intel.html / JSON
+```
+
+简要解读：
+- Intel 链路是“采集-标注-摘要-展示”的轻量流水线，与 AI 分析解耦但可供上下文引用。
+- `ResilientHttpClient` 提供缓存与熔断，避免 RSS 波动导致任务雪崩。
+
+### 5. LLM 热更新链路（UI -> API -> Worker）
 
 图示：LLM 配置热更新跨进程生效路径。
 
@@ -759,7 +939,7 @@ sequenceDiagram
 - 热更新是最终一致，生效延迟取决于 `heartbeat_job` 周期。
 - 单机方案简洁，但多实例需要中心化事件分发。
 
-### 5. Telegram 入站协作链路（Webhook / Polling -> Dispatcher -> Agent）
+### 6. Telegram 入站协作链路（Webhook / Polling -> Dispatcher -> Agent）
 
 图示：Telegram 入站消息从接收、路由、Agent 推理到回复发送。
 
@@ -899,6 +1079,14 @@ stateDiagram-v2
 - 反向代理负责 TLS 与外层鉴权。
 - Secrets 不落地到可写 `.env`（至少生产环境）。
 
+#### 灰度发布与回滚（建议）
+- 灰度：按符号列表或环境标签切流，先灰度 Worker 再灰度 API。
+- 回滚：保留前一版本镜像 + DB 迁移回退预案（优先向前兼容）。
+
+#### 资源配额（建议）
+- 为 Worker 设置 CPU/内存限额，避免 ASR/AI 任务挤占 API。
+- 对 LLM/ASR 任务做并发上限与排队控制。
+
 ### 差距（Gap）
 
 - 当前存在 DB 初始化路径不一致：
@@ -911,6 +1099,32 @@ stateDiagram-v2
 - 统一发布/回滚流程
 - secrets 管理
 - 标准化观测接入
+
+## 非功能性设计
+
+### 性能指标（现状）
+- 当前未定义正式 SLA/SLO，主要以“可用/可跑”为目标。
+- 可观测指标来源：`llm_calls`、`ai_analysis_failures`、`worker_status`、`job_metrics.json`。
+
+### 扩展性策略
+- 现状：单机 + 双进程协作（API/Worker），横向扩展依赖外部治理。
+- 推荐：将文件协议替换为 DB/消息队列事件，支持多 Worker 横向扩展。
+
+### 安全机制（现状）
+- `.env` 明文配置 + 热更新，生产环境风险较高。
+- 管理型 API 默认无鉴权，需在生产前补齐网关/鉴权/审计。
+
+### 容灾与备份
+- 现状依赖数据库自身备份能力（SQLite/PG）。
+- 建议：生产使用 PG + 定期备份（逻辑备份 + PITR）。
+
+### 日志规范
+- logging 统一格式：`%(asctime)s %(levelname)s [%(name)s] %(message)s`
+- AI 分析日志独立 RotatingFile（`data/logs/market_ai.log`）
+
+### 配置管理
+- 主配置：`.env` + `pydantic-settings`（`app/config.py`）
+- LLM 配置支持 UI 热更新，并通过 signal/ack 机制跨进程同步
 
 ### 目标部署架构图（To-Be）
 
@@ -1066,6 +1280,67 @@ flowchart LR
 - Prometheus + Grafana
 - Sentry 或 OpenTelemetry tracing
 - 任务级连续失败告警与自动降级
+
+## 质量保障与测试策略
+
+### 现状实现
+- 测试框架：pytest（`pyproject.toml`，`tests/`）
+- 覆盖范围：CLI/AI/YouTube/Compose/文档检查等单元测试为主
+- 覆盖率：可选 `pytest-cov`，但未设定门槛
+- CI/CD：未配置自动化流水线
+
+### 建议门禁
+- 最低覆盖率阈值（如行覆盖率 70% 起步）
+- PR 必须通过 `pytest` 与关键路径 smoke 测试
+- Lint/格式化/类型检查工具按需补齐
+
+### 代码审查规范（建议）
+- 变更必须说明影响范围与回滚方案
+- 高成本接口（AI/ASR/下载）变更需安全评估
+- 数据库结构变更必须提供迁移脚本与回滚策略
+
+## 交付物标准与验收条件
+
+### 交付物标准
+- Markdown 文档，包含架构图、时序图、类图、表结构、API 定义、术语表、版本历史
+- 新成员可按“快速启动脚本”直接复现系统
+
+### 快速启动脚本
+
+Windows（推荐）：
+```powershell
+.\run.ps1
+```
+
+Windows（兼容）：
+```bat
+run.bat
+```
+
+macOS / Linux：
+```bash
+./scripts/start.sh
+```
+
+Docker：
+```bash
+docker compose up --build
+```
+
+Intel 可选启用（仅当需要情报中心）：
+- 在 `.env` 中设置 `INTEL_ENABLED=true`
+- 重启 Worker 进程（CLI 或容器）
+
+### 验证步骤
+- 打开 `http://127.0.0.1:8000` 确认页面可访问
+- 访问 `http://127.0.0.1:8000/api/health` 返回 `ok=true`
+- 访问 `http://127.0.0.1:8000/intel` 与 `http://127.0.0.1:8000/api/intel/digest`（启用 Intel 后）
+- 执行 `sentinel doctor`，检查 DB/API/WS 诊断项
+
+### 验收条件
+- 文档经技术评审无歧义、无过时信息
+- 以上脚本可一键启动并通过健康检查
+- 关键图示与示例与代码实现一致
 
 ## 程序可改进的地方（全面问题清单）
 
@@ -1303,6 +1578,7 @@ flowchart LR
 - AI 分析：`AI_ANALYSIS_INTERVAL_SECONDS`, `AI_SIGNAL_CONFIDENCE_THRESHOLD`, `AI_HISTORY_CANDLES`
 - 多周期与资金费率：`MULTI_TF_*`, `FUNDING_RATE_SYNC_SECONDS`, `BINANCE_FUTURES_URL`
 - YouTube 与 ASR：`YOUTUBE_*`, `ASR_*`
+- Intel 情报：`INTEL_*`
 
 ### 附录 B：关键模块索引
 
@@ -1312,12 +1588,63 @@ flowchart LR
 - 调度与任务：`app/scheduler/scheduler.py`, `app/scheduler/jobs.py`
 - 市场与信号：`app/providers/binance_provider.py`, `app/features/*`, `app/signals/anomaly.py`
 - AI：`app/ai/analyst.py`, `app/ai/market_context_builder.py`, `app/ai/prompts.py`, `app/ai/openai_provider.py`
+- Intel：`app/news/service.py`, `app/db/models.py`, `app/db/repository.py`
 - YouTube：`app/providers/youtube_provider.py`
 - Telegram：`app/alerts/telegram.py`, `app/alerts/telegram_poller.py`, `app/alerts/telegram_dispatcher.py`, `app/alerts/telegram_agent.py`
 - LLM 热更新：`app/ai/llm_runtime_reload.py`, `app/worker/llm_hot_reload.py`
 - 部署与脚本：`docker-compose.yml`, `docker/Dockerfile`, `scripts/init_db.py`
 
-### 附录 C：后续文档建议（非本次实现）
+### 附录 C：类图（核心 AI 模块）
+
+```mermaid
+classDiagram
+    class LLMProvider {
+      +generate_response()
+      +capabilities
+    }
+    class MarketAnalyst {
+      +analyze(symbol, snapshots, context)
+      +_validate_grounding()
+    }
+    class GroundingEngine {
+      +validate(data, facts, facts_index, mode)
+    }
+    class AiTradeSignal {
+      +symbol
+      +direction
+      +confidence
+      +analysis_json
+    }
+
+    MarketAnalyst --> LLMProvider : uses
+    MarketAnalyst --> GroundingEngine : validates
+    MarketAnalyst --> AiTradeSignal : builds
+```
+
+### 附录 D：术语表
+
+| 术语 | 解释 |
+|---|---|
+| Snapshot | 多周期行情快照（K 线 + 指标） |
+| Metric | 指标计算结果（RSI/MACD/ATR 等） |
+| AlertEvent | 异常告警事件记录 |
+| AiSignal | AI 分析输出的交易信号 |
+| Intel Digest | Intel 情报摘要与风险温度的聚合结果 |
+| Risk Temperature | Intel 摘要中的宏观风险温度计（0-100） |
+| YouTube Insight | 单视频 AI 洞察（VTA） |
+| Consensus | 多视频共识聚合结果 |
+| SSE | Server-Sent Events，流式输出 |
+| LLM Hot Reload | LLM 配置热更新的 signal/ack 机制 |
+
+### 附录 E：版本历史
+
+| 版本 | 日期 | 说明 |
+|---|---|---|
+| v2.2 | 2026-03-03 | 补充 Intel 情报链路、API/表结构/图示与验收步骤 |
+| v2.1 | 2026-03-03 | 补齐技术栈明细、非功能性设计、质量保障与验收说明 |
+| v2.0 | 2026-03-02 | 架构与模块总览版 |
+
+### 附录 F：后续文档建议（非本次实现）
 
 - `docs/runbook_deploy.md`（部署/回滚操作手册）
 - `docs/api_reference.md`（路由与返回结构清单）

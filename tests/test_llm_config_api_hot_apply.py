@@ -92,6 +92,38 @@ def test_llm_config_post_common_keys_supports_ark(monkeypatch):
     assert any(key == "ARK_API_KEY" and value == "ark-demo-key" for _, key, value in calls)
 
 
+def test_llm_config_post_common_keys_supports_nvidia_nim(monkeypatch):
+    client = TestClient(app)
+
+    calls: list[tuple[str, str, str]] = []
+
+    monkeypatch.setattr("dotenv.set_key", lambda path, key, value, *args, **kwargs: calls.append((str(path), key, str(value))))
+    monkeypatch.setattr(
+        views,
+        "apply_llm_config_in_api_process",
+        lambda: SimpleNamespace(worker_heartbeat_seconds=12, llm_hot_reload_signal_file="data/test_signal.json"),
+    )
+    monkeypatch.setattr(views, "write_llm_reload_signal", lambda *args, **kwargs: "rev-test-nim-001")
+
+    resp = client.post(
+        "/api/llm/config",
+        json={
+            "task": "common_keys",
+            "apply_now": True,
+            "keys": {"nvidia_nim": "nim-demo-key"},
+        },
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+
+    assert data["ok"] is True
+    assert data["applied"]["api_reloaded"] is True
+    assert data["applied"]["worker_signal_sent"] is True
+    assert data["applied"]["worker_expected_apply_within_seconds"] == 12
+    assert data["applied"]["signal_revision"] == "rev-test-nim-001"
+    assert any(key == "NVIDIA_NIM_API_KEY" and value == "nim-demo-key" for _, key, value in calls)
+
+
 def test_models_api_includes_doubao_2():
     client = TestClient(app)
     resp = client.get("/api/models")

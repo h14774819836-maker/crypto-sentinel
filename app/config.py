@@ -24,6 +24,7 @@ class LLMConfig:
 DEEPSEEK_BASE_URL_DEFAULT = "https://api.deepseek.com"
 OPENROUTER_BASE_URL_DEFAULT = "https://openrouter.ai/api/v1"
 ARK_BASE_URL_DEFAULT = "https://ark.cn-beijing.volces.com/api/v3"
+NVIDIA_NIM_BASE_URL_DEFAULT = "https://integrate.api.nvidia.com/v1"
 DEFAULT_LLM_TASK_ROUTING: dict[str, str] = {
     "general": "general",
     "telegram_chat": "general",
@@ -56,6 +57,7 @@ MODEL_REGISTRY: list[dict[str, str]] = [
     {"id": "google/gemini-3.1-pro-preview", "label": "Gemini 3.1 Pro Preview"},
     {"id": "qwen/qwen3.5-plus-02-15", "label": "Qwen3.5 Plus (2026-02-15)"},
     {"id": "qwen/qwen3.5-397b-a17b", "label": "Qwen3.5 397B A17B"},
+    {"id": "moonshotai/kimi-k2.5", "label": "Kimi K2.5"},
     {"id": "minimax/minimax-m2.5", "label": "MiniMax M2.5"},
     {"id": "z-ai/glm-5", "label": "GLM 5"},
 ]
@@ -140,6 +142,22 @@ MODEL_CATALOG: list[dict[str, Any]] = [
         "defaults": dict(TIER_DEFAULTS["premium"]),
     },
     {
+        "id": "nvidia_nim/qwen3.5-397b-a17b",
+        "label": "NVIDIA NIM · Qwen3.5 397B A17B",
+        "provider": "nvidia_nim",
+        "tier": "premium",
+        "description": "NVIDIA NIM for VLMs \u901a\u9053\u9ed8\u8ba4\u6a21\u578b",
+        "defaults": dict(TIER_DEFAULTS["premium"]),
+    },
+    {
+        "id": "nvidia_nim/kimi-k2.5",
+        "label": "NVIDIA NIM · Kimi K2.5",
+        "provider": "nvidia_nim",
+        "tier": "premium",
+        "description": "NVIDIA NIM for VLMs \u901a\u9053 Kimi K2.5 \u6a21\u578b",
+        "defaults": dict(TIER_DEFAULTS["premium"]),
+    },
+    {
         "id": "minimax/minimax-m2.5",
         "label": "MiniMax M2.5",
         "provider": "openrouter",
@@ -158,12 +176,13 @@ MODEL_CATALOG: list[dict[str, Any]] = [
 ]
 MODEL_CATALOG_BY_ID: dict[str, dict[str, Any]] = {item["id"]: item for item in MODEL_CATALOG}
 MODEL_REGISTRY = [{"id": item["id"], "label": item["label"]} for item in MODEL_CATALOG]
-SUPPORTED_LLM_PROVIDERS: set[str] = {"deepseek", "openrouter", "openai_compatible", "ark"}
+SUPPORTED_LLM_PROVIDERS: set[str] = {"deepseek", "openrouter", "openai_compatible", "ark", "nvidia_nim"}
 PROVIDER_DEFAULT_MODEL: dict[str, str] = {
     "deepseek": "deepseek-chat",
     "openrouter": "deepseek/deepseek-r1",
     "openai_compatible": "gpt-4o-mini",
     "ark": "doubao-seed-2-0-pro-260215",
+    "nvidia_nim": "nvidia_nim/qwen3.5-397b-a17b",
 }
 DEFAULT_PROFILE_TEMPLATES: dict[str, dict[str, Any]] = {
     "general": {
@@ -205,6 +224,11 @@ def _default_model_for_provider(provider: Any) -> str:
 
 def _guess_provider_for_model(model_id: str) -> str:
     model_l = str(model_id or "").lower().strip()
+    catalog_item = MODEL_CATALOG_BY_ID.get(str(model_id or "").strip())
+    if catalog_item and catalog_item.get("provider"):
+        return str(catalog_item.get("provider"))
+    if model_l.startswith("nvidia_nim/") or model_l.startswith("nim/"):
+        return "nvidia_nim"
     if model_l.startswith("doubao-"):
         return "ark"
     if model_l.startswith("deepseek-"):
@@ -244,6 +268,13 @@ def _model_label(model_id: str) -> str:
     return tail.title() if tail else model_id
 
 
+def _sanitize_secret_value(value: Any) -> str:
+    raw = str(value or "").strip()
+    if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in {"'", '"'}:
+        raw = raw[1:-1].strip()
+    return raw
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -256,11 +287,13 @@ class Settings(BaseSettings):
     app_env: str = Field(default="dev", alias="APP_ENV")
     app_version: str = Field(default="0.1.0", alias="APP_VERSION")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
+    market_ai_log_level: str = Field(default="INFO", alias="MARKET_AI_LOG_LEVEL")
+    market_ai_log_verbose: bool = Field(default=False, alias="MARKET_AI_LOG_VERBOSE")
     market_ai_log_file: str = Field(default="data/logs/market_ai.log", alias="MARKET_AI_LOG_FILE")
-    market_ai_log_max_bytes: int = Field(default=5_000_000, alias="MARKET_AI_LOG_MAX_BYTES")
-    market_ai_log_backup_count: int = Field(default=5, alias="MARKET_AI_LOG_BACKUP_COUNT")
-    market_ai_prompt_log_max_chars: int = Field(default=12000, alias="MARKET_AI_PROMPT_LOG_MAX_CHARS")
-    market_ai_response_log_max_chars: int = Field(default=8000, alias="MARKET_AI_RESPONSE_LOG_MAX_CHARS")
+    market_ai_log_max_bytes: int = Field(default=2_000_000, alias="MARKET_AI_LOG_MAX_BYTES")
+    market_ai_log_backup_count: int = Field(default=7, alias="MARKET_AI_LOG_BACKUP_COUNT")
+    market_ai_prompt_log_max_chars: int = Field(default=2000, alias="MARKET_AI_PROMPT_LOG_MAX_CHARS")
+    market_ai_response_log_max_chars: int = Field(default=1500, alias="MARKET_AI_RESPONSE_LOG_MAX_CHARS")
     timezone: str = Field(default="UTC", alias="TIMEZONE")
 
     database_url: str = Field(default="sqlite:///./data/crypto_sentinel.db", alias="DATABASE_URL")
@@ -304,6 +337,7 @@ class Settings(BaseSettings):
     openrouter_api_key: str | None = Field(default=None, alias="OPENROUTER_API_KEY")
     openai_api_key: str | None = Field(default=None, alias="OPENAI_API_KEY")
     ark_api_key: str | None = Field(default=None, alias="ARK_API_KEY")
+    nvidia_nim_api_key: str | None = Field(default=None, alias="NVIDIA_NIM_API_KEY")
 
     # Task Profiles Config
     llm_profiles_json: str = Field(default="{}", alias="LLM_PROFILES_JSON")
@@ -319,6 +353,18 @@ class Settings(BaseSettings):
     llm_market_temperature: float = Field(default=0.1, alias="LLM_MARKET_TEMPERATURE")
     grounding_mode: str = Field(default="balanced", alias="GROUNDING_MODE")
     grounding_severe_multiplier: float = Field(default=3.0, alias="GROUNDING_SEVERE_MULTIPLIER")
+    strategy_eval_replay_tf: str = Field(default="1m", alias="STRATEGY_EVAL_REPLAY_TF")
+    strategy_ambiguous_realistic_p: float = Field(default=0.5, alias="STRATEGY_AMBIGUOUS_REALISTIC_P")
+    strategy_regime_calc_mode: str = Field(default="online", alias="STRATEGY_REGIME_CALC_MODE")
+    strategy_facts_builder_version: str = Field(default="v1", alias="STRATEGY_FACTS_BUILDER_VERSION")
+    strategy_data_pipeline_version: str = Field(default="v1", alias="STRATEGY_DATA_PIPELINE_VERSION")
+    strategy_research_min_trades: int = Field(default=50, alias="RESEARCH_MIN_TRADES")
+    strategy_eval_job_seconds: int = Field(default=120, alias="STRATEGY_EVAL_JOB_SECONDS")
+    strategy_scores_job_seconds: int = Field(default=900, alias="STRATEGY_SCORES_JOB_SECONDS")
+    strategy_research_job_seconds: int = Field(default=1800, alias="STRATEGY_RESEARCH_JOB_SECONDS")
+    strategy_eval_batch_size: int = Field(default=120, alias="STRATEGY_EVAL_BATCH_SIZE")
+    strategy_eval_max_bars_per_decision: int = Field(default=720, alias="STRATEGY_EVAL_MAX_BARS_PER_DECISION")
+    strategy_eval_ohlcv_cache_size: int = Field(default=16, alias="STRATEGY_EVAL_OHLCV_CACHE_SIZE")
 
     # Multi-timeframe
     multi_tf_intervals: str = Field(default="5m,15m,1h,4h", alias="MULTI_TF_INTERVALS")
@@ -608,6 +654,8 @@ class Settings(BaseSettings):
                 base_url = OPENROUTER_BASE_URL_DEFAULT
             elif provider == "ark":
                 base_url = ARK_BASE_URL_DEFAULT
+            elif provider == "nvidia_nim":
+                base_url = NVIDIA_NIM_BASE_URL_DEFAULT
 
         if not api_key:
             if provider == "deepseek":
@@ -618,11 +666,13 @@ class Settings(BaseSettings):
                 api_key = self.openai_api_key
             elif provider == "ark":
                 api_key = self.ark_api_key
+            elif provider == "nvidia_nim":
+                api_key = self.nvidia_nim_api_key
 
         return LLMConfig(
             enabled=profile.enabled,
             provider=provider,
-            api_key=api_key or "",
+            api_key=_sanitize_secret_value(api_key),
             base_url=base_url or "",
             model=profile.model,
             use_reasoning=profile.use_reasoning,

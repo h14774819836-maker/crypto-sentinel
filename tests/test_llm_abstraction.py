@@ -211,6 +211,52 @@ def test_provider_auto_base_url_and_key_for_ark():
     assert cfg.base_url == "https://ark.cn-beijing.volces.com/api/v3"
 
 
+def test_provider_auto_base_url_and_key_for_nvidia_nim():
+    import json
+
+    profiles = {
+        "general": {
+            "enabled": True,
+            "provider": "nvidia_nim",
+            "model": "nvidia_nim/qwen3.5-397b-a17b",
+            "use_reasoning": "auto",
+        },
+    }
+
+    settings = Settings(
+        _env_file=None,
+        nvidia_nim_api_key="nim_key",
+        llm_profiles_json=json.dumps(profiles),
+    )
+
+    cfg = settings.resolve_llm_config("telegram_chat")
+    assert cfg.provider == "nvidia_nim"
+    assert cfg.api_key == "nim_key"
+    assert cfg.base_url == "https://integrate.api.nvidia.com/v1"
+
+
+def test_provider_nvidia_nim_key_with_quotes_is_sanitized():
+    import json
+
+    profiles = {
+        "general": {
+            "enabled": True,
+            "provider": "nvidia_nim",
+            "model": "nvidia_nim/qwen3.5-397b-a17b",
+            "use_reasoning": "auto",
+        },
+    }
+
+    settings = Settings(
+        _env_file=None,
+        nvidia_nim_api_key="'nim_key_quoted'",
+        llm_profiles_json=json.dumps(profiles),
+    )
+
+    cfg = settings.resolve_llm_config("telegram_chat")
+    assert cfg.api_key == "nim_key_quoted"
+
+
 def test_model_registry_includes_doubao_2():
     settings = Settings(_env_file=None)
     items = settings.llm_model_registry

@@ -2,7 +2,19 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import JSON, BigInteger, Boolean, DateTime, Float, Integer, String, Text, UniqueConstraint
+from sqlalchemy import (
+    JSON,
+    BigInteger,
+    Boolean,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.session import Base
@@ -139,6 +151,10 @@ class AiSignal(Base):
     reasoning: Mapped[str] = mapped_column(Text, nullable=False, default="")
     market_regime: Mapped[str | None] = mapped_column(String(32))
     analysis_json: Mapped[dict | None] = mapped_column(JSON)
+    manifest_id: Mapped[str | None] = mapped_column(String(128), index=True)
+    blob_ref: Mapped[str | None] = mapped_column(Text)
+    blob_sha256: Mapped[str | None] = mapped_column(String(64), index=True)
+    blob_size_bytes: Mapped[int | None] = mapped_column(Integer)
     model_requested: Mapped[str | None] = mapped_column(String(64))
     model_name: Mapped[str] = mapped_column(String(64), nullable=False, default="")
     prompt_tokens: Mapped[int | None] = mapped_column(Integer)
@@ -146,6 +162,155 @@ class AiSignal(Base):
     sent_to_telegram: Mapped[bool] = mapped_column(default=False, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
+
+
+class StrategyDecision(Base):
+    __tablename__ = "strategy_decisions"
+    __table_args__ = (
+        UniqueConstraint("analysis_id", name="uq_strategy_decisions_analysis_id"),
+        Index("ix_strategy_decisions_symbol_decision_ts", "symbol", "decision_ts"),
+        Index("ix_strategy_decisions_manifest_id_decision_ts", "manifest_id", "decision_ts"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    symbol: Mapped[str] = mapped_column(String(20), index=True, nullable=False)
+    exchange: Mapped[str] = mapped_column(String(32), index=True, nullable=False, default="binance")
+    market_type: Mapped[str] = mapped_column(String(16), index=True, nullable=False, default="futures")
+    base_timeframe: Mapped[str] = mapped_column(String(10), nullable=False, default="1h")
+    decision_ts: Mapped[int] = mapped_column(BigInteger, index=True, nullable=False)
+    manifest_id: Mapped[str | None] = mapped_column(String(128), index=True)
+    analysis_id: Mapped[int | None] = mapped_column(ForeignKey("ai_signals.id"), index=True)
+    account_equity: Mapped[float | None] = mapped_column(Float)
+    capital_alloc: Mapped[float | None] = mapped_column(Float)
+    leverage: Mapped[float | None] = mapped_column(Float)
+    margin_mode: Mapped[str | None] = mapped_column(String(16))
+    position_side: Mapped[str] = mapped_column(String(10), nullable=False, default="HOLD")
+    qty: Mapped[float | None] = mapped_column(Float)
+    notional: Mapped[float | None] = mapped_column(Float)
+    entry_mode: Mapped[str] = mapped_column(String(16), nullable=False, default="MARKET")
+    entry_price: Mapped[float | None] = mapped_column(Float)
+    take_profit: Mapped[float | None] = mapped_column(Float)
+    stop_loss: Mapped[float | None] = mapped_column(Float)
+    expiration_ts: Mapped[int | None] = mapped_column(BigInteger)
+    max_hold_bars: Mapped[int | None] = mapped_column(Integer)
+    fee_bps_assumption: Mapped[float | None] = mapped_column(Float)
+    slippage_bps_assumption: Mapped[float | None] = mapped_column(Float)
+    liq_price_est: Mapped[float | None] = mapped_column(Float)
+    risk_notes: Mapped[str | None] = mapped_column(Text)
+    regime_calc_mode: Mapped[str] = mapped_column(String(16), nullable=False, default="online")
+    confidence: Mapped[float | None] = mapped_column(Float)
+    reason_brief: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+
+class DecisionExecution(Base):
+    __tablename__ = "decision_executions"
+    __table_args__ = (UniqueConstraint("decision_id", name="uq_decision_executions_decision_id"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    decision_id: Mapped[int] = mapped_column(ForeignKey("strategy_decisions.id"), index=True, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="PENDING")
+    filled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    filled_ts: Mapped[int | None] = mapped_column(BigInteger)
+    filled_price: Mapped[float | None] = mapped_column(Float)
+    filled_qty: Mapped[float | None] = mapped_column(Float)
+    avg_fill_price: Mapped[float | None] = mapped_column(Float)
+    source: Mapped[str] = mapped_column(String(20), nullable=False, default="SIMULATED")
+    notes: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+
+class DecisionEval(Base):
+    __tablename__ = "decision_evals"
+    __table_args__ = (UniqueConstraint("decision_id", name="uq_decision_evals_decision_id"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    decision_id: Mapped[int] = mapped_column(ForeignKey("strategy_decisions.id"), index=True, nullable=False)
+    eval_replay_tf: Mapped[str] = mapped_column(String(10), nullable=False, default="1m")
+    intrabar_flag: Mapped[str] = mapped_column(String(16), nullable=False, default="NONE")
+    tp_hit: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    sl_hit: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    first_hit_ts: Mapped[int | None] = mapped_column(BigInteger)
+    exit_ts: Mapped[int | None] = mapped_column(BigInteger)
+    exit_price: Mapped[float | None] = mapped_column(Float)
+    outcome_raw: Mapped[str] = mapped_column(String(20), nullable=False, default="OPEN")
+    r_multiple_raw: Mapped[float | None] = mapped_column(Float)
+    mfe: Mapped[float | None] = mapped_column(Float)
+    mae: Mapped[float | None] = mapped_column(Float)
+    bars_to_outcome: Mapped[int | None] = mapped_column(Integer)
+    evaluated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+
+class StrategyScore(Base):
+    __tablename__ = "strategy_scores"
+    __table_args__ = (
+        UniqueConstraint(
+            "manifest_id",
+            "window_start_ts",
+            "window_end_ts",
+            "split_type",
+            "scoring_mode",
+            name="uq_strategy_scores_window_mode",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    manifest_id: Mapped[str] = mapped_column(String(128), index=True, nullable=False)
+    window_start_ts: Mapped[int] = mapped_column(BigInteger, index=True, nullable=False)
+    window_end_ts: Mapped[int] = mapped_column(BigInteger, index=True, nullable=False)
+    split_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    scoring_mode: Mapped[str] = mapped_column(String(20), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="OK")
+    n_trades: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    n_resolved: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    n_ambiguous: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    n_timeout: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    win_rate: Mapped[float | None] = mapped_column(Float)
+    avg_r: Mapped[float | None] = mapped_column(Float)
+    win_rate_ci_low: Mapped[float | None] = mapped_column(Float)
+    win_rate_ci_high: Mapped[float | None] = mapped_column(Float)
+    avg_r_ci_low: Mapped[float | None] = mapped_column(Float)
+    avg_r_ci_high: Mapped[float | None] = mapped_column(Float)
+    timeout_rate: Mapped[float | None] = mapped_column(Float)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
+class StrategyFeatureStat(Base):
+    __tablename__ = "strategy_feature_stats"
+    __table_args__ = (
+        UniqueConstraint(
+            "manifest_id",
+            "window_start_ts",
+            "window_end_ts",
+            "split_type",
+            "regime_id",
+            "scoring_mode",
+            "feature_key",
+            "bucket_key",
+            name="uq_strategy_feature_stats_bucket",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    manifest_id: Mapped[str] = mapped_column(String(128), index=True, nullable=False)
+    window_start_ts: Mapped[int] = mapped_column(BigInteger, index=True, nullable=False)
+    window_end_ts: Mapped[int] = mapped_column(BigInteger, index=True, nullable=False)
+    split_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    regime_id: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    scoring_mode: Mapped[str] = mapped_column(String(20), nullable=False)
+    feature_key: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    bucket_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="OK")
+    n: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    win_rate: Mapped[float | None] = mapped_column(Float)
+    avg_r: Mapped[float | None] = mapped_column(Float)
+    ci_low: Mapped[float | None] = mapped_column(Float)
+    ci_high: Mapped[float | None] = mapped_column(Float)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
 
 class FundingSnapshot(Base):

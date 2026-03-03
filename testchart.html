@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
+</head>
+
+<body>
+    <div id="chart" style="width:400px;height:300px;"></div>
+    <script>
+        try {
+            var chart = LightweightCharts.createChart(document.getElementById('chart'), {
+                layout: {
+                    background: { color: "rgba(2,6,23,0)" },
+                    textColor: "rgba(226,232,240,0.9)",
+                },
+                grid: {
+                    vertLines: { color: "rgba(148,163,184,0.1)" },
+                    horzLines: { color: "rgba(148,163,184,0.1)" },
+                },
+                timeScale: { timeVisible: true }
+            });
+            console.log("SUCCESS");
+        } catch (e) {
+            console.error("ERROR:", e.message);
+        }
+    </script>
+</body>
+
+</html>
