@@ -1,8 +1,42 @@
 import logging
 import os
+import time
 from logging.config import dictConfig
+from logging.handlers import TimedRotatingFileHandler
 
 from app.config import get_settings
+
+
+class SafeTimedRotatingFileHandler(TimedRotatingFileHandler):
+    """Windows-friendly timed handler that tolerates locked files.
+
+    On Windows, rename during rollover may fail with WinError 32 when another
+    process still has the file open. In that case we skip this rollover cycle
+    and move to the next rollover boundary instead of spamming stack traces.
+    """
+
+    def doRollover(self) -> None:  # noqa: N802 (stdlib signature)
+        try:
+            super().doRollover()
+        except PermissionError as exc:
+            # Re-open stream and postpone rollover to next interval.
+            if self.stream:
+                try:
+                    self.stream.close()
+                except Exception:
+                    pass
+                self.stream = None
+            if not self.delay:
+                self.stream = self._open()
+
+            current_time = int(time.time())
+            next_rollover = self.computeRollover(current_time)
+            while next_rollover <= current_time:
+                next_rollover += self.interval
+            self.rolloverAt = next_rollover
+            logging.getLogger("crypto_sentinel").warning(
+                "market_ai log rollover skipped due locked file: %s", exc
+            )
 
 
 def setup_logging() -> None:
@@ -29,7 +63,7 @@ def setup_logging() -> None:
                     "formatter": "default",
                 },
                 "market_ai_file": {
-                    "class": "logging.handlers.TimedRotatingFileHandler",
+                    "class": "app.logging.SafeTimedRotatingFileHandler",
                     "formatter": "market_ai",
                     "filename": market_ai_log_file,
                     "when": "midnight",

@@ -5,13 +5,27 @@ from types import SimpleNamespace
 from fastapi.testclient import TestClient
 
 from app.main import app
+import app.config as config
 import app.web.views as views
 
+# All tests that call admin-protected endpoints need a valid ADMIN_TOKEN.
+_TEST_ADMIN_TOKEN = "test-token-for-llm-config"
 
-def test_llm_config_get_includes_new_ui_and_hot_reload_fields():
+
+def _auth_headers() -> dict[str, str]:
+    return {"Authorization": f"Bearer {_TEST_ADMIN_TOKEN}"}
+
+
+def _ensure_admin_token(monkeypatch):
+    monkeypatch.setenv("ADMIN_TOKEN", _TEST_ADMIN_TOKEN)
+    config.get_settings.cache_clear()
+
+
+def test_llm_config_get_includes_new_ui_and_hot_reload_fields(monkeypatch):
+    _ensure_admin_token(monkeypatch)
     client = TestClient(app)
 
-    resp = client.get("/api/llm/config")
+    resp = client.get("/api/llm/config", headers=_auth_headers())
     assert resp.status_code == 200
     data = resp.json()
 
@@ -33,6 +47,7 @@ def test_llm_config_get_includes_new_ui_and_hot_reload_fields():
 
 
 def test_llm_config_post_routing_returns_hot_apply_metadata(monkeypatch):
+    _ensure_admin_token(monkeypatch)
     client = TestClient(app)
 
     calls: list[tuple[str, str, str]] = []
@@ -48,6 +63,7 @@ def test_llm_config_post_routing_returns_hot_apply_metadata(monkeypatch):
     resp = client.post(
         "/api/llm/config",
         json={"task": "routing", "apply_now": True, "routing": {"telegram_chat": "general", "market": "market"}},
+        headers=_auth_headers(),
     )
     assert resp.status_code == 200
     data = resp.json()
@@ -61,6 +77,7 @@ def test_llm_config_post_routing_returns_hot_apply_metadata(monkeypatch):
 
 
 def test_llm_config_post_common_keys_supports_ark(monkeypatch):
+    _ensure_admin_token(monkeypatch)
     client = TestClient(app)
 
     calls: list[tuple[str, str, str]] = []
@@ -80,6 +97,7 @@ def test_llm_config_post_common_keys_supports_ark(monkeypatch):
             "apply_now": True,
             "keys": {"ark": "ark-demo-key", "openai": "openai-demo-key"},
         },
+        headers=_auth_headers(),
     )
     assert resp.status_code == 200
     data = resp.json()
@@ -93,6 +111,7 @@ def test_llm_config_post_common_keys_supports_ark(monkeypatch):
 
 
 def test_llm_config_post_common_keys_supports_nvidia_nim(monkeypatch):
+    _ensure_admin_token(monkeypatch)
     client = TestClient(app)
 
     calls: list[tuple[str, str, str]] = []
@@ -112,6 +131,7 @@ def test_llm_config_post_common_keys_supports_nvidia_nim(monkeypatch):
             "apply_now": True,
             "keys": {"nvidia_nim": "nim-demo-key"},
         },
+        headers=_auth_headers(),
     )
     assert resp.status_code == 200
     data = resp.json()
@@ -149,10 +169,11 @@ def test_llm_profiles_auto_heal_missing_model(monkeypatch):
     assert profiles["general"].provider == "deepseek"
 
 
-def test_llm_config_get_returns_model_catalog_and_tiers():
+def test_llm_config_get_returns_model_catalog_and_tiers(monkeypatch):
     """GET /api/llm/config should include model_catalog (list) and model_tiers (dict with tiers)."""
+    _ensure_admin_token(monkeypatch)
     client = TestClient(app)
-    resp = client.get("/api/llm/config")
+    resp = client.get("/api/llm/config", headers=_auth_headers())
     assert resp.status_code == 200
     data = resp.json()
     assert data["ok"] is True

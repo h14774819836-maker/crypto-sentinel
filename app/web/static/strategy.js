@@ -2,6 +2,13 @@
   const bootstrap = window.STRATEGY_BOOTSTRAP || {};
   const MAX_LINES = Number(bootstrap.maxLines || 20);
   const DENSIFIED_RANGE_SECONDS = 3 * 24 * 3600;
+  const AUTO_REFRESH_SECONDS = 3;
+  const AUTO_REFRESH_LATEST_LIMIT = 300;
+  const OHLCV_MAX_LIMIT = 9000;
+  const OHLCV_EXTEND_PAD = 0.6;
+  const RANGE_DEBOUNCE_MS = 200;
+  const WS_RECONNECT_BASE_MS = 1000;
+  const WS_RECONNECT_MAX_MS = 15000;
 
   const state = {
     symbol: String(bootstrap.defaultSymbol || "BTCUSDT").toUpperCase(),
@@ -34,7 +41,11 @@
   let loadedOhlcvTo = 0;
   let skipRangeEvent = false;
   const DETAIL_CACHE_MAX = 200;
-  const OHLCV_EXTEND_PAD = 0.3; // fetch 30% extra on each side when extending
+  let autoRefreshTimer = null;
+  let wsConn = null;
+  let wsReconnectTimer = null;
+  let wsBackoff = WS_RECONNECT_BASE_MS;
+  let wsActive = false;
 
   const els = {
     symbol: document.getElementById("strategy-symbol"),
@@ -77,14 +88,15 @@
 
   function formatTs(ts) {
     if (!ts) return "-";
-    const d = new Date(Number(ts) * 1000);
+    // Force Beijing Time (UTC+8)
+    const d = new Date(Number(ts) * 1000 + 8 * 3600 * 1000);
     if (!Number.isFinite(d.getTime())) return "-";
-    const Y = d.getFullYear();
-    const M = String(d.getMonth() + 1).padStart(2, "0");
-    const D = String(d.getDate()).padStart(2, "0");
-    const h = String(d.getHours()).padStart(2, "0");
-    const m = String(d.getMinutes()).padStart(2, "0");
-    const s = String(d.getSeconds()).padStart(2, "0");
+    const Y = d.getUTCFullYear();
+    const M = String(d.getUTCMonth() + 1).padStart(2, "0");
+    const D = String(d.getUTCDate()).padStart(2, "0");
+    const h = String(d.getUTCHours()).padStart(2, "0");
+    const m = String(d.getUTCMinutes()).padStart(2, "0");
+    const s = String(d.getUTCSeconds()).padStart(2, "0");
     return `${Y}-${M}-${D} ${h}:${m}:${s}`;
   }
 
@@ -105,6 +117,114 @@
     return resp.json();
   }
 
+  function buildWsUrl(symbol, timeframe) {
+    const base = String(bootstrap.binanceWsUrl || "wss://stream.binance.com:9443/stream").trim();
+    const stream = `${String(symbol).toLowerCase()}@kline_${String(timeframe).toLowerCase()}`;
+    if (!base) return null;
+    const hasQuery = base.includes("?");
+    if (hasQuery) {
+      if (base.includes("streams=")) {
+        return base.replace(/streams=[^&]*/i, `streams=${stream}`);
+      }
+      return `${base}&streams=${stream}`;
+    }
+    return `${base}?streams=${stream}`;
+  }
+
+  function resetWsBackoff() {
+    wsBackoff = WS_RECONNECT_BASE_MS;
+  }
+
+  function stopKlineWs(keepActive) {
+    if (!keepActive) wsActive = false;
+    if (wsReconnectTimer) {
+      clearTimeout(wsReconnectTimer);
+      wsReconnectTimer = null;
+    }
+    if (wsConn) {
+      try {
+        wsConn.close();
+      } catch (_e) {
+      }
+      wsConn = null;
+    }
+  }
+
+  function scheduleWsReconnect() {
+    if (!wsActive) return;
+    if (wsReconnectTimer) return;
+    startAutoRefresh();
+    wsReconnectTimer = setTimeout(() => {
+      wsReconnectTimer = null;
+      startKlineWs();
+    }, wsBackoff);
+    wsBackoff = Math.min(wsBackoff * 2, WS_RECONNECT_MAX_MS);
+  }
+
+  function applyRealtimeKline(kline) {
+    const t = Math.floor(Number(kline.t) / 1000);
+    if (!Number.isFinite(t)) return;
+    const next = {
+      time: t,
+      open: Number(kline.o),
+      high: Number(kline.h),
+      low: Number(kline.l),
+      close: Number(kline.c),
+    };
+    if (!Number.isFinite(next.open)) return;
+    const last = state.ohlcv[state.ohlcv.length - 1];
+    if (!last || t > last.time) {
+      state.ohlcv.push(next);
+    } else if (t === last.time) {
+      state.ohlcv[state.ohlcv.length - 1] = next;
+    } else {
+      state.ohlcv = mergeOhlcv(state.ohlcv, [next]);
+    }
+    state.ohlcv = trimOhlcv(state.ohlcv);
+    loadedOhlcvTo = Math.max(loadedOhlcvTo, t);
+    skipRangeEvent = true;
+    candleSeries.update(next);
+    requestAnimationFrame(() => { skipRangeEvent = false; });
+  }
+
+  function startKlineWs() {
+    const wsUrl = buildWsUrl(state.symbol, state.baseTf);
+    if (!wsUrl || typeof WebSocket === "undefined") {
+      startAutoRefresh();
+      return;
+    }
+    stopKlineWs(true);
+    stopAutoRefresh();
+    wsActive = true;
+    try {
+      wsConn = new WebSocket(wsUrl);
+    } catch (_e) {
+      scheduleWsReconnect();
+      return;
+    }
+    wsConn.onopen = () => {
+      resetWsBackoff();
+      stopAutoRefresh();
+    };
+    wsConn.onmessage = (evt) => {
+      try {
+        const payload = JSON.parse(evt.data);
+        const data = payload.data || payload;
+        if (!data || data.e !== "kline") return;
+        const kline = data.k || {};
+        if (!kline || String(kline.i || "").toLowerCase() !== String(state.baseTf).toLowerCase()) return;
+        applyRealtimeKline(kline);
+      } catch (_e) {
+      }
+    };
+    wsConn.onerror = () => {
+      scheduleWsReconnect();
+    };
+    wsConn.onclose = () => {
+      scheduleWsReconnect();
+    };
+  }
+
   function setChartLoading(loading) {
     const overlay = document.getElementById("strategy-chart-loading");
     if (overlay) overlay.classList.toggle("hidden", !loading);
@@ -118,13 +238,42 @@
         background: { type: 'solid', color: "rgba(2,6,23,0)" },
         textColor: "rgba(226,232,240,0.9)",
       },
+      localization: {
+        timeFormatter: (time) => {
+          // Force Beijing Time (UTC+8)
+          const d = new Date(Number(time) * 1000 + 8 * 3600 * 1000);
+          if (!Number.isFinite(d.getTime())) return "-";
+          const Y = d.getUTCFullYear();
+          const M = String(d.getUTCMonth() + 1).padStart(2, "0");
+          const D = String(d.getUTCDate()).padStart(2, "0");
+          const h = String(d.getUTCHours()).padStart(2, "0");
+          const m = String(d.getUTCMinutes()).padStart(2, "0");
+          return `${Y}-${M}-${D} ${h}:${m}`;
+        },
+      },
       grid: {
         vertLines: { color: "rgba(148,163,184,0.1)" },
         horzLines: { color: "rgba(148,163,184,0.1)" },
       },
       crosshair: { mode: 0 },
       rightPriceScale: { borderColor: "rgba(148,163,184,0.2)" },
-      timeScale: { borderColor: "rgba(148,163,184,0.2)", timeVisible: true, secondsVisible: false },
+      timeScale: {
+        borderColor: "rgba(148,163,184,0.2)",
+        timeVisible: true,
+        secondsVisible: false,
+        tickMarkFormatter: (time, tickMarkType, locale) => {
+          // Force Beijing Time (UTC+8)
+          const d = new Date(Number(time) * 1000 + 8 * 3600 * 1000);
+          const M = String(d.getUTCMonth() + 1).padStart(2, '0');
+          const D = String(d.getUTCDate()).padStart(2, '0');
+          const h = String(d.getUTCHours()).padStart(2, '0');
+          const m = String(d.getUTCMinutes()).padStart(2, '0');
+          // 0: Year, 1: Month, 2: DayOfMonth, 3: Time, 4: TimeWithSeconds
+          if (tickMarkType === 0) return String(d.getUTCFullYear());
+          if (tickMarkType === 1 || tickMarkType === 2) return `${M}-${D}`;
+          return `${h}:${m}`;
+        }
+      },
     });
     candleSeries = chart.addCandlestickSeries({
       upColor: "#22c55e",
@@ -145,7 +294,7 @@
     chart.timeScale().subscribeVisibleLogicalRangeChange(() => {
       if (skipRangeEvent) return;
       clearTimeout(rangeDebounceTimer);
-      rangeDebounceTimer = setTimeout(onViewportChange, 350);
+      rangeDebounceTimer = setTimeout(onViewportChange, RANGE_DEBOUNCE_MS);
     });
 
     chart.subscribeClick((param) => {
@@ -195,19 +344,71 @@
 
   function renderDecisionMarkers() {
     if (!candleSeries) return;
-    const markers = (state.rawItems || []).slice(0, 500).map((item) => {
-      const side = String(item.position_side || "").toUpperCase();
-      const isLong = side === "LONG";
-      const isShort = side === "SHORT";
-      return {
-        time: Number(item.decision_ts),
-        position: isShort ? "aboveBar" : "belowBar",
-        color: markerColorForItem(item),
-        shape: isLong ? "arrowUp" : isShort ? "arrowDown" : "circle",
-        text: isLong ? "多" : isShort ? "空" : "平",
-        size: 1.5,
-      };
-    }).sort((a, b) => a.time - b.time);
+
+    // Use a default interval of 60 seconds if not parsed correctly.
+    // If timeframeSeconds doesn't exist yet in the calling context, default to 60.
+    const intervalSecs = (typeof timeframeSeconds === 'function') ? (timeframeSeconds(state.baseTf) || 60) : 60;
+
+    // Group decisions by quantized timestamp
+    const groups = new Map();
+    for (const item of (state.rawItems || []).slice(0, 500)) {
+      let ts = Number(item.decision_ts);
+      ts = Math.floor(ts / intervalSecs) * intervalSecs; // Quantize
+      if (!groups.has(ts)) groups.set(ts, []);
+      groups.get(ts).push(item);
+    }
+
+    const markers = [];
+
+    // Process each timestamp group
+    for (const [ts, items] of groups.entries()) {
+      // Group by side (LONG, SHORT, HOLD/Other) within the same timestamp
+      const sideGroups = { LONG: [], SHORT: [], HOLD: [] };
+      for (const item of items) {
+        const side = String(item.position_side || "").toUpperCase();
+        if (side === "LONG") sideGroups.LONG.push(item);
+        else if (side === "SHORT") sideGroups.SHORT.push(item);
+        else sideGroups.HOLD.push(item);
+      }
+
+      // Render LONG markers
+      if (sideGroups.LONG.length > 0) {
+        markers.push({
+          time: ts,
+          position: "belowBar",
+          color: "rgba(34,197,94,1)",
+          shape: "arrowUp",
+          text: sideGroups.LONG.length > 1 ? `多x${sideGroups.LONG.length}` : "多",
+          size: 1.5,
+        });
+      }
+
+      // Render SHORT markers
+      if (sideGroups.SHORT.length > 0) {
+        markers.push({
+          time: ts,
+          position: "aboveBar",
+          color: "rgba(239,68,68,1)",
+          shape: "arrowDown",
+          text: sideGroups.SHORT.length > 1 ? `空x${sideGroups.SHORT.length}` : "空",
+          size: 1.5,
+        });
+      }
+
+      // Render HOLD markers
+      if (sideGroups.HOLD.length > 0) {
+        markers.push({
+          time: ts,
+          position: "belowBar",
+          color: "rgba(148,163,184,0.7)", // Slightly more transparent slate
+          shape: "circle",
+          text: sideGroups.HOLD.length > 1 ? `平x${sideGroups.HOLD.length}` : "平",
+          size: 0.8, // Slightly smaller than default 1.5
+        });
+      }
+    }
+
+    markers.sort((a, b) => a.time - b.time);
     candleSeries.setMarkers(markers);
   }
 
@@ -368,6 +569,26 @@
     return merged;
   }
 
+  function timeframeSeconds(value) {
+    const raw = String(value || "").trim().toLowerCase();
+    const match = raw.match(/^(\d+)([mhdw])$/);
+    if (!match) return null;
+    const n = Number(match[1]);
+    if (!Number.isFinite(n) || n <= 0) return null;
+    const unit = match[2];
+    if (unit === "m") return n * 60;
+    if (unit === "h") return n * 3600;
+    if (unit === "d") return n * 86400;
+    if (unit === "w") return n * 604800;
+    return null;
+  }
+
+  function trimOhlcv(items) {
+    const maxKeep = Math.max(OHLCV_MAX_LIMIT, AUTO_REFRESH_LATEST_LIMIT * 2);
+    if (items.length <= maxKeep) return items;
+    return items.slice(-maxKeep);
+  }
+
   async function loadOhlcv(forceFullReplace) {
     const fetchFrom = state.fromTs;
     const fetchTo = state.toTs;
@@ -376,16 +597,48 @@
       timeframe: state.baseTf,
       from: fetchFrom,
       to: fetchTo,
-      limit: 5000,
+      limit: OHLCV_MAX_LIMIT,
     });
     const incoming = parseOhlcvItems(resp.items);
     if (forceFullReplace || !state.ohlcv.length) {
       state.ohlcv = incoming;
     } else {
-      state.ohlcv = mergeOhlcv(state.ohlcv, incoming);
+      state.ohlcv = trimOhlcv(mergeOhlcv(state.ohlcv, incoming));
     }
     loadedOhlcvFrom = Math.min(loadedOhlcvFrom || fetchFrom, fetchFrom);
     loadedOhlcvTo = Math.max(loadedOhlcvTo || fetchTo, fetchTo);
+    skipRangeEvent = true;
+    candleSeries.setData(state.ohlcv);
+    requestAnimationFrame(() => { skipRangeEvent = false; });
+  }
+
+  async function loadLatestOhlcvIncremental() {
+    if (!state.ohlcv.length) {
+      await loadViewportData(true);
+      return;
+    }
+    const last = state.ohlcv[state.ohlcv.length - 1];
+    const tfSeconds = timeframeSeconds(state.baseTf);
+    const nowTs = Math.floor(Date.now() / 1000);
+    const params = {
+      symbol: state.symbol,
+      timeframe: state.baseTf,
+      limit: AUTO_REFRESH_LATEST_LIMIT,
+    };
+    if (last && tfSeconds) {
+      params.from = Math.max(0, Number(last.time) - tfSeconds * 2);
+      params.to = nowTs + tfSeconds;
+    }
+    const resp = await fetchJson("/api/ohlcv", params);
+    const incoming = parseOhlcvItems(resp.items);
+    if (!incoming.length) return;
+    state.ohlcv = trimOhlcv(mergeOhlcv(state.ohlcv, incoming));
+    const first = incoming[0];
+    const lastIncoming = incoming[incoming.length - 1];
+    if (first && lastIncoming) {
+      loadedOhlcvFrom = loadedOhlcvFrom ? Math.min(loadedOhlcvFrom, first.time) : first.time;
+      loadedOhlcvTo = Math.max(loadedOhlcvTo, lastIncoming.time);
+    }
     skipRangeEvent = true;
     candleSeries.setData(state.ohlcv);
     requestAnimationFrame(() => { skipRangeEvent = false; });
@@ -544,6 +797,7 @@
         state.ohlcv = [];
         await loadViewportData(true);
         await loadScores();
+        startKlineWs();
       });
     });
     if (els.manifestId) {
@@ -552,6 +806,7 @@
         state.cursor = null;
         await loadViewportData(true);
         await loadScores();
+        startKlineWs();
       });
     }
     if (els.refresh) {
@@ -564,6 +819,7 @@
         state.ohlcv = [];
         await loadViewportData(true);
         await loadScores();
+        startKlineWs();
       });
     }
     if (els.loadMore) {
@@ -571,6 +827,21 @@
         if (!state.cursor || state.mode !== "raw") return;
         await loadRawDecisions(true);
       });
+    }
+  }
+
+  function startAutoRefresh() {
+    if (autoRefreshTimer) clearInterval(autoRefreshTimer);
+    autoRefreshTimer = setInterval(() => {
+      if (!chart || state.isLoading) return;
+      loadLatestOhlcvIncremental().catch(() => { });
+    }, AUTO_REFRESH_SECONDS * 1000);
+  }
+
+  function stopAutoRefresh() {
+    if (autoRefreshTimer) {
+      clearInterval(autoRefreshTimer);
+      autoRefreshTimer = null;
     }
   }
 
@@ -585,6 +856,7 @@
       await loadViewportData(true);
       await loadScores();
       if (chart) chart.timeScale().fitContent();
+      startKlineWs();
     } catch (e) {
       if (els.viewMeta) els.viewMeta.textContent = 'CRASH: ' + String(e.message || e);
       console.error(e);

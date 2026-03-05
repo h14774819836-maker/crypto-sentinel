@@ -83,3 +83,28 @@ def test_nvidia_nim_maps_kimi_alias_model_to_upstream_model():
 
     asyncio.run(_run())
     assert called.get("model") == "moonshotai/kimi-k2.5"
+
+
+def test_nvidia_nim_maps_nemotron_ultra_deepseek_nano_to_upstream():
+    """Verify Llama Nemotron Ultra, DeepSeek V3.2, Nemotron Nano alias mapping."""
+    mappings = [
+        ("nvidia_nim/llama-3_1-nemotron-ultra-253b-v1", "nvidia/llama-3.1-nemotron-ultra-253b-v1"),
+        ("nvidia_nim/deepseek-v3_2", "deepseek-ai/deepseek-v3_2"),
+        ("nvidia_nim/nemotron-3-nano-30b-a3b", "nvidia/nemotron-3-nano-30b-a3b"),
+    ]
+    for config_model, expected_upstream in mappings:
+        provider = OpenAICompatibleProvider(_cfg(model=config_model))
+        called: dict = {}
+
+        async def _fake_create(**kwargs):
+            called.update(kwargs)
+            msg = SimpleNamespace(content="ok", reasoning_content="", tool_calls=None)
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=msg, error=None)],
+                usage=None,
+                model=kwargs.get("model"),
+            )
+
+        provider.client.chat.completions.create = _fake_create
+        asyncio.run(provider.generate_response(messages=[{"role": "user", "content": "ping"}]))
+        assert called.get("model") == expected_upstream, f"config={config_model}"

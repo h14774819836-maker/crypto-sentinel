@@ -47,6 +47,11 @@
       <span>Strategy Replay</span>
     </a>
 
+    <a href="/account" class="nav-link {% if current_path == '/account' %}is-active{% endif %}">
+      <i data-lucide="wallet-cards" class="w-5 h-5"></i>
+      <span data-i18n="nav.account">Account Monitor</span>
+    </a>
+
     <a href="/llm" class="nav-link mt-4 {% if current_path == '/llm' %}is-active{% endif %}">
       <i data-lucide="cpu" class="w-5 h-5"></i>
       <span data-i18n="nav.llm_debug">LLM Debug</span>
@@ -73,6 +78,14 @@
     <a href="/api/health" class="nav-link nav-link-api">
       <i data-lucide="activity" class="w-4 h-4"></i>
       <span data-i18n="nav.health">System Health</span>
+    </a>
+    <a href="/api/account/futures" class="nav-link nav-link-api">
+      <i data-lucide="braces" class="w-4 h-4"></i>
+      <span data-i18n="nav.account_futures_api">Account Futures API</span>
+    </a>
+    <a href="/api/account/margin" class="nav-link nav-link-api">
+      <i data-lucide="braces" class="w-4 h-4"></i>
+      <span data-i18n="nav.account_margin_api">Account Margin API</span>
     </a>
   </nav>
   <div class="p-4 border-t border-white/5">

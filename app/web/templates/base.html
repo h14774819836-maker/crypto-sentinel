@@ -2,6 +2,7 @@
 {% set page_main_max = page_main_max|default('max-w-[1440px]') %}
 <!doctype html>
 <html lang="zh-CN" class="dark" style="background-color:#060a12;color-scheme:dark;">
+
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -32,7 +33,9 @@
   </script>
   {% block head_extra %}{% endblock %}
 </head>
-<body class="{% block body_class %}app-shell flex bg-background text-foreground min-h-screen font-sans selection:bg-primary/30{% endblock %}">
+
+<body
+  class="{% block body_class %}app-shell flex bg-background text-foreground min-h-screen font-sans selection:bg-primary/30{% endblock %}">
   {% include "partials/sidebar.html" with context %}
   {% include "partials/mobile_header.html" with context %}
 
@@ -40,6 +43,7 @@
     {% block content %}{% endblock %}
   </main>
 
+  <script src="/static/admin_auth.js?v=20260304"></script>
   <script src="/static/i18n.js?v=20260228-4"></script>
   <script src="/static/ui_core.js?v=20260228-4"></script>
   <script>
@@ -53,4 +57,5 @@
   </script>
   {% block scripts %}{% endblock %}
 </body>
+
 </html>

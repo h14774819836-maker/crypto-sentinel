@@ -1,9 +1,9 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
-from app.web.views import _derive_youtube_statuses, _youtube_queue_summary_from_items
+from app.web.youtube_helpers import _derive_youtube_statuses, _youtube_queue_summary_from_items
 
 
 def _video(**kwargs):

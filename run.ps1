@@ -68,4 +68,5 @@ Write-Host "        Dashboard: http://127.0.0.1:8000" -ForegroundColor Cyan
 Write-Host "        Press Ctrl+C to stop" -ForegroundColor DarkGray
 Write-Host ""
 
-python -m app.cli up --open-browser --db-init --backfill-days 1
+python -m alembic upgrade head
+python -m app.cli up --open-browser --no-db-init --backfill-days 1

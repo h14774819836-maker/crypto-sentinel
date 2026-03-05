@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from fastapi.testclient import TestClient
 
 from app.main import app
-import app.web.views as views
+from app.web.routers import api_market
 
 
 def test_strategy_page_available():
@@ -18,12 +18,12 @@ def test_strategy_page_available():
 
 def test_strategy_decisions_api_raw_and_densified(monkeypatch):
     monkeypatch.setattr(
-        views,
+        api_market,
         "list_strategy_decisions_raw",
         lambda *args, **kwargs: ([{"id": 1, "symbol": "BTCUSDT", "decision_ts": 1}], True, 1),
     )
     monkeypatch.setattr(
-        views,
+        api_market,
         "list_strategy_decisions_densified",
         lambda *args, **kwargs: [{"bucket_ts": 1, "count": 3, "tp": 1, "sl": 1, "ambiguous": 1}],
     )
@@ -49,7 +49,7 @@ def test_strategy_decisions_api_raw_and_densified(monkeypatch):
 def test_ohlcv_api_serializes_epoch(monkeypatch):
     ts = datetime(2026, 3, 3, 0, 0, tzinfo=timezone.utc)
     monkeypatch.setattr(
-        views,
+        api_market,
         "list_ohlcv_range",
         lambda *args, **kwargs: [
             SimpleNamespace(ts=ts, open=1.0, high=2.0, low=0.5, close=1.5, volume=10.0),

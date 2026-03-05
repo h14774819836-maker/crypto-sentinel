@@ -127,6 +127,20 @@ def test_validate_and_sanitize_safe_swaps_tp_sl_for_long():
                 "confidence": 70,
                 "reasoning": "tp/sl 反了",
             },
+            "trade_plan": {
+                "expiration_ts_utc": 9999999999,
+                "max_hold_bars": 60,
+                "leverage": 5,
+                "margin_mode": "isolated",
+            },
+            "evidence": [
+                {"timeframe": "1m", "point": "x", "metrics": {"close": 100.0}},
+                {"timeframe": "5m", "point": "y", "metrics": {"atr_14": 2.0}},
+            ],
+            "anchors": [
+                {"path": "facts.multi_tf_snapshots.1m.latest.close", "value": "100"},
+                {"path": "facts.multi_tf_snapshots.1m.latest.atr_14", "value": "2"},
+            ],
         },
         ensure_ascii=False,
     )
@@ -163,6 +177,7 @@ def test_analyze_retries_once_on_schema_failure_then_succeeds():
                     "confidence": 60,
                     "reasoning": "第一次缺 anchors",
                 },
+                "trade_plan": {"expiration_ts_utc": 9999999999},
                 "evidence": [
                     {"timeframe": "1m", "point": "close=100", "metrics": {"close": 100.0}},
                     {"timeframe": "1m", "point": "atr=1", "metrics": {"atr_14": 1.0}},
@@ -187,6 +202,7 @@ def test_analyze_retries_once_on_schema_failure_then_succeeds():
                     "confidence": 62,
                     "reasoning": "重试后成功",
                 },
+                "trade_plan": {"expiration_ts_utc": 9999999999, "max_hold_bars": 60},
                 "evidence": [
                     {"timeframe": "1m", "point": "close=100", "metrics": {"close": 100.0}},
                     {"timeframe": "1m", "point": "atr=1", "metrics": {"atr_14": 1.0}},
@@ -313,9 +329,9 @@ def test_parse_response_strict_allows_anchor_without_facts_prefix_and_categorica
                     "metrics": {"ema_ribbon_trend": "DOWN", "rsi_14": 34.65593054880884},
                 },
                 {
-                    "timeframe": "15m",
-                    "point": "趋势向上",
-                    "metrics": {"ema_ribbon_trend": "UP", "rsi_14": 100.0},
+                    "timeframe": "4h",
+                    "point": "RSI 超卖",
+                    "metrics": {"rsi_14": 34.65593054880884},
                 },
             ],
             "anchors": [
@@ -327,6 +343,7 @@ def test_parse_response_strict_allows_anchor_without_facts_prefix_and_categorica
             "scenarios": {"base": "", "bull": "", "bear": ""},
             "youtube_reflection": {"status": "conflicted", "note": "x"},
             "validation_notes": [],
+            "trade_plan": {"expiration_ts_utc": 9999999999, "max_hold_bars": 60},
         },
         ensure_ascii=False,
     )

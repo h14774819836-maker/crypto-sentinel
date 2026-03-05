@@ -85,6 +85,42 @@ def build_scheduler(runtime) -> AsyncIOScheduler:
         next_run_time=now,
     )
 
+    if runtime.settings.account_monitor_enabled:
+        account_monitor_seconds = runtime.settings.account_monitor_seconds
+        if runtime.settings.account_user_stream_enabled:
+            account_monitor_seconds = max(
+                int(runtime.settings.account_monitor_ws_fallback_seconds),
+                int(account_monitor_seconds),
+            )
+        scheduler.add_job(
+            jobs.supervised_job,
+            "interval",
+            seconds=account_monitor_seconds,
+            kwargs={"job_name": "account_monitor_job", "coro_func": jobs.account_monitor_job, "runtime": runtime},
+            id="account_monitor_job",
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=30,
+            next_run_time=now,
+        )
+        if runtime.settings.account_daily_stats_enabled:
+            scheduler.add_job(
+                jobs.supervised_job,
+                "cron",
+                hour=0,
+                minute=1,
+                timezone="UTC",
+                kwargs={
+                    "job_name": "account_daily_stats_rollup_job",
+                    "coro_func": jobs.account_daily_stats_rollup_job,
+                    "runtime": runtime,
+                },
+                id="account_daily_stats_rollup_job",
+                max_instances=1,
+                coalesce=True,
+                misfire_grace_time=3600,
+            )
+
     # --- Intel news ingest/digest ---
     if runtime.settings.intel_enabled:
         scheduler.add_job(

@@ -32,4 +32,5 @@ if [ ! -f ".env" ]; then
   echo "Created .env from .env.example (Telegram is optional)."
 fi
 
-python -m app.cli up --open-browser --db-init --backfill-days 1
+python -m alembic upgrade head
+python -m app.cli up --open-browser --no-db-init --backfill-days 1

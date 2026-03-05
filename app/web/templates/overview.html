@@ -234,7 +234,8 @@
 
               <td class="mono font-bold text-foreground col-tag">{{ row.symbol }}</td>
 
-              <td class="mono col-num">${{ "%.6f"|format(row.price) if row.price is not none else "-" }}</td>
+              <td class="mono col-num"><span data-price-value>{{ "%.6f"|format(row.price) if row.price is not none else
+                  "-" }}</span></td>
 
               <td
                 class="mono col-num font-medium {{ 'text-positive' if row.ret_1m and row.ret_1m > 0 else 'text-negative' if row.ret_1m and row.ret_1m < 0 else '' }}">
@@ -258,10 +259,11 @@
 
                 "%.3f"|format(row.volume_zscore) if row.volume_zscore is not none else "-" }}</td>
 
-              <td class="text-muted-foreground text-xs col-time">{{ row.updated_at.strftime("%H:%M:%S") if
-                row.updated_at
+              <td class="text-muted-foreground text-xs col-time"><span data-updated-at>{{
+                  row.updated_at.strftime("%H:%M:%S") if
+                  row.updated_at
 
-                else "-" }}</td>
+                  else "-" }}</span></td>
 
             </tr>
 
@@ -577,12 +579,13 @@
                     {% endif %}
                   </div>
                   <div class="space-y-1">
-                    {% if validation.get('rr') is not none or risk.get('rr') is not none %}
-                    <div>RR：<span class="mono">{{ '%.2f'|format(validation.get('rr', risk.get('rr'))) }}</span></div>
+                    {% set rr_val = validation.get('rr') if validation.get('rr') is not none else risk.get('rr') %}
+                    {% if rr_val is not none %}
+                    <div>RR：<span class="mono">{{ '%.2f'|format(rr_val) }}</span></div>
                     {% endif %}
-                    {% if validation.get('sl_atr_multiple') is not none or risk.get('sl_atr_multiple') is not none %}
-                    <div>SL ATR 倍数：<span class="mono">{{ '%.2f'|format(validation.get('sl_atr_multiple',
-                        risk.get('sl_atr_multiple'))) }}</span></div>
+                    {% set sl_atr_val = validation.get('sl_atr_multiple') if validation.get('sl_atr_multiple') is not none else risk.get('sl_atr_multiple') %}
+                    {% if sl_atr_val is not none %}
+                    <div>SL ATR 倍数：<span class="mono">{{ '%.2f'|format(sl_atr_val) }}</span></div>
                     {% endif %}
                     {% if risk.get('invalidations') %}
                     <div class="text-muted-foreground">失效条件：{{ (risk.get('invalidations') or [])|join('；') }}</div>
@@ -1089,6 +1092,16 @@
 <script>
 
   let currentCoin = 'BTCUSDT';
+  const BINANCE_WS_URL = "{{ binance_ws_url }}";
+  const TICKER_WS_RECONNECT_BASE_MS = 1000;
+  const TICKER_WS_RECONNECT_MAX_MS = 15000;
+  let tickerWs = null;
+  let tickerReconnectTimer = null;
+  let tickerBackoff = TICKER_WS_RECONNECT_BASE_MS;
+  let tickerActive = false;
+  const AI_CONSOLE_STORAGE_KEY = "ai_console_state_v1";
+  const AI_CONSOLE_MAX_CHARS = 60000;
+  let aiConsoleStorage = null;
 
 
 
@@ -1148,9 +1161,7 @@
       const divSymbol = div.id.replace('ai-console-', '');
 
       div.style.display = divSymbol === symbol ? '' : 'none';
-
     });
-
   }
 
 
@@ -1170,7 +1181,20 @@
     if (!defaultSymbol && tabs.length > 0) defaultSymbol = tabs[0].dataset.symbol;
 
     if (defaultSymbol) selectCoin(defaultSymbol);
+    aiConsoleStorage = loadAiConsoleStorage();
+    hydrateConsoleFromStorage();
+    startTickerWs();
 
+  });
+
+  window.addEventListener('beforeunload', () => {
+    if (aiConsoleState && aiConsoleState.streaming) {
+      persistConsoleMeta({
+        status: "interrupted",
+        statusKind: "warning",
+        statusLabel: "页面已离开，流式中断"
+      });
+    }
   });
 
 
@@ -1212,6 +1236,196 @@
     } else {
       status.textContent = label;
     }
+    persistConsoleMeta({ statusKind: kind, statusLabel: label });
+  }
+
+  function buildTickerWsUrl(symbols) {
+    const base = String(BINANCE_WS_URL || "wss://stream.binance.com:9443/stream").trim();
+    if (!base || !symbols.length) return null;
+    const streams = symbols.map(s => `${String(s).toLowerCase()}@miniTicker`).join('/');
+    if (!streams) return null;
+    const hasQuery = base.includes("?");
+    if (hasQuery) {
+      if (base.includes("streams=")) {
+        return base.replace(/streams=[^&]*/i, `streams=${streams}`);
+      }
+      return `${base}&streams=${streams}`;
+    }
+    return `${base}?streams=${streams}`;
+  }
+
+  function loadAiConsoleStorage() {
+    try {
+      const raw = localStorage.getItem(AI_CONSOLE_STORAGE_KEY);
+      if (!raw) return { symbols: {}, meta: {} };
+      const parsed = JSON.parse(raw);
+      if (!parsed || typeof parsed !== "object") return { symbols: {}, meta: {} };
+      if (!parsed.symbols || typeof parsed.symbols !== "object") parsed.symbols = {};
+      if (!parsed.meta || typeof parsed.meta !== "object") parsed.meta = {};
+      return parsed;
+    } catch (_e) {
+      return { symbols: {}, meta: {} };
+    }
+  }
+
+  function saveAiConsoleStorage() {
+    if (!aiConsoleStorage) return;
+    try {
+      localStorage.setItem(AI_CONSOLE_STORAGE_KEY, JSON.stringify(aiConsoleStorage));
+    } catch (_e) {
+    }
+  }
+
+  function persistConsoleMeta(meta = {}) {
+    if (!aiConsoleStorage) return;
+    aiConsoleStorage.meta = { ...(aiConsoleStorage.meta || {}), ...meta, updatedAt: Date.now() };
+    saveAiConsoleStorage();
+  }
+
+  function updateStoredSymbolText(symbol, text) {
+    if (!aiConsoleStorage) return;
+    if (!aiConsoleStorage.symbols) aiConsoleStorage.symbols = {};
+    const entry = aiConsoleStorage.symbols[symbol] || { text: "", system: [] };
+    entry.text = `${entry.text || ""}${text || ""}`;
+    if (entry.text.length > AI_CONSOLE_MAX_CHARS) {
+      entry.text = entry.text.slice(entry.text.length - AI_CONSOLE_MAX_CHARS);
+    }
+    aiConsoleStorage.symbols[symbol] = entry;
+    persistConsoleMeta({ activeSymbol: symbol });
+  }
+
+  function pushStoredSystemMessage(symbol, message, tone) {
+    if (!aiConsoleStorage) return;
+    if (!aiConsoleStorage.symbols) aiConsoleStorage.symbols = {};
+    const entry = aiConsoleStorage.symbols[symbol] || { text: "", system: [] };
+    entry.system = Array.isArray(entry.system) ? entry.system : [];
+    entry.system.push({ message, tone, ts: Date.now() });
+    if (entry.system.length > 120) entry.system = entry.system.slice(-120);
+    aiConsoleStorage.symbols[symbol] = entry;
+    persistConsoleMeta({ activeSymbol: symbol });
+  }
+
+  function clearStoredSymbol(symbol) {
+    if (!aiConsoleStorage || !aiConsoleStorage.symbols) return;
+    delete aiConsoleStorage.symbols[symbol];
+    persistConsoleMeta({ activeSymbol: symbol });
+  }
+
+  function hydrateConsoleFromStorage() {
+    const consoleOutput = document.getElementById('ai-console-output');
+    if (!consoleOutput || !aiConsoleStorage || !aiConsoleStorage.symbols) return;
+    const symbol = currentCoin;
+    const entry = aiConsoleStorage.symbols[symbol];
+    if (!entry) return;
+    const existing = document.getElementById(`ai-console-${symbol}`);
+    if (existing) return;
+    const symbolDiv = document.createElement('div');
+    symbolDiv.id = `ai-console-${symbol}`;
+    symbolDiv.className = 'ai-console-stream mb-3 rounded-r-lg bg-white/[0.02] py-2 pr-2';
+    symbolDiv.innerHTML = `<div class="text-[10px] text-cyan-300 font-semibold uppercase mb-1 tracking-wider">[ ${symbol} ]</div><div class="stream-text text-slate-300/90 whitespace-pre-wrap break-words leading-6"></div>`;
+    const textContainer = symbolDiv.querySelector('.stream-text');
+    if (textContainer && entry.text) {
+      textContainer.textContent = entry.text;
+    }
+    symbolDiv.style.display = symbol === currentCoin ? '' : 'none';
+    consoleOutput.appendChild(symbolDiv);
+    if (Array.isArray(entry.system)) {
+      entry.system.forEach(item => {
+        appendConsoleSystemMessage(consoleOutput, item.message, item.tone);
+      });
+    }
+    const meta = aiConsoleStorage.meta || {};
+    if (meta.statusKind && meta.statusLabel) {
+      setAnalyzeStatus(meta.statusKind, meta.statusLabel);
+    } else if (meta.status === "running") {
+      setAnalyzeStatus('warning', '上次分析未完成，页面切换导致流式连接断开');
+    }
+  }
+
+  function stopTickerWs() {
+    tickerActive = false;
+    if (tickerReconnectTimer) {
+      clearTimeout(tickerReconnectTimer);
+      tickerReconnectTimer = null;
+    }
+    if (tickerWs) {
+      try {
+        tickerWs.close();
+      } catch (_e) {
+      }
+      tickerWs = null;
+    }
+  }
+
+  function scheduleTickerReconnect() {
+    if (!tickerActive) return;
+    if (tickerReconnectTimer) return;
+    tickerReconnectTimer = setTimeout(() => {
+      tickerReconnectTimer = null;
+      startTickerWs();
+    }, tickerBackoff);
+    tickerBackoff = Math.min(tickerBackoff * 2, TICKER_WS_RECONNECT_MAX_MS);
+  }
+
+  function formatPrice(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return "-";
+    return n.toFixed(6);
+  }
+
+  function formatTime(ms) {
+    const d = new Date(ms);
+    if (!Number.isFinite(d.getTime())) return "-";
+    return d.toLocaleTimeString("en-GB", { hour12: false });
+  }
+
+  function updateMarketRow(symbol, price, eventMs) {
+    const row = document.querySelector(`#market-data-tbody tr[data-symbol="${symbol}"]`);
+    if (!row) return;
+    const priceEl = row.querySelector('[data-price-value]');
+    if (priceEl) priceEl.textContent = formatPrice(price);
+    const timeEl = row.querySelector('[data-updated-at]');
+    if (timeEl && eventMs) timeEl.textContent = formatTime(eventMs);
+  }
+
+  function startTickerWs() {
+    if (typeof WebSocket === "undefined") return;
+    const symbols = Array.from(document.querySelectorAll('#market-data-tbody tr[data-symbol]'))
+      .map(row => row.dataset.symbol)
+      .filter(Boolean);
+    if (!symbols.length) return;
+    const wsUrl = buildTickerWsUrl(symbols);
+    if (!wsUrl) return;
+    if (tickerWs) stopTickerWs();
+    tickerActive = true;
+    tickerBackoff = TICKER_WS_RECONNECT_BASE_MS;
+    try {
+      tickerWs = new WebSocket(wsUrl);
+    } catch (_e) {
+      scheduleTickerReconnect();
+      return;
+    }
+    tickerWs.onmessage = (evt) => {
+      let payload;
+      try {
+        payload = JSON.parse(evt.data);
+      } catch (_e) {
+        return;
+      }
+      const data = payload && payload.data ? payload.data : payload;
+      if (!data) return;
+      const symbol = data.s || (payload.stream ? String(payload.stream).split('@')[0].toUpperCase() : null);
+      const price = data.c || data.p || data.P;
+      const eventMs = data.E;
+      if (!symbol) return;
+      updateMarketRow(symbol, price, eventMs);
+    };
+    tickerWs.onerror = () => {
+      scheduleTickerReconnect();
+    };
+    tickerWs.onclose = () => {
+      scheduleTickerReconnect();
+    };
   }
 
   const AI_FEEDBACK_PHASES = {
@@ -1349,6 +1563,7 @@
       clearBtn.dataset.boundClearClick = '1';
       clearBtn.addEventListener('click', () => {
         consoleOutput.innerHTML = '';
+        clearStoredSymbol(currentCoin);
       });
     }
 
@@ -1399,6 +1614,7 @@
     const handleFailure = (message) => {
       const msg = message || 'Analysis failed';
       runState.runFinished = true;
+      persistConsoleMeta({ status: "failed" });
       stopPseudoProgress();
       clearSilenceWatchdog();
       clearAllStreamCursors(consoleOutput);
@@ -1406,6 +1622,7 @@
       setAnalyzeProgress('error', { error: true, label: msg, progress: runState.progress || 100 });
       announceAnalyzeStatus(msg, { urgent: true });
       appendConsoleSystemMessage(consoleOutput, msg, 'error');
+      pushStoredSystemMessage(currentCoin, msg, 'error');
       if (ui && ui.showPanelError) {
         ui.showPanelError(aiPanel, msg, { retryAction: () => runAiAnalysis(), retryLabel: '重试分析' });
       }
@@ -1429,14 +1646,17 @@
     runState.progress = AI_FEEDBACK_PHASES.preflight.progress;
     setAnalyzeProgress('preflight', { progress: runState.progress });
     consoleOutput.innerHTML = '';
+    clearStoredSymbol(currentCoin);
+    persistConsoleMeta({ status: "running", statusKind: "loading", statusLabel: initialLabel, activeSymbol: currentCoin });
     appendConsoleSystemMessage(consoleOutput, `模型已选择：${selectedLabel}，正在执行请求预检...`);
+    pushStoredSystemMessage(currentCoin, `模型已选择：${selectedLabel}，正在执行请求预检...`);
 
     consoleContainer.classList.remove('hidden');
     aiConsoleState.streaming = true;
     setAiConsoleAutoFollow(true);
 
     try {
-      const preflightRes = await fetch(preflightUrl, { method: 'POST' });
+      const preflightRes = await adminFetch(preflightUrl, { method: 'POST' });
       if (!preflightRes.ok) {
         let errMsg = `Request failed (${preflightRes.status})`;
         try {
@@ -1458,8 +1678,9 @@
     setAnalyzeStatus('loading', `Connecting ${selectedLabel} stream...`, { pulse: true });
     announceAnalyzeStatus(`已通过预检，正在连接 ${selectedLabel} 流式输出。`);
     appendConsoleSystemMessage(consoleOutput, '预检通过，正在连接流式输出通道...');
+    pushStoredSystemMessage(currentCoin, '预检通过，正在连接流式输出通道...');
     startPseudoProgress(68);
-    evtSource = new EventSource(streamUrl);
+    evtSource = adminEventSource(streamUrl);
 
     evtSource.onopen = function () {
       runState.progress = Math.max(runState.progress, 24);
@@ -1479,6 +1700,7 @@
         });
         announceAnalyzeStatus(msg);
         appendConsoleSystemMessage(consoleOutput, msg, 'warning');
+        pushStoredSystemMessage(currentCoin, msg, 'warning');
         if (ui && ui.showToast) ui.showToast('分析任务仍在运行，请稍候...', 'warning', { ttl_ms: 2800 });
       });
     };
@@ -1497,11 +1719,19 @@
             });
             announceAnalyzeStatus(msg);
             appendConsoleSystemMessage(consoleOutput, msg, 'warning');
+            pushStoredSystemMessage(currentCoin, msg, 'warning');
           });
         }
 
         if (data.type === 'error') {
           handleFailure(data.error || 'Analysis failed');
+        } else if (data.type === 'data_sent') {
+          runState.progress = Math.max(runState.progress, 30);
+          setAnalyzeProgress('streaming', { progress: runState.progress, label: "已发送请求数据，等待 AI 分析..." });
+          setAnalyzeStatus('loading', `Waiting for ${selectedLabel} analysis...`, { pulse: true });
+          announceAnalyzeStatus('已发送请求数据，等待 AI 分析。');
+          appendConsoleSystemMessage(consoleOutput, data.message || '已发送请求数据，等待 AI 分析...', 'success');
+          pushStoredSystemMessage(currentCoin, data.message || '已发送请求数据，等待 AI 分析...', 'success');
         } else if (data.type === 'chunk') {
           if (!runState.firstChunkSeen) {
             runState.firstChunkSeen = true;
@@ -1510,6 +1740,7 @@
             setAnalyzeStatus('loading', `Streaming analysis with ${selectedLabel}...`, { pulse: true });
             announceAnalyzeStatus('已收到首批分析输出。');
             appendConsoleSystemMessage(consoleOutput, '已收到首批输出，开始流式生成。', 'success');
+            pushStoredSystemMessage(currentCoin, '已收到首批输出，开始流式生成。', 'success');
           }
 
           let symbolDiv = document.getElementById(`ai-console-${data.symbol}`);
@@ -1530,6 +1761,7 @@
           } else {
             textContainer.appendChild(document.createTextNode(data.text));
           }
+          updateStoredSymbolText(data.symbol, data.text);
 
           if (aiConsoleState.autoFollow && !scrollTimeout) {
             scrollTimeout = setTimeout(() => {
@@ -1556,6 +1788,7 @@
             symbolDiv.appendChild(div);
             setStreamCursorState(symbolDiv, false);
           }
+          pushStoredSystemMessage(data.symbol, '--- Analysis Completed ---', 'success');
 
           if (aiConsoleState.autoFollow) {
             consoleContainer.scrollTop = consoleContainer.scrollHeight;
@@ -1587,6 +1820,7 @@
             .catch(err => console.error(`Failed to update table for ${data.symbol}:`, err));
         } else if (data.type === 'done') {
           runState.runFinished = true;
+          persistConsoleMeta({ status: "done" });
           stopPseudoProgress();
           clearSilenceWatchdog();
           clearAllStreamCursors(consoleOutput);
@@ -1595,6 +1829,7 @@
           setAnalyzeStatus('loading', 'Finalizing UI updates...', { pulse: true });
           announceAnalyzeStatus('分析已完成，正在收尾刷新界面。');
           appendConsoleSystemMessage(consoleOutput, '分析完成，正在回填结果...', 'success');
+          pushStoredSystemMessage(currentCoin, '分析完成，正在回填结果...', 'success');
           aiConsoleState.streaming = false;
           evtSource.close();
           setTimeout(() => {
@@ -1610,9 +1845,10 @@
       }
     };
 
-    evtSource.onerror = function () {
+    evtSource.onerror = function (err) {
       if (runState.runFinished) return;
-      handleFailure('Stream disconnected. Please retry or switch model.');
+      const msg = (err && err.message) ? err.message : 'Stream disconnected. Please retry or switch model.';
+      handleFailure(msg);
     };
   }
 

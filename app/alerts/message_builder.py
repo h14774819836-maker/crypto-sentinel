@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import html
 import re
@@ -13,6 +13,7 @@ class TelegramMessage:
     text: str
     parse_mode: str = "HTML"
     reply_markup: dict | None = None
+    reply_to_message_id: int | None = None
     disable_web_page_preview: bool = True
     kind: str = "system"
     source_id: int | str | None = None
@@ -108,6 +109,18 @@ def _fmt_num(x: float | int | None, digits: int = 2) -> str:
     if isinstance(x, int):
         return str(x)
     return f"{x:.{digits}f}"
+
+
+def build_alert_ref(symbol: str, event_uid: str | None, ts: datetime | None) -> str:
+    """Build a short stable alert reference for user-facing correlation."""
+    dt = ts if isinstance(ts, datetime) else datetime.now(timezone.utc)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    bjt = dt.astimezone(timezone(timedelta(hours=8)))
+    sym = (symbol or "UNK").upper().replace("USDT", "")
+    uid = (event_uid or "NA").replace("-", "").upper()
+    suffix = uid[:4] if uid else "NA00"
+    return f"A{bjt.strftime('%y%m%d-%H%M')}-{sym}-{suffix}"
 
 
 def _alert_title_zh(alert_type: str | None, direction: str | None = None) -> str:
@@ -305,6 +318,64 @@ def build_anomaly_message(alert_payload: dict) -> TelegramMessage:
         text=truncate_safe_html("\n".join(lines)),
         kind="anomaly",
         source_id=alert_payload.get("event_uid"),
+    )
+
+
+def build_flash_alert(
+    alert_payload: dict,
+    *,
+    latest_price: float | None = None,
+    alert_ref: str | None = None,
+) -> TelegramMessage:
+    metrics = alert_payload.get("metrics_json") or {}
+    score = int(metrics.get("score") or 0)
+    symbol = str(alert_payload.get("symbol") or "UNKNOWN")
+    direction = str((metrics.get("direction") or "")).upper()
+    regime = str(metrics.get("regime") or "")
+    observations = metrics.get("observations") or {}
+    ret_1m = observations.get("ret_1m") if isinstance(observations.get("ret_1m"), (int, float)) else None
+    volume_z = observations.get("volume_zscore") if isinstance(observations.get("volume_zscore"), (int, float)) else None
+    title_zh = _alert_title_zh(str(alert_payload.get("alert_type") or ""), direction)
+    short_ref = alert_ref or build_alert_ref(symbol, alert_payload.get("event_uid"), alert_payload.get("ts"))
+    lines = [
+        f"⚡️ <b>异动快讯 #{escape_html(short_ref)}</b>",
+        f"<b>{escape_html(symbol)}</b> {escape_html(title_zh)} | Score {score}/100",
+        f"现价: {escape_html(fmt_price(latest_price))} | 1m: {escape_html(fmt_pct_signed(ret_1m))}",
+        f"量能Z: {escape_html(_fmt_num(volume_z, 2))} | 市场: {escape_html(_regime_zh(regime))}",
+        "",
+        "⏳ 正在调用 AI 生成深度诊断...",
+    ]
+    return TelegramMessage(
+        text=truncate_safe_html("\n".join(lines)),
+        kind="anomaly_flash",
+        source_id=alert_payload.get("event_uid"),
+    )
+
+
+def build_ai_diagnostic_alert(
+    *,
+    symbol: str,
+    alert_ref: str,
+    diagnosis_text: str,
+    summary_reason: str | None = None,
+) -> TelegramMessage:
+    lines = [
+        f"🧠 <b>AI诊断 #{escape_html(alert_ref)}</b> | {escape_html(symbol.upper())}",
+    ]
+    if summary_reason:
+        lines.append(f"<b>事件摘要：</b>{escape_html(summary_reason)}")
+    lines.extend(
+        [
+            "",
+            "<b>核心推演</b>",
+            escape_html(diagnosis_text or "暂无诊断结果"),
+            "",
+            "⚠️ 仅供决策参考，请结合仓位与风控执行。",
+        ]
+    )
+    return TelegramMessage(
+        text=truncate_safe_html("\n".join(lines)),
+        kind="anomaly_ai_diagnostic",
     )
 
 

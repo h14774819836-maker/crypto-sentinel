@@ -39,7 +39,7 @@ if settings.database_url.startswith("sqlite"):
     @event.listens_for(engine, "connect")
     def _set_sqlite_pragma(dbapi_connection, _connection_record) -> None:  # type: ignore[no-untyped-def]
         cursor = dbapi_connection.cursor()
-        cursor.execute("PRAGMA busy_timeout = 5000")
+        cursor.execute("PRAGMA busy_timeout = 15000")  # 15s wait when DB locked (scheduler vs manual refresh)
         cursor.close()
 
 

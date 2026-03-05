@@ -3,15 +3,33 @@ from __future__ import annotations
 import json
 import math
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
+
+
+def _json_serial_default(obj: Any) -> Any:
+    """Make datetime/date JSON-serializable for json.dumps."""
+    if isinstance(obj, (datetime, date)):
+        return obj.isoformat()
+    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
+
+def _dumps_len(obj: Any) -> int:
+    """Return JSON string length with datetime-safe serialization."""
+    return len(json.dumps(obj, ensure_ascii=False, separators=(",", ":"), default=_json_serial_default))
 
 
 EXPECTED_TFS_DEFAULT = ["4h", "1h", "15m", "5m", "1m"]
 
+CONTEXT_MODE_FULL = "full"
+CONTEXT_MODE_MINIMAL = "minimal"
+
+MINIMAL_CONTEXT_TFS = ["5m", "1m"]
+
 YOUTUBE_RADAR_MAX_CHARS = 2600
 ALERTS_DIGEST_MAX_CHARS = 1000
 INTEL_DIGEST_MAX_CHARS = 1800
+ACCOUNT_SNAPSHOT_MAX_CHARS = 1000
 
 
 def build_market_analysis_context(
@@ -24,8 +42,10 @@ def build_market_analysis_context(
     youtube_consensus: Any | None = None,
     youtube_insights: list[Any] | None = None,
     intel_digest: dict[str, Any] | None = None,
+    account_snapshot: dict[str, Any] | None = None,
     now: datetime | None = None,
     expected_timeframes: list[str] | None = None,
+    context_mode: str = CONTEXT_MODE_FULL,
 ) -> dict[str, Any]:
     if now is None:
         now = datetime.now(timezone.utc)
@@ -49,7 +69,8 @@ def build_market_analysis_context(
         youtube_insights=youtube_insights or [],
         now=now,
     )
-    input_budget_meta = _apply_context_clipping(alerts_digest, youtube_radar, intel_digest or {})
+    account_snapshot_payload = _compact_account_snapshot(account_snapshot or {})
+    input_budget_meta = _apply_context_clipping(alerts_digest, youtube_radar, intel_digest or {}, account_snapshot_payload)
     data_quality = _build_data_quality(
         snapshots=snapshots,
         funding_current=funding_current,
@@ -66,14 +87,118 @@ def build_market_analysis_context(
         data_quality=data_quality,
     )
 
+    if context_mode == CONTEXT_MODE_MINIMAL:
+        return _build_minimal_context(
+            symbol=symbol,
+            snapshots=snapshots,
+            derived_by_tf=derived_by_tf,
+            cross_tf_summary=cross_tf_summary,
+            data_quality=data_quality,
+            funding_deltas=funding_deltas,
+            brief=brief,
+        )
+
     return {
         "brief": brief,
         "alerts_digest": alerts_digest,
         "youtube_radar": youtube_radar,
         "intel_digest": intel_digest or {},
+        "account_snapshot": account_snapshot_payload,
         "funding_deltas": funding_deltas,
         "data_quality": data_quality,
         "input_budget_meta": input_budget_meta,
+    }
+
+
+def filter_snapshots_for_context_mode(
+    snapshots: dict[str, dict[str, Any]], context_mode: str
+) -> dict[str, dict[str, Any]]:
+    """Return snapshots filtered by context_mode. Minimal keeps only 1m/5m."""
+    if context_mode == CONTEXT_MODE_MINIMAL:
+        return {k: v for k, v in snapshots.items() if k in MINIMAL_CONTEXT_TFS}
+    return snapshots
+
+
+def resolve_context_mode(
+    *,
+    data_quality: dict[str, Any],
+    tradeable_gate: dict[str, Any] | None,
+    min_context_on_poor_data: bool = True,
+    min_context_on_non_tradeable: bool = True,
+) -> str:
+    """Resolve context_mode from data_quality and tradeable_gate and feature flags."""
+    if not min_context_on_poor_data and not min_context_on_non_tradeable:
+        return CONTEXT_MODE_FULL
+    poor = str((data_quality or {}).get("overall") or "").upper() == "POOR"
+    tradeable = bool((tradeable_gate or {}).get("tradeable", True))
+    if min_context_on_poor_data and poor:
+        return CONTEXT_MODE_MINIMAL
+    if min_context_on_non_tradeable and not tradeable:
+        return CONTEXT_MODE_MINIMAL
+    return CONTEXT_MODE_FULL
+
+
+def to_minimal_context(full_context: dict[str, Any], *, symbol: str, snapshots: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    """Produce minimal context from already-built full context (avoids recomputation)."""
+    brief = full_context.get("brief") or {}
+    derived = brief.get("derived_features_by_tf") or {}
+    derived_minimal = {k: v for k, v in derived.items() if k in MINIMAL_CONTEXT_TFS}
+    cross_minimal = _build_cross_tf_summary(derived_minimal) if derived_minimal else (brief.get("cross_tf_summary") or {})
+    brief_minimal = {
+        "symbol": symbol,
+        "timeframes": [t for t in (brief.get("timeframes") or []) if t in MINIMAL_CONTEXT_TFS],
+        "derived_features_by_tf": derived_minimal,
+        "cross_tf_summary": cross_minimal,
+        "tradeable_gate": brief.get("tradeable_gate") or {"tradeable": True, "reasons": []},
+    }
+    return {
+        "brief": brief_minimal,
+        "alerts_digest": {"count_1h": 0, "count_4h": 0, "top_events": [], "dominant_types": [], "alerts_burst": False},
+        "youtube_radar": {"available": False, "stale": True},
+        "intel_digest": {},
+        "account_snapshot": {},
+        "funding_deltas": full_context.get("funding_deltas") or {},
+        "data_quality": full_context.get("data_quality") or {},
+        "input_budget_meta": {
+            "clip_steps_applied": ["minimal_context"],
+            "alerts_digest_chars": 0,
+        },
+    }
+
+
+def _build_minimal_context(
+    *,
+    symbol: str,
+    snapshots: dict[str, dict[str, Any]],
+    derived_by_tf: dict[str, Any],
+    cross_tf_summary: dict[str, Any],
+    data_quality: dict[str, Any],
+    funding_deltas: dict[str, Any],
+    brief: dict[str, Any],
+) -> dict[str, Any]:
+    """Build minimal context: only 1m/5m snapshots, funding, data_quality, tradeable_gate."""
+    minimal_tfs = ["5m", "1m"]
+    derived_minimal = {k: v for k, v in derived_by_tf.items() if k in minimal_tfs}
+    cross_minimal = _build_cross_tf_summary(derived_minimal) if derived_minimal else cross_tf_summary
+    brief_minimal = {
+        "symbol": symbol,
+        "timeframes": [t for t in brief.get("timeframes", []) if t in minimal_tfs],
+        "derived_features_by_tf": derived_minimal,
+        "cross_tf_summary": cross_minimal,
+        "tradeable_gate": brief.get("tradeable_gate") or {"tradeable": True, "reasons": []},
+    }
+    return {
+        "brief": brief_minimal,
+        "alerts_digest": {"count_1h": 0, "count_4h": 0, "top_events": [], "dominant_types": [], "alerts_burst": False},
+        "youtube_radar": {"available": False, "stale": True},
+        "intel_digest": {},
+        "account_snapshot": {},
+        "funding_deltas": funding_deltas,
+        "data_quality": data_quality,
+        "input_budget_meta": {
+            "clip_steps_applied": ["minimal_context"],
+            "alerts_digest_chars": 0,
+        },
     }
 
 
@@ -448,6 +573,7 @@ def _apply_context_clipping(
     alerts_digest: dict[str, Any],
     youtube_radar: dict[str, Any],
     intel_digest: dict[str, Any],
+    account_snapshot: dict[str, Any],
 ) -> dict[str, Any]:
     clip_steps: list[str] = []
 
@@ -461,24 +587,24 @@ def _apply_context_clipping(
         levels["resistance"] = list(levels.get("resistance") or [])[:3]
         youtube_radar["consensus_levels"] = levels
 
-    alerts_chars = len(json.dumps(alerts_digest, ensure_ascii=False, separators=(",", ":")))
+    alerts_chars = _dumps_len(alerts_digest)
     if alerts_chars > ALERTS_DIGEST_MAX_CHARS and isinstance(alerts_digest.get("top_events"), list):
         for ev in alerts_digest["top_events"]:
             if isinstance(ev, dict) and isinstance(ev.get("reason_short"), str):
                 ev["reason_short"] = _truncate(ev["reason_short"], 50)
         clip_steps.append("alerts:truncate_reason_short")
-        alerts_chars = len(json.dumps(alerts_digest, ensure_ascii=False, separators=(",", ":")))
+        alerts_chars = _dumps_len(alerts_digest)
     if alerts_chars > ALERTS_DIGEST_MAX_CHARS:
         alerts_digest["top_events"] = (alerts_digest.get("top_events") or [])[:2]
         clip_steps.append("alerts:top_events_2")
-        alerts_chars = len(json.dumps(alerts_digest, ensure_ascii=False, separators=(",", ":")))
+        alerts_chars = _dumps_len(alerts_digest)
 
-    before = len(json.dumps(youtube_radar, ensure_ascii=False, separators=(",", ":")))
+    before = _dumps_len(youtube_radar)
     after = before
     if after > YOUTUBE_RADAR_MAX_CHARS:
         _truncate_youtube_radar_text_fields(youtube_radar, note_limit=80, voice_view_limit=70)
         clip_steps.append("youtube:truncate_long_text_fields")
-        after = len(json.dumps(youtube_radar, ensure_ascii=False, separators=(",", ":")))
+        after = _dumps_len(youtube_radar)
     if after > YOUTUBE_RADAR_MAX_CHARS:
         youtube_radar["disagreements"] = [
             {"analyst": d.get("analyst"), "view": _truncate(str(d.get("view") or ""), 60)}
@@ -486,11 +612,11 @@ def _apply_context_clipping(
             if isinstance(d, dict)
         ]
         clip_steps.append("youtube:disagreements_1")
-        after = len(json.dumps(youtube_radar, ensure_ascii=False, separators=(",", ":")))
+        after = _dumps_len(youtube_radar)
     if after > YOUTUBE_RADAR_MAX_CHARS:
         youtube_radar["risk_notes"] = (youtube_radar.get("risk_notes") or [])[:2]
         clip_steps.append("youtube:risk_notes_2")
-        after = len(json.dumps(youtube_radar, ensure_ascii=False, separators=(",", ":")))
+        after = _dumps_len(youtube_radar)
     if after > YOUTUBE_RADAR_MAX_CHARS:
         trimmed_voices = []
         for v in (youtube_radar.get("top_voices") or [])[:2]:
@@ -505,40 +631,97 @@ def _apply_context_clipping(
             })
         youtube_radar["top_voices"] = trimmed_voices
         clip_steps.append("youtube:top_voices_compact")
-        after = len(json.dumps(youtube_radar, ensure_ascii=False, separators=(",", ":")))
+        after = _dumps_len(youtube_radar)
     if after > YOUTUBE_RADAR_MAX_CHARS:
         youtube_radar["disagreements"] = []
         clip_steps.append("youtube:drop_disagreements")
-        after = len(json.dumps(youtube_radar, ensure_ascii=False, separators=(",", ":")))
+        after = _dumps_len(youtube_radar)
     if after > YOUTUBE_RADAR_MAX_CHARS:
         youtube_radar["risk_notes"] = []
         clip_steps.append("youtube:drop_risk_notes")
-        after = len(json.dumps(youtube_radar, ensure_ascii=False, separators=(",", ":")))
+        after = _dumps_len(youtube_radar)
 
-    intel_before = len(json.dumps(intel_digest, ensure_ascii=False, separators=(",", ":")))
+    intel_before = _dumps_len(intel_digest)
     intel_after = intel_before
     if intel_after > INTEL_DIGEST_MAX_CHARS:
         intel_digest["top_narratives"] = list(intel_digest.get("top_narratives") or [])[:3]
         intel_digest["main_characters"] = list(intel_digest.get("main_characters") or [])[:3]
         intel_digest["top_topics"] = list(intel_digest.get("top_topics") or [])[:4]
         clip_steps.append("intel:top_lists_trimmed")
-        intel_after = len(json.dumps(intel_digest, ensure_ascii=False, separators=(",", ":")))
+        intel_after = _dumps_len(intel_digest)
     if intel_after > INTEL_DIGEST_MAX_CHARS:
         intel_digest["top_regions"] = list(intel_digest.get("top_regions") or [])[:3]
         clip_steps.append("intel:regions_trimmed")
-        intel_after = len(json.dumps(intel_digest, ensure_ascii=False, separators=(",", ":")))
+        intel_after = _dumps_len(intel_digest)
     if intel_after > INTEL_DIGEST_MAX_CHARS:
         intel_digest["top_narratives"] = []
         clip_steps.append("intel:drop_narratives")
-        intel_after = len(json.dumps(intel_digest, ensure_ascii=False, separators=(",", ":")))
+        intel_after = _dumps_len(intel_digest)
+
+    account_before = _dumps_len(account_snapshot)
+    account_after = account_before
+    if account_after > ACCOUNT_SNAPSHOT_MAX_CHARS:
+        compacted = _compact_account_snapshot(dict(account_snapshot))
+        account_snapshot.clear()
+        account_snapshot.update(compacted)
+        clip_steps.append("account:compact_payload")
+        account_after = _dumps_len(account_snapshot)
+    if account_after > ACCOUNT_SNAPSHOT_MAX_CHARS:
+        account_snapshot["futures"] = {
+            "available_balance": (account_snapshot.get("futures") or {}).get("available_balance"),
+            "total_margin_balance": (account_snapshot.get("futures") or {}).get("total_margin_balance"),
+            "liq_distance_pct": (account_snapshot.get("futures") or {}).get("liq_distance_pct"),
+        }
+        account_snapshot["margin"] = {
+            "margin_level": (account_snapshot.get("margin") or {}).get("margin_level"),
+            "margin_call_bar": (account_snapshot.get("margin") or {}).get("margin_call_bar"),
+        }
+        clip_steps.append("account:core_only")
+        account_after = _dumps_len(account_snapshot)
 
     return {
         "youtube_radar_chars_before_clip": before,
         "youtube_radar_chars_after_clip": after,
         "intel_digest_chars_before_clip": intel_before,
         "intel_digest_chars_after_clip": intel_after,
+        "account_snapshot_chars_before_clip": account_before,
+        "account_snapshot_chars_after_clip": account_after,
         "clip_steps_applied": clip_steps,
         "alerts_digest_chars": alerts_chars,
+    }
+
+
+def _compact_account_snapshot(account_snapshot: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(account_snapshot, dict):
+        return {}
+    futures = account_snapshot.get("futures") if isinstance(account_snapshot.get("futures"), dict) else {}
+    margin = account_snapshot.get("margin") if isinstance(account_snapshot.get("margin"), dict) else {}
+    risk_flags = account_snapshot.get("risk_flags") if isinstance(account_snapshot.get("risk_flags"), dict) else {}
+    as_of_raw = account_snapshot.get("as_of_utc")
+    as_of_dt = _coerce_datetime(as_of_raw)
+    as_of_value = as_of_dt.isoformat() if as_of_dt else (str(as_of_raw) if isinstance(as_of_raw, str) else None)
+    return {
+        "watch_symbol": account_snapshot.get("watch_symbol"),
+        "as_of_utc": as_of_value,
+        "futures": {
+            "available_balance": _to_float(futures.get("available_balance")),
+            "total_margin_balance": _to_float(futures.get("total_margin_balance")),
+            "total_maint_margin": _to_float(futures.get("total_maint_margin")),
+            "position_amt": _to_float(futures.get("position_amt")),
+            "mark_price": _to_float(futures.get("mark_price")),
+            "liquidation_price": _to_float(futures.get("liquidation_price")),
+            "liq_distance_pct": _to_float(futures.get("liq_distance_pct")),
+        },
+        "margin": {
+            "margin_level": _to_float(margin.get("margin_level")),
+            "margin_call_bar": _to_float(margin.get("margin_call_bar")),
+            "force_liquidation_bar": _to_float(margin.get("force_liquidation_bar")),
+            "total_liability_of_btc": _to_float(margin.get("total_liability_of_btc")),
+        },
+        "risk_flags": {
+            "available_balance_low": bool(risk_flags.get("available_balance_low", False)),
+            "margin_near_call": bool(risk_flags.get("margin_near_call", False)),
+        },
     }
 
 

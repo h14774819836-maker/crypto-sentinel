@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import math
 import os
-import random
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -12,12 +12,20 @@ from collections import OrderedDict
 from typing import Any
 
 from app.alerts.dedup import should_emit, should_emit_ai_signal
-from app.alerts.message_builder import build_anomaly_message, build_ai_signal_message
+from app.alerts.message_builder import (
+    TelegramMessage,
+    build_ai_signal_message,
+    build_alert_ref,
+    build_anomaly_message,
+    build_flash_alert,
+)
 from app.db.repository import (
     count_sent_alerts_today,
     get_anomaly_state,
+    get_latest_futures_account_snapshot,
     get_latest_funding_snapshots,
     get_latest_intel_digest,
+    get_latest_margin_account_snapshot,
     get_latest_market_metric,
     get_latest_market_metrics,
     get_latest_ohlcv_ts,
@@ -26,23 +34,24 @@ from app.db.repository import (
     insert_ai_signal,
     list_recent_sent_ai_signals,
     list_alerts,
-    list_manifest_ids_for_strategy,
-    list_ohlcv_range,
+    list_account_stats_daily,
     list_recent_ohlcv,
     mark_alert_sent,
-    list_strategy_decisions_for_eval,
-    list_strategy_rows_for_window,
-    upsert_decision_eval,
-    upsert_decision_execution,
-    upsert_strategy_feature_stat,
-    upsert_strategy_score,
+    purge_old_account_snapshot_raw,
+    purge_old_futures_account_snapshots,
+    purge_old_margin_account_snapshots,
+    touch_futures_account_snapshot_last_seen,
+    touch_margin_account_snapshot_last_seen,
+    upsert_account_snapshot_raw,
+    upsert_account_stats_daily,
     upsert_anomaly_state,
     upsert_alert_event,
+    upsert_futures_account_snapshot,
     upsert_funding_snapshot,
+    upsert_margin_account_snapshot,
     upsert_ohlcv,
-    upsert_worker_status,
+    update_alert_event_delivery,
 )
-from app.db.models import DecisionEval, DecisionExecution, StrategyDecision
 from app.features.aggregator import aggregate_nm_from_1m, floor_utc_10m, rebuild_10m_range, rebuild_nm_range
 from app.features.feature_pipeline import compute_and_store_latest_metric
 from app.logging import logger
@@ -63,8 +72,6 @@ from app.signals.anomaly import (
 from app.storage.blobs import save_blob_with_meta
 from app.strategy.manifest import build_manifest_id, build_manifest_payload
 from app.utils.time import ensure_utc, utc_day_bounds, utc_now
-from app.worker.llm_hot_reload import maybe_reload_llm_runtime_from_signal
-from app.ops.job_metrics import append_job_metric
 
 
 _YT_ANALYZE_INFLIGHT: dict[str, datetime] = {}
@@ -75,6 +82,7 @@ _YT_ANALYSIS_STALL_RUNNING_SECONDS_DEFAULT = 420
 _YT_ANALYSIS_STALL_WAITING_SECONDS_MIN = 420
 _YT_RUNTIME_RECONCILE_DONE = False
 _YT_AUTH_RECOVER_LAST_SIGNATURE: str | None = None
+_ACCOUNT_LAST_RETENTION_CLEANUP_TS: datetime | None = None
 
 
 @dataclass(slots=True)
@@ -173,40 +181,6 @@ def _safe_blob_meta(kind: str, payload: Any) -> tuple[str | None, str | None, in
         return None, None, None
 
 
-_STRATEGY_EVAL_CHECKPOINT_FILE = Path("data/decision_eval_checkpoint.json")
-_FEATURE_WHITELIST_BUCKETS: dict[str, set[str]] = {
-    "signal_confidence": {"CONF_Q1", "CONF_Q2", "CONF_Q3", "CONF_Q4"},
-    "position_side": {"LONG", "SHORT", "HOLD"},
-    "market_regime": {"TRENDING_UP", "TRENDING_DOWN", "RANGING", "VOLATILE", "UNCERTAIN"},
-}
-
-
-def _load_eval_checkpoint_map() -> dict[str, int]:
-    try:
-        if not _STRATEGY_EVAL_CHECKPOINT_FILE.exists():
-            return {}
-        data = json.loads(_STRATEGY_EVAL_CHECKPOINT_FILE.read_text(encoding="utf-8"))
-        if not isinstance(data, dict):
-            return {}
-        out: dict[str, int] = {}
-        for k, v in data.items():
-            try:
-                out[str(k)] = int(v)
-            except (TypeError, ValueError):
-                continue
-        return out
-    except Exception:
-        return {}
-
-
-def _save_eval_checkpoint_map(payload: dict[str, int]) -> None:
-    _STRATEGY_EVAL_CHECKPOINT_FILE.parent.mkdir(parents=True, exist_ok=True)
-    _STRATEGY_EVAL_CHECKPOINT_FILE.write_text(
-        json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
-        encoding="utf-8",
-    )
-
-
 def _epoch_seconds(dt: datetime | None) -> int | None:
     if dt is None:
         return None
@@ -215,447 +189,605 @@ def _epoch_seconds(dt: datetime | None) -> int | None:
     return int(dt.timestamp())
 
 
-class _OhlcvSliceCache:
-    def __init__(self, max_size: int = 16):
-        self.max_size = max(1, int(max_size))
-        self._cache: OrderedDict[tuple[str, int, int], list[Any]] = OrderedDict()
+def _to_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
-    def get(
-        self,
-        session,
-        *,
-        symbol: str,
-        start_ts: int,
-        end_ts: int,
-    ) -> list[Any]:
-        key = (symbol.upper(), int(start_ts), int(end_ts))
-        hit = self._cache.get(key)
-        if hit is not None:
-            self._cache.move_to_end(key)
-            return hit
-        start_dt = datetime.fromtimestamp(int(start_ts), tz=timezone.utc)
-        end_dt = datetime.fromtimestamp(int(end_ts), tz=timezone.utc)
-        rows = list_ohlcv_range(
+
+def _is_effectively_equal(a: float | None, b: float | None, tolerance: float) -> bool:
+    if a is None and b is None:
+        return True
+    if a is None or b is None:
+        return False
+    return abs(float(a) - float(b)) <= max(0.0, float(tolerance))
+
+
+def _futures_snapshot_changed(latest_row: Any | None, payload: dict[str, Any], tolerance: float) -> bool:
+    if latest_row is None:
+        return True
+    keys = (
+        "total_margin_balance",
+        "available_balance",
+        "total_maint_margin",
+        "btc_position_amt",
+        "btc_mark_price",
+        "btc_liquidation_price",
+        "btc_unrealized_pnl",
+    )
+    for key in keys:
+        current = _to_float(payload.get(key))
+        previous = _to_float(getattr(latest_row, key, None))
+        if not _is_effectively_equal(current, previous, tolerance):
+            return True
+    return False
+
+
+def _margin_snapshot_changed(latest_row: Any | None, payload: dict[str, Any], tolerance: float) -> bool:
+    if latest_row is None:
+        return True
+    keys = (
+        "margin_level",
+        "total_asset_of_btc",
+        "total_liability_of_btc",
+        "normal_bar",
+        "margin_call_bar",
+        "force_liquidation_bar",
+    )
+    for key in keys:
+        current = _to_float(payload.get(key))
+        previous = _to_float(getattr(latest_row, key, None))
+        if not _is_effectively_equal(current, previous, tolerance):
+            return True
+    return False
+
+
+def _find_asset_balance(rows: list[dict[str, Any]], asset: str) -> dict[str, Any] | None:
+    target = asset.upper()
+    for row in rows:
+        if str(row.get("asset") or "").upper() == target:
+            return row
+    return None
+
+
+def _find_symbol_position(rows: list[dict[str, Any]], symbol: str) -> dict[str, Any] | None:
+    target = symbol.upper()
+    for row in rows:
+        if str(row.get("symbol") or "").upper() == target:
+            return row
+    return None
+
+
+def _build_account_event_uid(kind: str, ts: datetime, symbol: str, reason: str) -> str:
+    raw = f"{kind}|{symbol.upper()}|{int(ts.timestamp())}|{reason}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:48]
+
+
+def _liquidation_distance_pct(mark_price: float, liq_price: float, position_amt: float) -> float | None:
+    if mark_price <= 0 or liq_price <= 0 or position_amt == 0:
+        return None
+    if position_amt > 0:
+        distance = (mark_price - liq_price) / mark_price
+    else:
+        distance = (liq_price - mark_price) / mark_price
+    if distance < 0:
+        return None
+    return distance * 100.0
+
+
+def _calc_dynamic_liq_threshold_pct(
+    *,
+    mark_price: float,
+    atr_14: float | None,
+    atr_multiplier: float,
+    static_floor_pct: float,
+) -> tuple[float, float | None]:
+    if mark_price <= 0:
+        return max(0.0, static_floor_pct), None
+    dynamic_pct = None
+    if isinstance(atr_14, (int, float)) and atr_14 > 0:
+        dynamic_pct = float(atr_multiplier) * (float(atr_14) / float(mark_price)) * 100.0
+    threshold_pct = max(float(static_floor_pct), dynamic_pct if dynamic_pct is not None else float(static_floor_pct))
+    return threshold_pct, dynamic_pct
+
+
+def _build_account_snapshot_context(
+    *,
+    watch_symbol: str,
+    futures_payload: dict[str, Any] | None,
+    margin_payload: dict[str, Any] | None,
+    min_balance_threshold: float,
+) -> dict[str, Any]:
+    futures_payload = futures_payload or {}
+    margin_payload = margin_payload or {}
+    available_balance = _to_float(futures_payload.get("available_balance"))
+    mark_price = _to_float(futures_payload.get("btc_mark_price"))
+    liq_price = _to_float(futures_payload.get("btc_liquidation_price"))
+    position_amt = _to_float(futures_payload.get("btc_position_amt"))
+    liq_distance_pct = None
+    if mark_price and liq_price and position_amt:
+        liq_distance_pct = _liquidation_distance_pct(mark_price, liq_price, position_amt)
+    margin_level = _to_float(margin_payload.get("margin_level"))
+    margin_call_bar = _to_float(margin_payload.get("margin_call_bar"))
+    return {
+        "watch_symbol": str(watch_symbol or "").upper(),
+        "as_of_utc": (futures_payload.get("ts") or margin_payload.get("ts")),
+        "futures": {
+            "total_margin_balance": _to_float(futures_payload.get("total_margin_balance")),
+            "available_balance": available_balance,
+            "total_maint_margin": _to_float(futures_payload.get("total_maint_margin")),
+            "position_amt": position_amt,
+            "mark_price": mark_price,
+            "liquidation_price": liq_price,
+            "unrealized_pnl": _to_float(futures_payload.get("btc_unrealized_pnl")),
+            "liq_distance_pct": liq_distance_pct,
+        },
+        "margin": {
+            "margin_level": margin_level,
+            "margin_call_bar": margin_call_bar,
+            "force_liquidation_bar": _to_float(margin_payload.get("force_liquidation_bar")),
+            "total_liability_of_btc": _to_float(margin_payload.get("total_liability_of_btc")),
+        },
+        "risk_flags": {
+            "available_balance_low": (available_balance is not None and available_balance < float(min_balance_threshold)),
+            "margin_near_call": (
+                margin_level is not None
+                and margin_call_bar is not None
+                and margin_level <= margin_call_bar
+            ),
+        },
+    }
+
+
+def _should_skip_margin_level_alert(margin_payload: dict[str, Any]) -> bool:
+    liability = _to_float(margin_payload.get("total_liability_of_btc"))
+    if liability is None:
+        return False
+    return liability <= 1e-12
+
+
+def _maybe_cleanup_account_snapshots(runtime: WorkerRuntime, now: datetime) -> int:
+    global _ACCOUNT_LAST_RETENTION_CLEANUP_TS
+    if _ACCOUNT_LAST_RETENTION_CLEANUP_TS is not None:
+        elapsed = (ensure_utc(now) - ensure_utc(_ACCOUNT_LAST_RETENTION_CLEANUP_TS)).total_seconds()
+        if elapsed < 3600:
+            return 0
+    retention_days = max(1, int(runtime.settings.account_snapshot_retention_days))
+    cutoff = now - timedelta(days=retention_days)
+    raw_retention_days = max(1, int(runtime.settings.account_snapshot_raw_retention_days or retention_days))
+    raw_cutoff = now - timedelta(days=raw_retention_days)
+    with runtime.session_factory() as session:
+        deleted_fut = purge_old_futures_account_snapshots(session, cutoff=cutoff, commit=False)
+        deleted_mar = purge_old_margin_account_snapshots(session, cutoff=cutoff, commit=False)
+        deleted_raw = purge_old_account_snapshot_raw(session, cutoff=raw_cutoff, commit=False)
+        session.commit()
+    _ACCOUNT_LAST_RETENTION_CLEANUP_TS = now
+    return deleted_fut + deleted_mar + deleted_raw
+
+
+async def _send_account_risk_alert(
+    runtime: WorkerRuntime,
+    *,
+    symbol: str,
+    alert_type: str,
+    reason: str,
+    severity: str,
+    metrics: dict[str, Any],
+    event_ts: datetime,
+) -> bool:
+    with runtime.session_factory() as session:
+        if not should_emit(session, symbol=symbol, alert_type=alert_type, cooldown_seconds=runtime.settings.alert_cooldown_seconds):
+            return False
+        event_uid = _build_account_event_uid(alert_type, event_ts, symbol, reason)
+        payload = {
+            "event_uid": event_uid,
+            "symbol": symbol.upper(),
+            "timeframe": "account",
+            "ts": event_ts,
+            "alert_type": alert_type,
+            "severity": severity,
+            "reason": reason,
+            "rule_version": "account_v1",
+            "metrics_json": metrics,
+        }
+        inserted = upsert_alert_event(session, payload)
+        if not inserted:
+            return False
+        msg = TelegramMessage(
+            text=(
+                f"[Risk] {alert_type}\n"
+                f"symbol={symbol.upper()} severity={severity}\n"
+                f"{reason}\n"
+                f"metrics={json.dumps(metrics, ensure_ascii=False)}"
+            ),
+        )
+        sent = await runtime.telegram.send_message(msg)
+        if sent:
+            mark_alert_sent(session, event_uid)
+        return sent
+
+
+async def check_risk_and_alert(
+    runtime: WorkerRuntime,
+    *,
+    ts: datetime,
+    symbol: str,
+    futures_payload: dict[str, Any],
+    margin_payload: dict[str, Any],
+) -> int:
+    alerts_sent = 0
+
+    available_balance = _to_float(futures_payload.get("available_balance"))
+    min_balance = float(runtime.settings.account_alert_min_available_balance)
+    if available_balance is not None and available_balance < min_balance:
+        sent = await _send_account_risk_alert(
+            runtime,
+            symbol=symbol,
+            alert_type="ACCOUNT_AVAILABLE_BALANCE_LOW",
+            reason=f"availableBalance={available_balance:.4f} below threshold={min_balance:.4f}",
+            severity="WARNING",
+            metrics={"available_balance": available_balance, "threshold": min_balance},
+            event_ts=ts,
+        )
+        alerts_sent += 1 if sent else 0
+
+    mark_price = _to_float(futures_payload.get("btc_mark_price"))
+    liq_price = _to_float(futures_payload.get("btc_liquidation_price"))
+    position_amt = _to_float(futures_payload.get("btc_position_amt"))
+    if (
+        mark_price is not None
+        and liq_price is not None
+        and mark_price > 0
+        and liq_price > 0
+        and position_amt is not None
+        and abs(position_amt) > 0
+    ):
+        atr_14 = None
+        with runtime.session_factory() as session:
+            metric_1h = get_latest_market_metric(session, symbol=symbol, timeframe="1h")
+            if metric_1h is not None:
+                atr_14 = _to_float(getattr(metric_1h, "atr_14", None))
+        static_floor_pct = float(
+            getattr(runtime.settings, "account_alert_liq_static_floor_pct", runtime.settings.account_alert_liq_distance_pct)
+        )
+        atr_multiplier = float(getattr(runtime.settings, "account_alert_liq_atr_multiplier", 1.5))
+        liq_threshold, dynamic_threshold = _calc_dynamic_liq_threshold_pct(
+            mark_price=mark_price,
+            atr_14=atr_14,
+            atr_multiplier=atr_multiplier,
+            static_floor_pct=static_floor_pct,
+        )
+        distance_pct = _liquidation_distance_pct(mark_price, liq_price, position_amt)
+        if distance_pct is not None and distance_pct <= liq_threshold:
+            threshold_mode = "atr_dynamic" if dynamic_threshold is not None else "static_floor"
+            sent = await _send_account_risk_alert(
+                runtime,
+                symbol=symbol,
+                alert_type="ACCOUNT_LIQUIDATION_RISK",
+                reason=(
+                    f"markPrice={mark_price:.4f} liquidationPrice={liq_price:.4f} "
+                    f"distance={distance_pct:.3f}% <= threshold={liq_threshold:.3f}% ({threshold_mode})"
+                ),
+                severity="CRITICAL",
+                metrics={
+                    "position_amt": position_amt,
+                    "mark_price": mark_price,
+                    "liquidation_price": liq_price,
+                    "side": "LONG" if position_amt > 0 else "SHORT",
+                    "distance_pct": distance_pct,
+                    "threshold_pct": liq_threshold,
+                    "threshold_mode": threshold_mode,
+                    "atr_14": atr_14,
+                    "atr_multiplier": atr_multiplier,
+                    "dynamic_threshold_pct": dynamic_threshold,
+                    "static_floor_pct": static_floor_pct,
+                },
+                event_ts=ts,
+            )
+            alerts_sent += 1 if sent else 0
+
+    margin_level = _to_float(margin_payload.get("margin_level"))
+    margin_call_bar = _to_float(margin_payload.get("margin_call_bar"))
+    margin_buffer = float(runtime.settings.account_alert_margin_level_buffer)
+    if (
+        not _should_skip_margin_level_alert(margin_payload)
+        and margin_level is not None
+        and margin_call_bar is not None
+        and margin_level <= (margin_call_bar + margin_buffer)
+    ):
+        sent = await _send_account_risk_alert(
+            runtime,
+            symbol=symbol,
+            alert_type="MARGIN_LEVEL_NEAR_CALL",
+            reason=(
+                f"marginLevel={margin_level:.4f} near marginCallBar={margin_call_bar:.4f} "
+                f"(buffer={margin_buffer:.4f})"
+            ),
+            severity="WARNING",
+            metrics={
+                "margin_level": margin_level,
+                "margin_call_bar": margin_call_bar,
+                "buffer": margin_buffer,
+            },
+            event_ts=ts,
+        )
+        alerts_sent += 1 if sent else 0
+
+    return alerts_sent
+
+
+async def _collect_and_store_account_snapshots(runtime: WorkerRuntime) -> dict[str, Any]:
+    now = datetime.now(timezone.utc)
+    watch_symbol = (runtime.settings.account_watch_symbol or "BTCUSDT").upper()
+    http_client = runtime.http_client
+
+    futures_account = await runtime.provider.get_futures_account(client=http_client)
+    futures_balance = await runtime.provider.get_futures_balance(client=http_client)
+    futures_positions = await runtime.provider.get_futures_positions(client=http_client)
+    margin_account = await runtime.provider.get_margin_account(client=http_client)
+    margin_trade_coeff = await runtime.provider.get_margin_trade_coeff(client=http_client)
+    store_raw_in_main = bool(runtime.settings.account_snapshot_main_store_raw)
+
+    usdt_balance_row = _find_asset_balance(futures_balance, "USDT") or {}
+    watched_position = _find_symbol_position(futures_positions, watch_symbol) or {}
+    futures_payload = {
+        "ts": now,
+        "account_json": futures_account if store_raw_in_main else None,
+        "balance_json": futures_balance if store_raw_in_main else None,
+        "positions_json": futures_positions if store_raw_in_main else None,
+        "total_margin_balance": _to_float(futures_account.get("totalMarginBalance")),
+        "available_balance": _to_float(futures_account.get("availableBalance"))
+        or _to_float(usdt_balance_row.get("availableBalance")),
+        "total_maint_margin": _to_float(futures_account.get("totalMaintMargin")),
+        "btc_position_amt": _to_float(watched_position.get("positionAmt")),
+        "btc_mark_price": _to_float(watched_position.get("markPrice")),
+        "btc_liquidation_price": _to_float(watched_position.get("liquidationPrice")),
+        "btc_unrealized_pnl": _to_float(watched_position.get("unRealizedProfit")),
+        "last_seen_at": now,
+    }
+    margin_payload = {
+        "ts": now,
+        "account_json": margin_account if store_raw_in_main else None,
+        "trade_coeff_json": margin_trade_coeff if store_raw_in_main else None,
+        "margin_level": _to_float(margin_account.get("marginLevel")),
+        "total_asset_of_btc": _to_float(margin_account.get("totalAssetOfBtc")),
+        "total_liability_of_btc": _to_float(margin_account.get("totalLiabilityOfBtc")),
+        "normal_bar": _to_float(margin_trade_coeff.get("normalBar")),
+        "margin_call_bar": _to_float(margin_trade_coeff.get("marginCallBar")),
+        "force_liquidation_bar": _to_float(margin_trade_coeff.get("forceLiquidationBar")),
+        "last_seen_at": now,
+    }
+
+    rows_written = 0
+    raw_rows_written = 0
+    with runtime.session_factory() as session:
+        latest_futures = get_latest_futures_account_snapshot(session)
+        latest_margin = get_latest_margin_account_snapshot(session)
+        tolerance = max(0.0, float(runtime.settings.account_snapshot_change_tolerance or 0.0))
+        futures_changed = _futures_snapshot_changed(latest_futures, futures_payload, tolerance)
+        margin_changed = _margin_snapshot_changed(latest_margin, margin_payload, tolerance)
+
+        if futures_changed:
+            upsert_futures_account_snapshot(session, futures_payload, commit=False)
+            rows_written += 1
+        elif latest_futures is not None:
+            touch_futures_account_snapshot_last_seen(
+                session,
+                snapshot_id=int(latest_futures.id),
+                seen_at=now,
+                commit=False,
+            )
+
+        if margin_changed:
+            upsert_margin_account_snapshot(session, margin_payload, commit=False)
+            rows_written += 1
+        elif latest_margin is not None:
+            touch_margin_account_snapshot_last_seen(
+                session,
+                snapshot_id=int(latest_margin.id),
+                seen_at=now,
+                commit=False,
+            )
+
+        if runtime.settings.account_snapshot_raw_enabled:
+            if futures_changed:
+                upsert_account_snapshot_raw(
+                    session,
+                    snapshot_type="futures",
+                    ts=now,
+                    payload={
+                        "account": futures_account,
+                        "balance": futures_balance,
+                        "positions": futures_positions,
+                    },
+                    commit=False,
+                )
+                raw_rows_written += 1
+            if margin_changed:
+                upsert_account_snapshot_raw(
+                    session,
+                    snapshot_type="margin",
+                    ts=now,
+                    payload={
+                        "account": margin_account,
+                        "trade_coeff": margin_trade_coeff,
+                    },
+                    commit=False,
+                )
+                raw_rows_written += 1
+
+        if runtime.settings.account_daily_stats_enabled and futures_changed:
+            upsert_account_stats_daily(
+                session,
+                sample_ts=now,
+                equity_value=_to_float(futures_payload.get("total_margin_balance")),
+                commit=False,
+            )
+
+        session.commit()
+
+    return {
+        "ts": now,
+        "watch_symbol": watch_symbol,
+        "futures_payload": futures_payload,
+        "margin_payload": margin_payload,
+        "rows_written": rows_written,
+        "raw_rows_written": raw_rows_written,
+    }
+
+
+async def account_monitor_job(runtime: WorkerRuntime) -> dict[str, Any]:
+    if not runtime.settings.account_monitor_enabled:
+        return {"rows_read": 0, "rows_written": 0}
+    if runtime.account_monitor_failed:
+        return {"rows_read": 0, "rows_written": 0}
+    if not runtime.settings.binance_api_key or not runtime.settings.binance_api_secret:
+        logger.warning("account_monitor_job skipped: BINANCE_API_KEY/SECRET not configured")
+        runtime.account_monitor_failed = True
+        return {"rows_read": 0, "rows_written": 0}
+
+    try:
+        snap = await _collect_and_store_account_snapshots(runtime)
+        ts = snap["ts"]
+        symbol = str(snap["watch_symbol"])
+        futures_payload = snap["futures_payload"]
+        margin_payload = snap["margin_payload"]
+        alerts_sent = await check_risk_and_alert(
+            runtime,
+            ts=ts,
+            symbol=symbol,
+            futures_payload=futures_payload,
+            margin_payload=margin_payload,
+        )
+
+        deleted_rows = _maybe_cleanup_account_snapshots(runtime, ts)
+
+        return {
+            "rows_read": 5,
+            "rows_written": int(snap.get("rows_written") or 0),
+            "raw_rows_written": int(snap.get("raw_rows_written") or 0),
+            "backlog": max(0, deleted_rows),
+            "alerts_sent": alerts_sent,
+        }
+    except Exception as exc:
+        logger.warning("account_monitor_job failed, disabling further retries: %s", exc)
+        runtime.account_monitor_failed = True
+        return {"rows_read": 0, "rows_written": 0}
+
+
+async def account_user_stream_job(runtime: WorkerRuntime) -> None:
+    if not runtime.settings.account_user_stream_enabled:
+        return
+    if runtime.account_user_stream_failed:
+        return
+    if not runtime.settings.binance_api_key or not runtime.settings.binance_api_secret:
+        logger.warning("account_user_stream_job skipped: BINANCE_API_KEY/SECRET not configured")
+        runtime.account_user_stream_failed = True
+        return
+
+    keepalive_seconds = max(1800, int(runtime.settings.account_user_stream_keepalive_seconds or 3000))
+    while True:
+        # Build a fresh REST baseline first, then apply WS-driven refreshes.
+        try:
+            snap = await _collect_and_store_account_snapshots(runtime)
+            if runtime.settings.account_monitor_enabled:
+                await check_risk_and_alert(
+                    runtime,
+                    ts=snap["ts"],
+                    symbol=str(snap["watch_symbol"]),
+                    futures_payload=snap["futures_payload"],
+                    margin_payload=snap["margin_payload"],
+                )
+        except Exception as exc:
+            logger.warning("account baseline snapshot failed before WS connect: %s", exc)
+            runtime.account_user_stream_failed = True
+            return
+        try:
+            listen_key = await runtime.provider.create_futures_listen_key(client=runtime.http_client)
+        except Exception as exc:
+            logger.warning("create futures listenKey failed: %s", exc)
+            runtime.account_user_stream_failed = True
+            return
+        stop_event = asyncio.Event()
+
+        async def keepalive_loop() -> None:
+            while not stop_event.is_set():
+                await asyncio.sleep(keepalive_seconds)
+                try:
+                    await runtime.provider.keepalive_futures_listen_key(listen_key, client=runtime.http_client)
+                except Exception as exc:
+                    logger.warning("account user stream keepalive failed: %s", exc)
+                    runtime.account_user_stream_failed = True
+                    stop_event.set()
+                    return
+
+        keepalive_task = asyncio.create_task(keepalive_loop(), name="futures_listenkey_keepalive")
+
+        async def on_event(payload: dict[str, Any]) -> None:
+            if runtime.account_user_stream_failed:
+                return
+            event_type = str(payload.get("e") or "")
+            if event_type == "ACCOUNT_UPDATE":
+                try:
+                    snap = await _collect_and_store_account_snapshots(runtime)
+                    if runtime.settings.account_monitor_enabled:
+                        await check_risk_and_alert(
+                            runtime,
+                            ts=snap["ts"],
+                            symbol=str(snap["watch_symbol"]),
+                            futures_payload=snap["futures_payload"],
+                            margin_payload=snap["margin_payload"],
+                        )
+                except Exception as exc:
+                    logger.warning("account snapshot refresh on ACCOUNT_UPDATE failed: %s", exc)
+                    runtime.account_user_stream_failed = True
+
+        try:
+            await runtime.provider.consume_futures_user_stream(listen_key, on_event)
+        except asyncio.CancelledError:
+            stop_event.set()
+            keepalive_task.cancel()
+            await asyncio.gather(keepalive_task, return_exceptions=True)
+            raise
+        except Exception as exc:
+            logger.warning("account user stream disconnected: %s", exc)
+            runtime.account_user_stream_failed = True
+        finally:
+            stop_event.set()
+            keepalive_task.cancel()
+            await asyncio.gather(keepalive_task, return_exceptions=True)
+            return
+
+
+async def account_daily_stats_rollup_job(runtime: WorkerRuntime) -> dict[str, Any]:
+    if not runtime.settings.account_daily_stats_enabled:
+        return {"rows_read": 0, "rows_written": 0}
+    now = datetime.now(timezone.utc)
+    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    with runtime.session_factory() as session:
+        existing = list_account_stats_daily(
             session,
-            symbol=symbol.upper(),
-            timeframe="1m",
-            start_ts=start_dt,
-            end_ts=end_dt + timedelta(minutes=1),
+            start_day=day_start,
+            end_day=day_start,
+            limit=1,
         )
-        self._cache[key] = rows
-        self._cache.move_to_end(key)
-        while len(self._cache) > self.max_size:
-            self._cache.popitem(last=False)
-        return rows
-
-
-def _decision_expiration_ts(decision: StrategyDecision) -> int:
-    base_ts = int(decision.decision_ts)
-    hold_ts = base_ts + max(1, int(decision.max_hold_bars or 60)) * 60
-    if decision.expiration_ts is None:
-        return hold_ts
-    return min(int(decision.expiration_ts), hold_ts)
-
-
-def _calc_r_tp(decision: StrategyDecision) -> float | None:
-    if decision.entry_price is None or decision.take_profit is None or decision.stop_loss is None:
-        return None
-    risk = abs(float(decision.entry_price) - float(decision.stop_loss))
-    if risk <= 0:
-        return None
-    reward = abs(float(decision.take_profit) - float(decision.entry_price))
-    return reward / risk
-
-
-def _simulate_fill_for_decision(
-    decision: StrategyDecision,
-    *,
-    bars: list[Any],
-    decision_ts: int,
-    expiration_ts: int,
-) -> dict[str, Any]:
-    side = str(decision.position_side or "HOLD").upper()
-    entry_mode = str(decision.entry_mode or "MARKET").upper()
-    if side == "HOLD":
-        return {
-            "status": "NO_FILL",
-            "filled": False,
-            "filled_ts": None,
-            "filled_price": None,
-            "filled_qty": decision.qty,
-            "avg_fill_price": None,
-            "source": "SIMULATED",
-            "notes": "HOLD decision, no execution.",
-        }
-
-    candidate_bars = []
-    for bar in bars:
-        ts = _epoch_seconds(getattr(bar, "ts", None))
-        if ts is None:
-            continue
-        if ts < decision_ts or ts > expiration_ts:
-            continue
-        candidate_bars.append((ts, bar))
-    if not candidate_bars:
-        return {
-            "status": "PENDING",
-            "filled": False,
-            "filled_ts": None,
-            "filled_price": None,
-            "filled_qty": None,
-            "avg_fill_price": None,
-            "source": "SIMULATED",
-            "notes": "No replay bars available yet.",
-        }
-
-    if entry_mode == "MARKET":
-        ts, bar = candidate_bars[0]
-        fill_price = float(getattr(bar, "open", None) or getattr(bar, "close", None) or decision.entry_price or 0.0)
-        return {
-            "status": "FILLED",
-            "filled": True,
-            "filled_ts": ts,
-            "filled_price": fill_price,
-            "filled_qty": decision.qty,
-            "avg_fill_price": fill_price,
-            "source": "SIMULATED",
-            "notes": "MARKET filled at first 1m bar open.",
-        }
-
-    if decision.entry_price is None:
-        return {
-            "status": "NO_FILL",
-            "filled": False,
-            "filled_ts": None,
-            "filled_price": None,
-            "filled_qty": None,
-            "avg_fill_price": None,
-            "source": "SIMULATED",
-            "notes": "LIMIT missing entry_price.",
-        }
-
-    target = float(decision.entry_price or 0.0)
-    for ts, bar in candidate_bars:
-        low = float(getattr(bar, "low", target))
-        high = float(getattr(bar, "high", target))
-        touched = (side == "LONG" and low <= target) or (side == "SHORT" and high >= target)
-        if touched:
-            return {
-                "status": "FILLED",
-                "filled": True,
-                "filled_ts": ts,
-                "filled_price": target,
-                "filled_qty": decision.qty,
-                "avg_fill_price": target,
-                "source": "SIMULATED",
-                "notes": "LIMIT touched by 1m replay.",
-            }
-    if candidate_bars and candidate_bars[-1][0] >= expiration_ts:
-        return {
-            "status": "NO_FILL",
-            "filled": False,
-            "filled_ts": None,
-            "filled_price": None,
-            "filled_qty": None,
-            "avg_fill_price": None,
-            "source": "SIMULATED",
-            "notes": "LIMIT not touched before expiration.",
-        }
-    return {
-        "status": "PENDING",
-        "filled": False,
-        "filled_ts": None,
-        "filled_price": None,
-        "filled_qty": None,
-        "avg_fill_price": None,
-        "source": "SIMULATED",
-        "notes": "LIMIT pending, waiting replay bars.",
-    }
-
-
-def _simulate_post_fill_eval(
-    decision: StrategyDecision,
-    *,
-    bars: list[Any],
-    filled_ts: int,
-    scan_start_ts: int,
-    expiration_ts: int,
-    max_scan_bars: int,
-    now_ts: int,
-) -> tuple[dict[str, Any], int | None]:
-    side = str(decision.position_side or "HOLD").upper()
-    tp = decision.take_profit
-    sl = decision.stop_loss
-    entry = decision.entry_price
-    r_tp = _calc_r_tp(decision)
-
-    selected: list[tuple[int, Any]] = []
-    for bar in bars:
-        ts = _epoch_seconds(getattr(bar, "ts", None))
-        if ts is None:
-            continue
-        if ts < scan_start_ts or ts < filled_ts or ts > expiration_ts:
-            continue
-        selected.append((ts, bar))
-        if len(selected) >= max(1, int(max_scan_bars)):
-            break
-
-    mfe = None
-    mae = None
-    if entry is not None and selected:
-        highs = [float(getattr(b, "high", entry)) for _, b in selected]
-        lows = [float(getattr(b, "low", entry)) for _, b in selected]
-        if side == "LONG":
-            mfe = max(highs) - float(entry)
-            mae = min(lows) - float(entry)
-        elif side == "SHORT":
-            mfe = float(entry) - min(lows)
-            mae = float(entry) - max(highs)
-
-    base_payload = {
-        "eval_replay_tf": "1m",
-        "intrabar_flag": "NONE",
-        "tp_hit": False,
-        "sl_hit": False,
-        "first_hit_ts": None,
-        "exit_ts": None,
-        "exit_price": None,
-        "outcome_raw": "OPEN",
-        "r_multiple_raw": None,
-        "mfe": mfe,
-        "mae": mae,
-        "bars_to_outcome": len(selected),
-        "evaluated_at": datetime.now(timezone.utc),
-    }
-
-    if side == "HOLD":
-        base_payload["outcome_raw"] = "NO_FILL"
-        return base_payload, None
-
-    for ts, bar in selected:
-        high = float(getattr(bar, "high", getattr(bar, "close", 0.0)))
-        low = float(getattr(bar, "low", getattr(bar, "close", 0.0)))
-        tp_hit = False
-        sl_hit = False
-        if side == "LONG":
-            tp_hit = tp is not None and high >= float(tp)
-            sl_hit = sl is not None and low <= float(sl)
-        elif side == "SHORT":
-            tp_hit = tp is not None and low <= float(tp)
-            sl_hit = sl is not None and high >= float(sl)
-
-        if tp_hit and sl_hit:
-            base_payload.update(
-                {
-                    "intrabar_flag": "BOTH_HIT",
-                    "tp_hit": True,
-                    "sl_hit": True,
-                    "first_hit_ts": ts,
-                    "outcome_raw": "AMBIGUOUS",
-                    "exit_ts": ts,
-                    "exit_price": None,
-                    "r_multiple_raw": None,
-                    "bars_to_outcome": (ts - filled_ts) // 60,
-                }
-            )
-            return base_payload, None
-        if tp_hit:
-            base_payload.update(
-                {
-                    "tp_hit": True,
-                    "first_hit_ts": ts,
-                    "exit_ts": ts,
-                    "exit_price": tp,
-                    "outcome_raw": "TP",
-                    "r_multiple_raw": r_tp,
-                    "bars_to_outcome": (ts - filled_ts) // 60,
-                }
-            )
-            return base_payload, None
-        if sl_hit:
-            base_payload.update(
-                {
-                    "sl_hit": True,
-                    "first_hit_ts": ts,
-                    "exit_ts": ts,
-                    "exit_price": sl,
-                    "outcome_raw": "SL",
-                    "r_multiple_raw": -1.0,
-                    "bars_to_outcome": (ts - filled_ts) // 60,
-                }
-            )
-            return base_payload, None
-
-    if selected:
-        last_ts = selected[-1][0]
-        if last_ts >= expiration_ts and now_ts >= expiration_ts:
-            base_payload.update({"outcome_raw": "TIMEOUT", "bars_to_outcome": (expiration_ts - filled_ts) // 60})
-            return base_payload, None
-        if len(selected) >= max(1, int(max_scan_bars)):
-            return base_payload, int(last_ts + 60)
-        return base_payload, int(last_ts + 60)
-
-    if now_ts >= expiration_ts:
-        base_payload.update({"outcome_raw": "TIMEOUT", "bars_to_outcome": max(0, (expiration_ts - filled_ts) // 60)})
-        return base_payload, None
-    return base_payload, int(scan_start_ts)
-
-
-def _wilson_ci(wins: float, n: int, z: float = 1.96) -> tuple[float | None, float | None]:
-    if n <= 0:
-        return None, None
-    p = max(0.0, min(1.0, float(wins) / float(n)))
-    denom = 1.0 + (z * z) / n
-    center = (p + (z * z) / (2 * n)) / denom
-    margin = (z / denom) * math.sqrt((p * (1 - p) / n) + ((z * z) / (4 * n * n)))
-    return max(0.0, center - margin), min(1.0, center + margin)
-
-
-def _bootstrap_mean_ci(values: list[float], *, samples: int = 200, alpha: float = 0.05) -> tuple[float | None, float | None]:
-    if not values:
-        return None, None
-    if len(values) == 1:
-        return values[0], values[0]
-    rng = random.Random(42)
-    means: list[float] = []
-    n = len(values)
-    for _ in range(max(50, int(samples))):
-        sample = [values[rng.randrange(0, n)] for _ in range(n)]
-        means.append(sum(sample) / n)
-    means.sort()
-    lo_idx = int((alpha / 2) * len(means))
-    hi_idx = int((1 - alpha / 2) * len(means)) - 1
-    lo_idx = max(0, min(len(means) - 1, lo_idx))
-    hi_idx = max(0, min(len(means) - 1, hi_idx))
-    return means[lo_idx], means[hi_idx]
-
-
-def _score_trade_outcome(
-    *,
-    outcome: str,
-    mode: str,
-    r_tp: float | None,
-    realistic_p: float,
-) -> tuple[float, float, bool, bool]:
-    out = str(outcome or "OPEN").upper()
-    mode_u = str(mode or "STRICT").upper()
-    if out == "TP":
-        return 1.0, float(r_tp if r_tp is not None else 1.0), True, True
-    if out == "SL":
-        return 0.0, -1.0, True, True
-    if out == "AMBIGUOUS":
-        if mode_u == "OPTIMISTIC":
-            return 1.0, float(r_tp if r_tp is not None else 1.0), True, False
-        if mode_u == "REALISTIC":
-            p = max(0.0, min(1.0, float(realistic_p)))
-            r = (p * float(r_tp if r_tp is not None else 1.0)) + ((1.0 - p) * -1.0)
-            return p, r, True, False
-        return 0.0, -1.0, True, False
-    return 0.0, 0.0, False, False
-
-
-def _compute_window_score(
-    rows: list[tuple[StrategyDecision, DecisionExecution | None, DecisionEval | None, Any]],
-    *,
-    scoring_mode: str,
-    realistic_p: float,
-    min_trades: int,
-) -> dict[str, Any]:
-    n_trades = 0
-    n_resolved = 0
-    n_ambiguous = 0
-    n_timeout = 0
-    wins = 0.0
-    r_values: list[float] = []
-    r_sum = 0.0
-
-    for decision, execution, eval_row, _signal in rows:
-        exec_status = str((execution.status if execution else "PENDING") or "PENDING").upper()
-        outcome = str((eval_row.outcome_raw if eval_row else "OPEN") or "OPEN").upper()
-        if exec_status == "NO_FILL" or outcome == "NO_FILL":
-            continue
-        if outcome == "TIMEOUT":
-            n_timeout += 1
-            continue
-        if exec_status != "FILLED":
-            continue
-        if outcome not in {"TP", "SL", "AMBIGUOUS"}:
-            continue
-
-        r_tp = _calc_r_tp(decision)
-        win_c, r_c, counts_trade, resolved = _score_trade_outcome(
-            outcome=outcome,
-            mode=scoring_mode,
-            r_tp=r_tp,
-            realistic_p=realistic_p,
+        if existing:
+            return {"rows_read": 1, "rows_written": 0}
+        latest = get_latest_futures_account_snapshot(session)
+        if latest is None:
+            return {"rows_read": 0, "rows_written": 0}
+        equity = _to_float(getattr(latest, "total_margin_balance", None))
+        upsert_account_stats_daily(
+            session,
+            sample_ts=now,
+            equity_value=equity,
+            commit=False,
         )
-        if counts_trade:
-            n_trades += 1
-            wins += win_c
-            r_sum += r_c
-            r_values.append(r_c)
-        if resolved:
-            n_resolved += 1
-        if outcome == "AMBIGUOUS":
-            n_ambiguous += 1
-
-    win_rate = (wins / n_trades) if n_trades > 0 else None
-    avg_r = (r_sum / n_trades) if n_trades > 0 else None
-    win_ci_low, win_ci_high = _wilson_ci(wins, n_trades) if n_trades > 0 else (None, None)
-    avg_ci_low, avg_ci_high = _bootstrap_mean_ci(r_values) if r_values else (None, None)
-    timeout_rate = (n_timeout / max(1, (n_trades + n_timeout))) if (n_trades + n_timeout) > 0 else None
-    status = "OK" if n_trades >= max(1, int(min_trades)) else "INSUFFICIENT_DATA"
-    return {
-        "status": status,
-        "n_trades": n_trades,
-        "n_resolved": n_resolved,
-        "n_ambiguous": n_ambiguous,
-        "n_timeout": n_timeout,
-        "win_rate": win_rate,
-        "avg_r": avg_r,
-        "win_rate_ci_low": win_ci_low,
-        "win_rate_ci_high": win_ci_high,
-        "avg_r_ci_low": avg_ci_low,
-        "avg_r_ci_high": avg_ci_high,
-        "timeout_rate": timeout_rate,
-    }
-
-
-def _confidence_bucket(conf: float | None) -> str:
-    c = 0.0 if conf is None else max(0.0, min(1.0, float(conf)))
-    if c < 0.25:
-        return "CONF_Q1"
-    if c < 0.50:
-        return "CONF_Q2"
-    if c < 0.75:
-        return "CONF_Q3"
-    return "CONF_Q4"
-
-
-def _regime_bucket(raw: str | None) -> str:
-    r = str(raw or "").strip().upper()
-    if r in {"TRENDING_UP", "UP"}:
-        return "TRENDING_UP"
-    if r in {"TRENDING_DOWN", "DOWN"}:
-        return "TRENDING_DOWN"
-    if r in {"RANGING", "SIDE"}:
-        return "RANGING"
-    if r in {"VOLATILE", "VOL"}:
-        return "VOLATILE"
-    return "UNCERTAIN"
-
-
-def _derive_regime_id(raw: str | None) -> str:
-    b = _regime_bucket(raw)
-    if b == "TRENDING_UP":
-        return "UP_MID_NORMAL"
-    if b == "TRENDING_DOWN":
-        return "DOWN_MID_NORMAL"
-    if b == "VOLATILE":
-        return "SIDE_HIGH_SHOCK"
-    if b == "RANGING":
-        return "SIDE_LOW_NORMAL"
-    return "SIDE_MID_NORMAL"
+        session.commit()
+        return {"rows_read": 1, "rows_written": 1}
 
 
 def _youtube_stall_thresholds(settings: Any) -> tuple[int, int]:
@@ -1091,6 +1223,126 @@ def _candle_to_payload(candle: Candle) -> dict:
 
 
 
+def _compute_tick_return(
+    points: list[tuple[datetime, float]],
+    *,
+    now: datetime,
+    lookback_seconds: int,
+) -> tuple[float, float] | None:
+    if len(points) < 2:
+        return None
+    lookback_seconds = max(1, int(lookback_seconds))
+    target = ensure_utc(now) - timedelta(seconds=lookback_seconds)
+    base_price: float | None = None
+    for ts, px in points:
+        if ensure_utc(ts) <= target:
+            base_price = float(px)
+        else:
+            break
+    if base_price is None:
+        base_price = float(points[0][1])
+    if base_price <= 0:
+        return None
+    current_price = float(points[-1][1])
+    return (current_price / base_price) - 1.0, base_price
+
+
+async def _maybe_emit_tick_flash(runtime: WorkerRuntime, symbol: str, price: float, tick_ts: datetime) -> None:
+    settings = runtime.settings
+    if not getattr(settings, "anomaly_tick_flash_enabled", True):
+        return
+    if not settings.anomaly_flash_enabled:
+        return
+    now = ensure_utc(tick_ts)
+    window = max(5, int(getattr(settings, "anomaly_tick_flash_lookback_seconds", 15) or 15))
+    cooldown = max(10, int(getattr(settings, "anomaly_tick_flash_cooldown_seconds", 90) or 90))
+    threshold = abs(float(getattr(settings, "anomaly_tick_flash_ret_threshold", 0.0018) or 0.0018))
+    points = runtime.tick_price_windows.setdefault(symbol, [])
+    points.append((now, float(price)))
+    cutoff = now - timedelta(seconds=max(window * 3, 60))
+    runtime.tick_price_windows[symbol] = [(ts, px) for ts, px in points if ensure_utc(ts) >= cutoff]
+    points = runtime.tick_price_windows[symbol]
+    ret_info = _compute_tick_return(points, now=now, lookback_seconds=window)
+    if ret_info is None:
+        return
+    ret, base_price = ret_info
+    if abs(ret) < threshold:
+        return
+    direction = "UP" if ret >= 0 else "DOWN"
+    cooldown_key = f"{symbol}:{direction}"
+    last_sent = runtime.tick_flash_last_sent.get(cooldown_key)
+    if last_sent and (now - ensure_utc(last_sent)).total_seconds() < cooldown:
+        return
+    runtime.tick_flash_last_sent[cooldown_key] = now
+    arrow = "上冲" if direction == "UP" else "下挫"
+    pct = f"{ret * 100:+.2f}%"
+    tick_event_uid = f"tick:{symbol}:{int(now.timestamp())}:{direction.lower()}"
+    msg = TelegramMessage(
+        text=(
+            f"⚡️ <b>Tick快讯 #{symbol}</b>\n"
+            f"{window}s 快速{arrow} | 幅度 {pct}\n"
+            f"现价: {price:.4f} (基准: {base_price:.4f})\n\n"
+            "⏳ 正在等待 1m 特征与AI诊断补充..."
+        ),
+        kind="anomaly_flash_tick",
+        source_id=tick_event_uid,
+    )
+    send_res = await runtime.telegram.send_message_with_result(msg)
+    if send_res.ok:
+        logger.info(
+            "[tick_flash] sent symbol=%s direction=%s ret=%s lookback=%ss",
+            symbol,
+            direction,
+            pct,
+            window,
+        )
+        if runtime.settings.anomaly_ai_diagnostic_enabled and send_res.message_id is not None:
+            from app.ai.anomaly_analyst import enqueue_async_anomaly_diagnostic
+            tick_payload = {
+                "event_uid": tick_event_uid,
+                "symbol": symbol,
+                "timeframe": "tick",
+                "ts": now,
+                "alert_type": f"TICK_FLASH_{direction}",
+                "severity": "INFO",
+                "reason": f"{window}s 价格快速{arrow}，幅度 {pct}。",
+                "metrics_json": {
+                    "score": None,
+                    "direction": direction,
+                    "regime": "UNKNOWN",
+                    "confirm": {"status": "tick_prealert"},
+                    "thresholds": {
+                        "tick_ret_threshold": threshold,
+                        "tick_lookback_seconds": window,
+                    },
+                    "observations": {
+                        "tick_ret": ret,
+                        "base_price": base_price,
+                        "latest_price": price,
+                    },
+                    "delivery": {
+                        "source": "tick_prealert",
+                    },
+                },
+            }
+            task = asyncio.create_task(
+                enqueue_async_anomaly_diagnostic(
+                    runtime,
+                    alert_payload=tick_payload,
+                    event_uid=tick_event_uid,
+                    reply_to_message_id=int(send_res.message_id),
+                    alert_ref=f"TICK-{symbol}-{direction}",
+                ),
+                name=f"tick_diag_enqueue_{symbol}_{direction}",
+            )
+            def _tick_diag_done(t: asyncio.Task, _symbol: str = symbol) -> None:
+                try:
+                    t.result()
+                except Exception as exc:
+                    logger.warning("Tick diagnostic enqueue failed symbol=%s err=%s", _symbol, exc)
+            task.add_done_callback(_tick_diag_done)
+
+
 async def process_closed_candle(runtime: WorkerRuntime, candle: Candle) -> None:
     with runtime.session_factory() as session:
         upsert_ohlcv(session, _candle_to_payload(candle), commit=False)
@@ -1108,13 +1360,14 @@ async def ws_consumer_job(runtime: WorkerRuntime) -> None:
     async def on_candle(candle: Candle) -> None:
         await process_closed_candle(runtime, candle)
 
-    async def on_price(symbol: str, price: float, _: datetime) -> None:
+    async def on_price(symbol: str, price: float, ts: datetime) -> None:
         runtime.latest_prices[symbol] = price
+        await _maybe_emit_tick_flash(runtime, symbol, price, ts)
 
     await runtime.provider.consume_kline_stream(
         runtime.settings.watchlist_symbols,
         on_candle=on_candle,
-        on_price=on_price if runtime.settings.enable_miniticker else None,
+        on_price=on_price if (runtime.settings.enable_miniticker or runtime.settings.anomaly_tick_flash_enabled) else None,
     )
 
 
@@ -1965,15 +2218,19 @@ async def anomaly_job(runtime: WorkerRuntime) -> None:
                     confirm_gate_ok = mtf_ok or (extreme_unconfirmed and extreme_quality_ok)
                 else:
                     confirm_gate_ok = mtf_ok or extreme_unconfirmed
+                if runtime.settings.anomaly_flash_enabled and not runtime.settings.anomaly_flash_require_mtf_confirm:
+                    event_confirm_gate_ok = True
+                else:
+                    event_confirm_gate_ok = confirm_gate_ok
 
                 event_kind: str | None = None
-                if (not state.active) and state.consecutive_hits >= adaptive_persist_bars and current_score >= enter_threshold and confirm_gate_ok:
+                if (not state.active) and state.consecutive_hits >= adaptive_persist_bars and current_score >= enter_threshold and event_confirm_gate_ok:
                     event_kind = "ENTER"
                 elif (
                     state.active
                     and current_score >= int(runtime.settings.anomaly_score_threshold_unconfirmed_extreme)
                     and (use_filter_v2 or not state.last_escalate_bucket)
-                    and confirm_gate_ok
+                    and event_confirm_gate_ok
                 ):
                     event_kind = "ESCALATE"
 
@@ -2066,37 +2323,80 @@ async def anomaly_job(runtime: WorkerRuntime) -> None:
                 session.commit()
 
                 if should_send:
-                    msg = build_anomaly_message(payload)
-                    sent = await runtime.telegram.send_message(msg)
-                    if sent:
-                        mark_alert_sent(session, payload["event_uid"])
-                        logger.info(
-                            "[告警推送] 已发送 symbol=%s kind=%s score=%s regime=%s confirm=%s",
-                            symbol, event_kind, current_score, snapshot.regime, confirm_status,
+                    if runtime.settings.anomaly_flash_enabled:
+                        latest_price = runtime.latest_prices.get(symbol)
+                        alert_ref = (
+                            build_alert_ref(symbol, payload.get("event_uid"), payload.get("ts"))
+                            if runtime.settings.anomaly_alert_ref_enabled
+                            else str(payload.get("event_uid", ""))[:8]
                         )
+                        msg = build_flash_alert(
+                            payload,
+                            latest_price=latest_price,
+                            alert_ref=alert_ref,
+                        )
+                        sent_result = await runtime.telegram.send_message_with_result(msg)
+                        if sent_result.ok:
+                            mark_alert_sent(session, payload["event_uid"])
+                            update_alert_event_delivery(
+                                session,
+                                event_uid=str(payload["event_uid"]),
+                                updates={
+                                    "alert_ref": alert_ref,
+                                    "flash_message_id": sent_result.message_id,
+                                    "flash_sent_at": utc_now().isoformat(),
+                                    "flash_kind": str(event_kind),
+                                },
+                            )
+                            logger.info(
+                                "[告警推送] Flash已发送 symbol=%s kind=%s score=%s regime=%s confirm=%s",
+                                symbol, event_kind, current_score, snapshot.regime, confirm_status,
+                            )
+                            if runtime.settings.anomaly_ai_diagnostic_enabled and sent_result.message_id is not None:
+                                from app.ai.anomaly_analyst import enqueue_async_anomaly_diagnostic
+
+                                task = asyncio.create_task(
+                                    enqueue_async_anomaly_diagnostic(
+                                        runtime,
+                                        alert_payload=payload,
+                                        event_uid=str(payload.get("event_uid") or ""),
+                                        reply_to_message_id=int(sent_result.message_id),
+                                        alert_ref=alert_ref,
+                                    ),
+                                    name=f"anomaly_ai_diag_{symbol}_{str(payload.get('event_uid', ''))[:8]}",
+                                )
+
+                                def _diag_done(t: asyncio.Task, _symbol: str = symbol) -> None:
+                                    try:
+                                        t.result()
+                                    except Exception as exc:
+                                        logger.warning("Anomaly AI diagnostic task failed symbol=%s err=%s", _symbol, exc)
+
+                                task.add_done_callback(_diag_done)
+                        else:
+                            logger.warning(
+                                "[告警推送] Flash发送失败 symbol=%s kind=%s score=%s",
+                                symbol, event_kind, current_score,
+                            )
                     else:
-                        logger.warning(
-                            "[告警推送] 发送失败 symbol=%s kind=%s score=%s",
-                            symbol, event_kind, current_score,
-                        )
+                        msg = build_anomaly_message(payload)
+                        sent = await runtime.telegram.send_message(msg)
+                        if sent:
+                            mark_alert_sent(session, payload["event_uid"])
+                            logger.info(
+                                "[告警推送] 已发送 symbol=%s kind=%s score=%s regime=%s confirm=%s",
+                                symbol, event_kind, current_score, snapshot.regime, confirm_status,
+                            )
+                        else:
+                            logger.warning(
+                                "[告警推送] 发送失败 symbol=%s kind=%s score=%s",
+                                symbol, event_kind, current_score,
+                            )
                 else:
                     logger.info(
                         "[告警推送] 已抑制（仅落库） symbol=%s kind=%s score=%s reason=%s",
                         symbol, event_kind, current_score, suppressed_reason,
                     )
-
-
-async def heartbeat_job(runtime: WorkerRuntime) -> None:
-    await maybe_reload_llm_runtime_from_signal(runtime)
-    now = datetime.now(timezone.utc)
-    with runtime.session_factory() as session:
-        upsert_worker_status(
-            session,
-            worker_id=runtime.settings.worker_id,
-            started_at=runtime.started_at,
-            last_seen=now,
-            version=runtime.version,
-        )
 
 
 # ======== NEW: Multi-Timeframe Sync Job ========
@@ -2189,108 +2489,6 @@ async def funding_rate_job(runtime: WorkerRuntime) -> None:
 
 
 # ======== UPDATED: AI Analysis Job (multi-TF + funding) ========
-
-
-
-
-async def intel_news_job(runtime: WorkerRuntime) -> dict[str, Any]:
-    settings = runtime.settings
-    if not bool(getattr(settings, "intel_enabled", False)):
-        return {"rows_read": 0, "rows_written": 0}
-
-    from app.db.repository import upsert_news_item
-    from app.news.service import IntelService
-
-    own_client = None
-    http_client = runtime.http_client
-    if http_client is None:
-        import httpx
-
-        own_client = httpx.AsyncClient(timeout=httpx.Timeout(20.0, connect=10.0))
-        http_client = own_client
-
-    try:
-        service = IntelService(http_client, max_items_per_feed=max(10, settings.intel_max_items_per_run // 6))
-        items = await service.fetch_news_items(max_items_per_run=settings.intel_max_items_per_run)
-        if not items:
-            return {"rows_read": 0, "rows_written": 0}
-        with runtime.session_factory() as session:
-            for item in items:
-                upsert_news_item(session, item, commit=False)
-            session.commit()
-        logger.info("[intel] fetched=%d", len(items))
-        return {"rows_read": len(items), "rows_written": len(items)}
-    finally:
-        if own_client is not None:
-            await own_client.aclose()
-
-
-async def intel_digest_job(runtime: WorkerRuntime) -> dict[str, Any]:
-    settings = runtime.settings
-    if not bool(getattr(settings, "intel_enabled", False)):
-        return {"rows_read": 0, "rows_written": 0}
-
-    from app.db.repository import get_latest_intel_digest, list_news_items, save_intel_digest
-    from app.news.service import IntelService
-
-    own_client = None
-    http_client = runtime.http_client
-    if http_client is None:
-        import httpx
-
-        own_client = httpx.AsyncClient(timeout=httpx.Timeout(20.0, connect=10.0))
-        http_client = own_client
-
-    try:
-        service = IntelService(http_client)
-        with runtime.session_factory() as session:
-            rows = list_news_items(
-                session,
-                last_hours=settings.intel_digest_lookback_hours,
-                limit=max(50, settings.intel_max_items_per_run * 3),
-            )
-            row_payloads = [
-                {
-                    "ts_utc": r.ts_utc,
-                    "source": r.source,
-                    "category": r.category,
-                    "title": r.title,
-                    "summary": r.summary,
-                    "raw_text": r.raw_text,
-                    "region": r.region,
-                    "topics_json": r.topics_json or [],
-                    "alert_keyword": r.alert_keyword,
-                    "severity": r.severity,
-                    "entities_json": r.entities_json or [],
-                }
-                for r in rows
-            ]
-            digest = service.build_digest(row_payloads, lookback_hours=settings.intel_digest_lookback_hours)
-            save_intel_digest(
-                session,
-                {
-                    "symbol": "GLOBAL",
-                    "lookback_hours": settings.intel_digest_lookback_hours,
-                    "digest_json": digest,
-                },
-                commit=False,
-            )
-            session.commit()
-            latest = get_latest_intel_digest(
-                session,
-                symbol="GLOBAL",
-                lookback_hours=settings.intel_digest_lookback_hours,
-            )
-        logger.info(
-            "[intel_digest] items=%d risk_temperature=%s ts=%s",
-            len(rows),
-            (digest or {}).get("risk_temperature"),
-            getattr(latest, "created_at", None),
-        )
-        return {"rows_read": len(rows), "rows_written": 1}
-    finally:
-        if own_client is not None:
-            await own_client.aclose()
 
 
 def _metric_to_dict(m) -> dict[str, Any]:
@@ -2502,16 +2700,24 @@ async def ai_analysis_job(runtime: WorkerRuntime) -> None:
         return
 
     # Call LLM per symbol (new MarketAnalyst signature)
+    from app.ai.analysis_flow import (
+        build_scanner_hold_signal,
+        prepare_context_and_snapshots,
+        scanner_gate_passes,
+    )
     from app.ai.market_context_builder import build_market_analysis_context
     from app.ai.analyst import attach_context_digest_to_analysis_json
 
+    two_stage_enabled = bool(getattr(settings, "ai_two_stage_enabled", True))
+    scan_threshold = int(getattr(settings, "ai_scan_confidence_threshold", 60) or 60)
+
     signals = []
-    llm_metas: list[dict[str, Any]] = []
     funding_by_symbol = {fd.get("symbol"): fd for fd in funding_data}
     alerts_by_symbol: dict[str, list[dict[str, Any]]] = {}
     for a in recent_alerts:
         alerts_by_symbol.setdefault(a.get("symbol"), []).append(a)
     intel_digest_payload: dict[str, Any] | None = None
+    account_context_payload: dict[str, Any] | None = None
     with runtime.session_factory() as session:
         intel_digest_row = get_latest_intel_digest(
             session,
@@ -2520,6 +2726,36 @@ async def ai_analysis_job(runtime: WorkerRuntime) -> None:
         )
         if intel_digest_row is not None and isinstance(intel_digest_row.digest_json, dict):
             intel_digest_payload = intel_digest_row.digest_json
+        futures_row = get_latest_futures_account_snapshot(session)
+        margin_row = get_latest_margin_account_snapshot(session)
+        futures_ctx_payload = {}
+        margin_ctx_payload = {}
+        if futures_row is not None:
+            futures_ctx_payload = {
+                "ts": futures_row.ts,
+                "total_margin_balance": futures_row.total_margin_balance,
+                "available_balance": futures_row.available_balance,
+                "total_maint_margin": futures_row.total_maint_margin,
+                "btc_position_amt": futures_row.btc_position_amt,
+                "btc_mark_price": futures_row.btc_mark_price,
+                "btc_liquidation_price": futures_row.btc_liquidation_price,
+                "btc_unrealized_pnl": futures_row.btc_unrealized_pnl,
+            }
+        if margin_row is not None:
+            margin_ctx_payload = {
+                "ts": margin_row.ts,
+                "margin_level": margin_row.margin_level,
+                "margin_call_bar": margin_row.margin_call_bar,
+                "force_liquidation_bar": margin_row.force_liquidation_bar,
+                "total_liability_of_btc": margin_row.total_liability_of_btc,
+            }
+        if futures_ctx_payload or margin_ctx_payload:
+            account_context_payload = _build_account_snapshot_context(
+                watch_symbol=settings.account_watch_symbol,
+                futures_payload=futures_ctx_payload,
+                margin_payload=margin_ctx_payload,
+                min_balance_threshold=float(settings.account_alert_min_available_balance),
+            )
 
     for symbol, symbol_snapshots in multi_tf_snapshots.items():
         try:
@@ -2532,11 +2768,31 @@ async def ai_analysis_job(runtime: WorkerRuntime) -> None:
                 youtube_consensus=None,
                 youtube_insights=None,
                 intel_digest=intel_digest_payload,
+                account_snapshot=account_context_payload,
                 expected_timeframes=["4h", "1h", "15m", "5m", "1m"],
             )
+            gate_ok, skip_reason = scanner_gate_passes(
+                context, two_stage_enabled=two_stage_enabled, scan_threshold=scan_threshold
+            )
+            if not gate_ok and skip_reason:
+                logger.info("[AI] Scanner gate rejected %s: %s", symbol, skip_reason)
+                hold_sig = build_scanner_hold_signal(symbol, context, skip_reason)
+                signals.append(hold_sig)
+                continue
+
+            context, symbol_snapshots = prepare_context_and_snapshots(
+                context,
+                symbol_snapshots,
+                symbol,
+                min_context_on_poor_data=bool(getattr(settings, "ai_min_context_on_poor_data", True)),
+                min_context_on_non_tradeable=bool(getattr(settings, "ai_min_context_on_non_tradeable", True)),
+            )
+
             if runtime.sem_llm is not None:
                 async with runtime.sem_llm:
-                    sigs, llm_meta = await runtime.market_analyst.analyze(symbol, symbol_snapshots, context=context)
+                    sigs, llm_meta = await runtime.market_analyst.analyze(
+                        symbol, symbol_snapshots, context=context
+                    )
             else:
                 sigs, llm_meta = await runtime.market_analyst.analyze(symbol, symbol_snapshots, context=context)
             for sig in sigs:
@@ -2685,317 +2941,6 @@ async def ai_analysis_job(runtime: WorkerRuntime) -> None:
         session.commit()
 
 
-async def decision_eval_job(runtime: WorkerRuntime) -> dict[str, Any]:
-    settings = runtime.settings
-    batch_size = max(1, int(getattr(settings, "strategy_eval_batch_size", 120) or 120))
-    max_scan_bars = max(10, int(getattr(settings, "strategy_eval_max_bars_per_decision", 720) or 720))
-    cache_size = max(2, int(getattr(settings, "strategy_eval_ohlcv_cache_size", 16) or 16))
-    now_ts = int(datetime.now(timezone.utc).timestamp())
-    checkpoints = _load_eval_checkpoint_map()
-    cache = _OhlcvSliceCache(max_size=cache_size)
-
-    rows_written = 0
-    rows_read = 0
-    pending = 0
-    resolved = 0
-    backlog = 0
-
-    with runtime.session_factory() as session:
-        candidates = list_strategy_decisions_for_eval(session, limit=batch_size)
-        backlog = len(candidates)
-        for decision, execution, eval_row in candidates:
-            rows_read += 1
-            expiration_ts = _decision_expiration_ts(decision)
-            bars_fill = cache.get(
-                session,
-                symbol=decision.symbol,
-                start_ts=int(decision.decision_ts),
-                end_ts=expiration_ts,
-            )
-
-            if execution and str(execution.status or "").upper() in {"FILLED", "NO_FILL"}:
-                fill = {
-                    "status": str(execution.status or "PENDING").upper(),
-                    "filled": bool(execution.filled),
-                    "filled_ts": execution.filled_ts,
-                    "filled_price": execution.filled_price,
-                    "filled_qty": execution.filled_qty,
-                    "avg_fill_price": execution.avg_fill_price,
-                    "source": execution.source or "SIMULATED",
-                    "notes": execution.notes,
-                }
-            else:
-                fill = _simulate_fill_for_decision(
-                    decision,
-                    bars=bars_fill,
-                    decision_ts=int(decision.decision_ts),
-                    expiration_ts=expiration_ts,
-                )
-                upsert_decision_execution(session, decision_id=decision.id, payload=fill, commit=False)
-                rows_written += 1
-
-            fill_status = str(fill.get("status") or "PENDING").upper()
-            if fill_status == "NO_FILL":
-                upsert_decision_eval(
-                    session,
-                    decision_id=decision.id,
-                    payload={
-                        "eval_replay_tf": "1m",
-                        "intrabar_flag": "NONE",
-                        "tp_hit": False,
-                        "sl_hit": False,
-                        "outcome_raw": "NO_FILL",
-                        "first_hit_ts": None,
-                        "exit_ts": None,
-                        "exit_price": None,
-                        "r_multiple_raw": None,
-                        "mfe": None,
-                        "mae": None,
-                        "bars_to_outcome": 0,
-                    },
-                    commit=False,
-                )
-                checkpoints.pop(str(decision.id), None)
-                rows_written += 1
-                resolved += 1
-                continue
-            if fill_status != "FILLED":
-                pending += 1
-                continue
-
-            filled_ts = int(fill.get("filled_ts") or decision.decision_ts)
-            scan_start_ts = max(filled_ts, int(checkpoints.get(str(decision.id), filled_ts)))
-            scan_end_ts = min(expiration_ts, scan_start_ts + max_scan_bars * 60)
-            bars_post = cache.get(
-                session,
-                symbol=decision.symbol,
-                start_ts=scan_start_ts,
-                end_ts=scan_end_ts,
-            )
-            eval_payload, next_checkpoint = _simulate_post_fill_eval(
-                decision,
-                bars=bars_post,
-                filled_ts=filled_ts,
-                scan_start_ts=scan_start_ts,
-                expiration_ts=expiration_ts,
-                max_scan_bars=max_scan_bars,
-                now_ts=now_ts,
-            )
-            upsert_decision_eval(session, decision_id=decision.id, payload=eval_payload, commit=False)
-            rows_written += 1
-            if next_checkpoint is not None and str(eval_payload.get("outcome_raw") or "").upper() == "OPEN":
-                checkpoints[str(decision.id)] = int(next_checkpoint)
-                pending += 1
-            else:
-                checkpoints.pop(str(decision.id), None)
-                resolved += 1
-
-        session.commit()
-
-    _save_eval_checkpoint_map(checkpoints)
-    return {
-        "rows_read": rows_read,
-        "rows_written": rows_written,
-        "backlog": backlog,
-        "resolved": resolved,
-        "pending": pending,
-        "checkpoint_size": len(checkpoints),
-    }
-
-
-def _strategy_split_windows(now_ts: int) -> list[tuple[str, int, int]]:
-    oos_days = 14
-    is_days = 60
-    oos_end = int(now_ts)
-    oos_start = oos_end - (oos_days * 24 * 3600)
-    is_end = oos_start
-    is_start = is_end - (is_days * 24 * 3600)
-    return [
-        ("IN_SAMPLE", is_start, is_end),
-        ("OUT_OF_SAMPLE", oos_start, oos_end),
-    ]
-
-
-async def strategy_scores_job(runtime: WorkerRuntime) -> dict[str, Any]:
-    settings = runtime.settings
-    min_trades = max(1, int(getattr(settings, "strategy_research_min_trades", 50) or 50))
-    realistic_p = max(0.0, min(1.0, float(getattr(settings, "strategy_ambiguous_realistic_p", 0.5) or 0.5)))
-    now_ts = int(datetime.now(timezone.utc).timestamp())
-    rows_read = 0
-    rows_written = 0
-
-    with runtime.session_factory() as session:
-        manifests = list_manifest_ids_for_strategy(session, limit=1000)
-        for manifest_id in manifests:
-            for split_type, ws, we in _strategy_split_windows(now_ts):
-                rows = list_strategy_rows_for_window(
-                    session,
-                    manifest_id=manifest_id,
-                    window_start_ts=ws,
-                    window_end_ts=we,
-                )
-                rows_read += len(rows)
-                for mode in ("STRICT", "REALISTIC", "OPTIMISTIC"):
-                    stats = _compute_window_score(
-                        rows,
-                        scoring_mode=mode,
-                        realistic_p=realistic_p,
-                        min_trades=min_trades,
-                    )
-                    upsert_strategy_score(
-                        session,
-                        {
-                            "manifest_id": manifest_id,
-                            "window_start_ts": ws,
-                            "window_end_ts": we,
-                            "split_type": split_type,
-                            "scoring_mode": mode,
-                            **stats,
-                        },
-                        commit=False,
-                    )
-                    rows_written += 1
-        session.commit()
-
-    return {"rows_read": rows_read, "rows_written": rows_written}
-
-
-async def strategy_research_job(runtime: WorkerRuntime) -> dict[str, Any]:
-    settings = runtime.settings
-    min_trades = max(1, int(getattr(settings, "strategy_research_min_trades", 50) or 50))
-    realistic_p = max(0.0, min(1.0, float(getattr(settings, "strategy_ambiguous_realistic_p", 0.5) or 0.5)))
-    now_ts = int(datetime.now(timezone.utc).timestamp())
-    rows_read = 0
-    rows_written = 0
-    tested_features: set[str] = set()
-
-    with runtime.session_factory() as session:
-        manifests = list_manifest_ids_for_strategy(session, limit=1000)
-        for manifest_id in manifests:
-            for split_type, ws, we in _strategy_split_windows(now_ts):
-                rows = list_strategy_rows_for_window(
-                    session,
-                    manifest_id=manifest_id,
-                    window_start_ts=ws,
-                    window_end_ts=we,
-                )
-                rows_read += len(rows)
-                for scoring_mode in ("STRICT", "REALISTIC", "OPTIMISTIC"):
-                    agg: dict[tuple[str, str, str], dict[str, Any]] = {}
-                    for decision, execution, eval_row, signal in rows:
-                        exec_status = str((execution.status if execution else "PENDING") or "PENDING").upper()
-                        outcome = str((eval_row.outcome_raw if eval_row else "OPEN") or "OPEN").upper()
-                        if exec_status != "FILLED" or outcome not in {"TP", "SL", "AMBIGUOUS"}:
-                            continue
-                        r_tp = _calc_r_tp(decision)
-                        win_c, r_c, counts_trade, _resolved = _score_trade_outcome(
-                            outcome=outcome,
-                            mode=scoring_mode,
-                            r_tp=r_tp,
-                            realistic_p=realistic_p,
-                        )
-                        if not counts_trade:
-                            continue
-
-                        market_regime = getattr(signal, "market_regime", None) if signal is not None else None
-                        regime_id = _derive_regime_id(market_regime)
-                        features = {
-                            "signal_confidence": _confidence_bucket(decision.confidence),
-                            "position_side": str(decision.position_side or "HOLD").upper(),
-                            "market_regime": _regime_bucket(market_regime),
-                        }
-                        for feature_key, bucket_key in features.items():
-                            tested_features.add(feature_key)
-                            allowed = _FEATURE_WHITELIST_BUCKETS.get(feature_key)
-                            if not allowed or bucket_key not in allowed:
-                                logger.error(
-                                    "strategy_research reject feature write feature=%s bucket=%s manifest=%s",
-                                    feature_key,
-                                    bucket_key,
-                                    manifest_id,
-                                )
-                                continue
-                            k = (regime_id, feature_key, bucket_key)
-                            item = agg.setdefault(k, {"n": 0, "wins": 0.0, "r_values": []})
-                            item["n"] += 1
-                            item["wins"] += win_c
-                            item["r_values"].append(float(r_c))
-
-                    for (regime_id, feature_key, bucket_key), item in agg.items():
-                        n = int(item["n"])
-                        wins = float(item["wins"])
-                        r_values = list(item["r_values"])
-                        win_rate = (wins / n) if n > 0 else None
-                        avg_r = (sum(r_values) / n) if n > 0 else None
-                        ci_low, ci_high = _wilson_ci(wins, n) if n > 0 else (None, None)
-                        avg_ci_low, avg_ci_high = _bootstrap_mean_ci(r_values) if r_values else (None, None)
-                        status = "OK" if n >= min_trades else "INSUFFICIENT_DATA"
-                        upsert_strategy_feature_stat(
-                            session,
-                            {
-                                "manifest_id": manifest_id,
-                                "window_start_ts": ws,
-                                "window_end_ts": we,
-                                "split_type": split_type,
-                                "regime_id": regime_id,
-                                "scoring_mode": scoring_mode,
-                                "feature_key": feature_key,
-                                "bucket_key": bucket_key,
-                                "status": status,
-                                "n": n,
-                                "win_rate": win_rate,
-                                "avg_r": avg_r,
-                                "ci_low": ci_low if ci_low is not None else avg_ci_low,
-                                "ci_high": ci_high if ci_high is not None else avg_ci_high,
-                            },
-                            commit=False,
-                        )
-                        rows_written += 1
-
-        session.commit()
-
-    return {
-        "rows_read": rows_read,
-        "rows_written": rows_written,
-        "tested_features": sorted(tested_features),
-    }
-
-
-async def supervised_job(job_name: str, coro_func, runtime: WorkerRuntime) -> None:
-    import time
-
-    started = time.perf_counter()
-    status = "ok"
-    error_type: str | None = None
-    metric_payload: dict[str, Any] = {}
-    try:
-        result = await coro_func(runtime)
-        if isinstance(result, dict):
-            metric_payload = result
-    except asyncio.CancelledError:
-        status = "cancelled"
-        error_type = "CancelledError"
-        raise
-    except Exception as exc:
-        status = "error"
-        error_type = type(exc).__name__
-        logger.exception("Job %s failed: %s", job_name, exc)
-    finally:
-        duration_ms = int((time.perf_counter() - started) * 1000)
-        append_job_metric(
-            runtime,
-            {
-                "job_name": job_name,
-                "status": status,
-                "duration_ms": duration_ms,
-                "rows_written": metric_payload.get("rows_written"),
-                "rows_read": metric_payload.get("rows_read"),
-                "backlog": metric_payload.get("backlog"),
-                "error_type": error_type,
-            },
-        )
-
-
 # ======== YouTube MVP Jobs ========
 
 
@@ -3126,7 +3071,8 @@ async def youtube_asr_backfill_job(runtime: WorkerRuntime) -> None:
                 logger.warning("ASR: download failed for %s", video.video_id)
             else:
                 # Step 2: Transcribe locally
-                result = transcribe_local(
+                result = await asyncio.to_thread(
+                    transcribe_local,
                     audio_path,
                     model_name=settings.asr_model,
                     device=settings.asr_device,
@@ -3197,6 +3143,8 @@ async def youtube_analyze_job(runtime: WorkerRuntime) -> None:
         return
 
     youtube_config = settings.resolve_llm_config("youtube")
+    youtube_provider_name = getattr(youtube_config, "provider", None) or getattr(getattr(provider, "config", None), "provider", None) or type(provider).__name__
+    youtube_model_name = getattr(youtube_config, "model", None) or getattr(getattr(provider, "config", None), "model", None) or ""
     profile_resolver = getattr(settings, "resolve_llm_profile_name", None)
     youtube_profile_name = profile_resolver("youtube") if callable(profile_resolver) else "youtube"
     video_use_reasoning = youtube_config.use_reasoning.lower() == "true" or (
@@ -3216,8 +3164,8 @@ async def youtube_analyze_job(runtime: WorkerRuntime) -> None:
             "YouTube auth auto recover requeued=%d profile=%s provider=%s model=%s",
             recovered_auth,
             youtube_profile_name,
-            youtube_config.provider,
-            youtube_config.model,
+            youtube_provider_name,
+            youtube_model_name,
         )
 
     # 1) Analyze individual videos (parallel inside a single scheduler job)
@@ -3365,8 +3313,8 @@ async def youtube_analyze_job(runtime: WorkerRuntime) -> None:
                         retryable,
                         _safe_iso(next_retry_at),
                         youtube_profile_name,
-                        youtube_config.provider,
-                        youtube_config.model,
+                        youtube_provider_name,
+                        youtube_model_name,
                         suggested_action,
                         msg[:200],
                         retry_count,
@@ -3395,8 +3343,8 @@ async def youtube_analyze_job(runtime: WorkerRuntime) -> None:
                     retryable,
                     None,
                     youtube_profile_name,
-                    youtube_config.provider,
-                    youtube_config.model,
+                    youtube_provider_name,
+                    youtube_model_name,
                     suggested_action,
                     retry_count,
                     max_auto_retries,
@@ -3443,8 +3391,8 @@ async def youtube_analyze_job(runtime: WorkerRuntime) -> None:
                         video.video_id,
                         status_code,
                         youtube_profile_name,
-                        youtube_config.provider,
-                        youtube_config.model,
+                        youtube_provider_name,
+                        youtube_model_name,
                         error_msg[:200],
                     )
                 except LLMTimeoutError as exc:
@@ -3455,8 +3403,8 @@ async def youtube_analyze_job(runtime: WorkerRuntime) -> None:
                         video.video_id,
                         status_code,
                         youtube_profile_name,
-                        youtube_config.provider,
-                        youtube_config.model,
+                        youtube_provider_name,
+                        youtube_model_name,
                         error_msg[:200],
                     )
                 except LLMAuthError as exc:
@@ -3467,8 +3415,8 @@ async def youtube_analyze_job(runtime: WorkerRuntime) -> None:
                         video.video_id,
                         status_code,
                         youtube_profile_name,
-                        youtube_config.provider,
-                        youtube_config.model,
+                        youtube_provider_name,
+                        youtube_model_name,
                         error_msg[:200],
                     )
                 except LLMBadRequestError as exc:
@@ -3479,8 +3427,8 @@ async def youtube_analyze_job(runtime: WorkerRuntime) -> None:
                         video.video_id,
                         status_code,
                         youtube_profile_name,
-                        youtube_config.provider,
-                        youtube_config.model,
+                        youtube_provider_name,
+                        youtube_model_name,
                         error_msg[:200],
                     )
                 except Exception as exc:
@@ -3491,8 +3439,8 @@ async def youtube_analyze_job(runtime: WorkerRuntime) -> None:
                         video.video_id,
                         status_code,
                         youtube_profile_name,
-                        youtube_config.provider,
-                        youtube_config.model,
+                        youtube_provider_name,
+                        youtube_model_name,
                         error_msg[:200],
                     )
 
@@ -3504,7 +3452,7 @@ async def youtube_analyze_job(runtime: WorkerRuntime) -> None:
                         insert_llm_call(db, {
                             "task": "youtube",
                             "provider_name": type(provider).__name__,
-                            "model": youtube_config.model,
+                            "model": youtube_model_name,
                             "status": status_code,
                             "duration_ms": duration_ms,
                             "prompt_tokens": response.get("prompt_tokens"),
@@ -3530,7 +3478,7 @@ async def youtube_analyze_job(runtime: WorkerRuntime) -> None:
                     failed_vta = _build_failed_youtube_insight_placeholder(
                         video=video,
                         provider_name=provider.config.provider if hasattr(provider, "config") else type(provider).__name__,
-                        model=youtube_config.model,
+                        model=youtube_model_name,
                         error_type=error_type,
                         status_code=status_code,
                         message=error_msg,
@@ -3595,7 +3543,7 @@ async def youtube_analyze_job(runtime: WorkerRuntime) -> None:
                         final_vta = _build_failed_youtube_insight_placeholder(
                             video=video,
                             provider_name=provider.config.provider if hasattr(provider, "config") else type(provider).__name__,
-                            model=youtube_config.model,
+                            model=youtube_model_name,
                             error_type="parse_error",
                             status_code="parse",
                             message=f"Parse/Processing error: {e}",
@@ -3609,7 +3557,7 @@ async def youtube_analyze_job(runtime: WorkerRuntime) -> None:
                     final_vta = _build_failed_youtube_insight_placeholder(
                         video=video,
                         provider_name=provider.config.provider if hasattr(provider, "config") else type(provider).__name__,
-                        model=youtube_config.model,
+                        model=youtube_model_name,
                         error_type="no_json",
                         status_code="no_json",
                         message="No JSON found in response",
@@ -3665,14 +3613,14 @@ async def youtube_analyze_job(runtime: WorkerRuntime) -> None:
                     "effective_llm.profile=%s effective_llm.provider=%s effective_llm.model=%s err=%s",
                     video.video_id,
                     youtube_profile_name,
-                    youtube_config.provider,
-                    youtube_config.model,
+                    youtube_provider_name,
+                    youtube_model_name,
                     str(exc)[:200],
                 )
                 failed_vta = _build_failed_youtube_insight_placeholder(
                     video=video,
                     provider_name=provider.config.provider if hasattr(provider, "config") else type(provider).__name__,
-                    model=youtube_config.model,
+                    model=youtube_model_name,
                     error_type="transport",
                     status_code="worker_exception",
                     message=str(exc),

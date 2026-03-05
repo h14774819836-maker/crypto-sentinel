@@ -64,7 +64,20 @@ class MarketAnalyst:
             self._log_market_event("skip_no_snapshots", symbol=symbol)
             return [], None
 
-        user_prompt = build_analysis_prompt(symbol=symbol, snapshots=snapshots, context=context)
+        external_views_on_low_conf = bool(
+            getattr(self.settings, "ai_external_views_on_low_conf_only", True)
+        )
+        scan_threshold = int(
+            getattr(self.settings, "ai_scan_confidence_threshold", 60) or 60
+        )
+        include_external_views = not external_views_on_low_conf
+
+        user_prompt = build_analysis_prompt(
+            symbol=symbol,
+            snapshots=snapshots,
+            context=context,
+            include_external_views=include_external_views,
+        )
         logger.info(
             "========== 发送给 AI 的 Prompt 开始 (%s / %s) ==========\n%s\n========== 发送给 AI 的 Prompt 结束 ==========",
             self.model,
@@ -266,6 +279,14 @@ class MarketAnalyst:
                 failure = {"phase": "schema", "errors": ["未知解析失败"], "raw_response_excerpt": str(content)[:800]}
             phase = str(failure.get("phase") or "schema")
             errors = list(failure.get("errors") or [])
+            
+            logger.warning(
+                "AI analysis parse/validation failed (symbol=%s, attempt=%s, phase=%s). Errors: %s", 
+                symbol, attempt, phase, errors
+            )
+            if phase in ("extract_json", "json_parse"):
+                logger.debug("Failed raw content excerpt: %s", str(content)[:800])
+                
             failure_events.append(
                 self._build_failure_event(
                     symbol=symbol,
@@ -289,7 +310,7 @@ class MarketAnalyst:
             )
 
             if attempt == 1 and phase in retryable_failure_phases:
-                logger.warning("Market analysis parse/validation failed on attempt#1, retrying once (symbol=%s, phase=%s)", symbol, phase)
+                logger.info("Scheduling retry for %s (failed phase: %s)", symbol, phase)
                 self._log_market_event(
                     "retry_scheduled",
                     symbol=symbol,
@@ -306,6 +327,55 @@ class MarketAnalyst:
                 sig.model_name = actual_model
                 sig.prompt_tokens = prompt_tokens
                 sig.completion_tokens = completion_tokens
+
+            if external_views_on_low_conf and status == "ok":
+                sig0 = final_signals[0]
+                conf = sig0.confidence
+                direction = str(sig0.direction or "").upper()
+                has_ext = bool((context or {}).get("youtube_radar", {}).get("available")) or bool(
+                    (context or {}).get("intel_digest")
+                )
+                if has_ext and (conf < scan_threshold or direction == "HOLD"):
+                    pass2_prompt = build_analysis_prompt(
+                        symbol=symbol,
+                        snapshots=snapshots,
+                        context=context,
+                        include_external_views=True,
+                    )
+                    pass2_messages = [
+                        {"role": "system", "content": SYSTEM_PROMPT},
+                        {"role": "user", "content": pass2_prompt},
+                    ]
+                    try:
+                        pass2_resp = await self.provider.generate_response(
+                            messages=pass2_messages,
+                            max_tokens=4096,
+                            temperature=market_temperature,
+                            response_format={"type": "json_object"},
+                            use_reasoning=use_reasoning,
+                            stream_callback=stream_callback,
+                        )
+                        pass2_content = pass2_resp.get("content", "")
+                        pass2_parsed, _ = self._parse_response_strict(
+                            pass2_content, symbol=symbol, snapshots=snapshots, context=context
+                        )
+                        if pass2_parsed:
+                            for sig in pass2_parsed:
+                                sig.model_requested = self.model
+                                sig.model_name = pass2_resp.get("model", actual_model)
+                                sig.prompt_tokens = pass2_resp.get("prompt_tokens")
+                                sig.completion_tokens = pass2_resp.get("completion_tokens")
+                            final_signals = pass2_parsed
+                            prompt_tokens = (prompt_tokens or 0) + (pass2_resp.get("prompt_tokens") or 0)
+                            completion_tokens = (completion_tokens or 0) + (pass2_resp.get("completion_tokens") or 0)
+                            self._log_market_event(
+                                "pass2_with_external_views",
+                                symbol=symbol,
+                                confidence_pass1=conf,
+                                direction_pass1=direction,
+                            )
+                    except Exception as exc:
+                        logger.warning("Pass2 with external views failed for %s: %s", symbol, exc)
         else:
             status = "error"
             if not error_summary:
@@ -313,6 +383,13 @@ class MarketAnalyst:
                     error_summary = str(failure_events[-1].get("error_summary") or "analysis_failed")
                 else:
                     error_summary = "analysis_failed"
+            
+            final_phase = failure_events[-1].get("phase") if failure_events else "unknown"
+            logger.error(
+                "Market analysis ultimately failed for %s after %d attempts. Final phase: %s, summary: %s", 
+                symbol, len(model_attempts), final_phase, error_summary
+            )
+            
             final_signals = [
                 self._build_failed_hold_signal(
                     symbol=symbol,
@@ -403,12 +480,13 @@ class MarketAnalyst:
         snapshots: dict[str, Any],
         context: dict[str, Any] | None,
     ) -> tuple[list[AiTradeSignal], dict[str, Any] | None]:
-        json_str = _extract_json(content)
+        think_text, json_str = _extract_think_and_json(content)
         if not json_str:
             return [], {
                 "phase": "extract_json",
                 "errors": ["Could not extract JSON from AI response"],
                 "raw_response_excerpt": str(content)[:1000],
+                "reasoning_content": think_text,
             }
 
         try:
@@ -418,6 +496,7 @@ class MarketAnalyst:
                 "phase": "json_parse",
                 "errors": [f"JSON parse error: {exc}"],
                 "raw_response_excerpt": str(content)[:1000],
+                "reasoning_content": think_text,
             }
 
         if not isinstance(data, dict):
@@ -425,14 +504,17 @@ class MarketAnalyst:
                 "phase": "json_parse",
                 "errors": ["AI response JSON is not an object"],
                 "raw_response_excerpt": str(content)[:1000],
+                "reasoning_content": think_text,
             }
 
+        data = self._normalize_market_payload(data, symbol=symbol, snapshots=snapshots)
         schema_errors = self._validate_market_schema(data)
         if schema_errors:
             return [], {
                 "phase": "schema",
                 "errors": schema_errors,
                 "raw_response_excerpt": str(content)[:1000],
+                "reasoning_content": think_text,
             }
 
         grounding_errors = self._validate_grounding(
@@ -446,9 +528,10 @@ class MarketAnalyst:
                 "phase": "grounding",
                 "errors": grounding_errors,
                 "raw_response_excerpt": str(content)[:1000],
+                "reasoning_content": think_text,
             }
 
-        return self._parse_response_data(data, symbol=symbol, snapshots=snapshots, context=context), None
+        return self._parse_response_data(data, symbol=symbol, snapshots=snapshots, context=context, reasoning_content=think_text), None
 
     def _parse_response(
         self,
@@ -458,7 +541,7 @@ class MarketAnalyst:
         snapshots: dict[str, Any],
         context: dict[str, Any] | None,
     ) -> list[AiTradeSignal]:
-        json_str = _extract_json(content)
+        think_text, json_str = _extract_think_and_json(content)
         if not json_str:
             logger.warning("Could not extract JSON from AI response")
             return []
@@ -473,7 +556,8 @@ class MarketAnalyst:
             logger.warning("AI response JSON is not an object")
             return []
 
-        return self._parse_response_data(data, symbol=symbol, snapshots=snapshots, context=context)
+        data = self._normalize_market_payload(data, symbol=symbol, snapshots=snapshots)
+        return self._parse_response_data(data, symbol=symbol, snapshots=snapshots, context=context, reasoning_content=think_text)
 
     def _parse_response_data(
         self,
@@ -482,6 +566,7 @@ class MarketAnalyst:
         symbol: str,
         snapshots: dict[str, Any],
         context: dict[str, Any] | None,
+        reasoning_content: str | None = None,
     ) -> list[AiTradeSignal]:
 
         market_regime = str(data.get("market_regime", "") or "")
@@ -562,8 +647,119 @@ class MarketAnalyst:
                 meta.setdefault("base_timeframe", "1m")
                 meta["confidence"] = round(max(0.0, min(1.0, float(signal.confidence) / 100.0)), 3)
                 meta.setdefault("reason_brief", signal.reasoning[:180])
+                if reasoning_content:
+                    meta["reasoning_content"] = reasoning_content
 
         return [signal]
+
+    def _normalize_market_payload(
+        self,
+        data: dict[str, Any],
+        *,
+        symbol: str,
+        snapshots: dict[str, Any],
+    ) -> dict[str, Any]:
+        if not isinstance(data, dict):
+            return {}
+
+        meta = data.get("meta") if isinstance(data.get("meta"), dict) else {}
+        signal = data.get("signal") if isinstance(data.get("signal"), dict) else {}
+
+        parsed_symbol = str(signal.get("symbol") or symbol).upper() or symbol.upper()
+        direction = str(signal.get("direction") or "HOLD").upper()
+        if direction not in ("LONG", "SHORT", "HOLD"):
+            direction = "HOLD"
+        signal["symbol"] = parsed_symbol
+        signal["direction"] = direction
+
+        confidence = signal.get("confidence")
+        if not isinstance(confidence, (int, float)):
+            meta_conf = meta.get("confidence")
+            if isinstance(meta_conf, (int, float)):
+                confidence = float(meta_conf) * 100
+        if not isinstance(confidence, (int, float)):
+            confidence = 35
+        signal["confidence"] = max(0, min(100, int(confidence)))
+
+        if direction == "HOLD":
+            signal["entry_price"] = None
+            signal["take_profit"] = None
+            signal["stop_loss"] = None
+
+        trade_plan = data.get("trade_plan") if isinstance(data.get("trade_plan"), dict) else {}
+        trade_plan["market_type"] = str(trade_plan.get("market_type") or "futures").lower()
+        has_exp = isinstance(trade_plan.get("expiration_ts_utc"), (int, float))
+        has_max_hold = isinstance(trade_plan.get("max_hold_bars"), (int, float))
+        if not (has_exp or has_max_hold):
+            trade_plan["expiration_ts_utc"] = int(datetime.now(timezone.utc).timestamp()) + 3600
+            trade_plan["max_hold_bars"] = 60
+
+        evidence = data.get("evidence") if isinstance(data.get("evidence"), list) else []
+        anchors = data.get("anchors") if isinstance(data.get("anchors"), list) else []
+
+        tfs = [tf for tf in snapshots.keys() if isinstance(tf, str)]
+        if not tfs:
+            tfs = ["1m"]
+
+        def _get_latest_value(tf: str, key: str) -> float | None:
+            snap = snapshots.get(tf) if isinstance(snapshots, dict) else None
+            latest = (snap or {}).get("latest") if isinstance(snap, dict) else None
+            val = latest.get(key) if isinstance(latest, dict) else None
+            try:
+                return float(val)
+            except (TypeError, ValueError):
+                return None
+
+        def _get_latest_ts(tf: str) -> str | None:
+            snap = snapshots.get(tf) if isinstance(snapshots, dict) else None
+            latest = (snap or {}).get("latest") if isinstance(snap, dict) else None
+            raw = latest.get("ts") if isinstance(latest, dict) else None
+            if isinstance(raw, datetime):
+                return raw.isoformat()
+            if raw is None:
+                return None
+            return str(raw)
+
+        if len(evidence) < 2:
+            evs: list[dict[str, Any]] = list(evidence)
+            for tf in tfs:
+                if len(evs) >= 2:
+                    break
+                metrics: dict[str, Any] = {}
+                close_val = _get_latest_value(tf, "close")
+                if close_val is not None:
+                    metrics["close"] = close_val
+                evs.append({"timeframe": tf, "point": "auto_fill", "metrics": metrics})
+            evidence = evs
+
+        if len(anchors) < 2:
+            anchor_list: list[dict[str, Any]] = []
+            seen_paths: set[str] = set()
+            def _push_anchor(path: str, value: Any) -> None:
+                if path in seen_paths:
+                    return
+                seen_paths.add(path)
+                anchor_list.append({"path": path, "value": value})
+
+            _push_anchor("facts.symbol", parsed_symbol)
+            tf0 = tfs[0] if tfs else "1m"
+            close_val = _get_latest_value(tf0, "close")
+            if close_val is not None:
+                _push_anchor(f"facts.multi_tf_snapshots.{tf0}.latest.close", close_val)
+            if len(anchor_list) < 2:
+                ts_val = _get_latest_ts(tf0)
+                if ts_val is not None:
+                    _push_anchor(f"facts.multi_tf_snapshots.{tf0}.latest.ts", ts_val)
+            if len(anchor_list) < 2:
+                _push_anchor(f"facts.multi_tf_snapshots.{tf0}.history_summary.count", 0)
+            anchors = anchor_list
+
+        data["signal"] = signal
+        data["meta"] = meta
+        data["trade_plan"] = trade_plan
+        data["evidence"] = evidence
+        data["anchors"] = anchors
+        return data
 
     def _build_failed_hold_signal(
         self,
@@ -575,8 +771,25 @@ class MarketAnalyst:
         model_attempts: list[dict[str, Any]],
     ) -> AiTradeSignal:
         errors = [str(item.get("error_summary") or "") for item in failure_events if isinstance(item, dict)]
-        phase = str(failure_events[-1].get("phase") or "exhausted") if failure_events else "exhausted"
+        last_failure = failure_events[-1] if failure_events and isinstance(failure_events[-1], dict) else {}
+        phase = str(last_failure.get("phase") or "exhausted")
         attempts = len(model_attempts)
+        
+        reasoning_msg = "结构化解析/校验失败，已降级为HOLD。"
+        if phase == "extract_json":
+            reasoning_msg = "AI输出格式无法作为JSON解析，已降级为HOLD。"
+        elif phase == "json_parse":
+            reasoning_msg = "AI输出内容由于语法错误无法解析，已降级为HOLD。"
+        elif phase == "schema":
+            first_err = (errors[0] if errors else "")[:80]
+            reasoning_msg = f"AI输出内容缺少关键结构化字段（{first_err}），已降级为HOLD。" if first_err else "AI输出内容缺少关键结构化字段，已降级为HOLD。"
+        elif phase == "grounding":
+            if errors and errors[-1]:
+                reasoning_msg = f"AI结论与当前数据存在冲突风险（{errors[-1][:30]}...），已降级为HOLD。"
+            else:
+                reasoning_msg = "AI结论与当前数据存在冲突风险，已降级为HOLD。"
+        elif phase in {"upstream", "timeout", "429", "error"}:
+             reasoning_msg = "AI服务连接或响应异常，已降级为HOLD。"
 
         analysis_json: dict[str, Any] = {
             "market_regime": "uncertain",
@@ -587,7 +800,7 @@ class MarketAnalyst:
                 "take_profit": None,
                 "stop_loss": None,
                 "confidence": 35,
-                "reasoning": "结构化解析/校验失败，已降级为HOLD。",
+                "reasoning": reasoning_msg,
             },
             "trade_plan": {
                 "market_type": "futures",
@@ -607,7 +820,7 @@ class MarketAnalyst:
             "meta": {
                 "base_timeframe": "1m",
                 "confidence": 0.35,
-                "reason_brief": "结构化解析失败，降级 HOLD",
+                "reason_brief": reasoning_msg[:180],
                 "regime_calc_mode": "online",
             },
             "evidence": [],
@@ -633,7 +846,7 @@ class MarketAnalyst:
             take_profit=None,
             stop_loss=None,
             confidence=35,
-            reasoning="结构化解析/校验失败，已降级为HOLD。",
+            reasoning=reasoning_msg,
             model_requested=None,
             model_name="",
             market_regime="uncertain",
@@ -688,8 +901,11 @@ class MarketAnalyst:
                     continue
                 if not isinstance(anchor.get("path"), str) or not str(anchor.get("path")).strip():
                     errors.append(f"anchors[{idx}].path 缺失或类型错误")
-                if not isinstance(anchor.get("value"), str):
-                    errors.append(f"anchors[{idx}].value 缺失或类型错误")
+                val = anchor.get("value")
+                if val is None:
+                    errors.append(f"anchors[{idx}].value 缺失")
+                elif not isinstance(val, (str, bool, int, float)):
+                    errors.append(f"anchors[{idx}].value 类型错误（需为标量 string/number/bool）")
 
         if direction == "HOLD":
             for k in ("entry_price", "take_profit", "stop_loss"):
@@ -813,6 +1029,7 @@ class MarketAnalyst:
                 # Keep this for anchor compatibility: model occasionally emits facts.youtube_radar.* anchors.
                 "youtube_radar": (context or {}).get("youtube_radar") if isinstance(context, dict) else {},
                 "intel_digest": (context or {}).get("intel_digest") if isinstance(context, dict) else {},
+                "account_snapshot": (context or {}).get("account_snapshot") if isinstance(context, dict) else {},
                 "data_quality": (context or {}).get("data_quality") if isinstance(context, dict) else {},
                 "input_budget_meta": (context or {}).get("input_budget_meta") if isinstance(context, dict) else {},
             }
@@ -1012,28 +1229,43 @@ class MarketAnalyst:
 
 
 
-def _extract_json(text: str) -> str | None:
-    """Try to extract a JSON object from text that may contain markdown fences."""
-    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+def _extract_think_and_json(text: str) -> tuple[str | None, str | None]:
+    """Try to extract a <think> block and a JSON object from text that may contain markdown fences."""
     text = text.strip()
+    think_content = ""
+    # Extract <think> content if present
+    think_match = re.search(r"<think>(.*?)</think>", text, flags=re.DOTALL)
+    if think_match:
+        think_content = think_match.group(1).strip()
+        text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+        
+    json_str = None
     if text.startswith("{"):
         obj = _extract_first_balanced_json_object(text, start_index=0)
         if obj:
-            return obj
-    match = re.search(r"```[a-zA-Z]*\s*\n?(.*?)\n?\s*```", text, re.DOTALL)
-    if match:
-        fenced = match.group(1).strip()
-        if fenced.startswith("{"):
-            obj = _extract_first_balanced_json_object(fenced, start_index=0)
+            json_str = obj
+    if not json_str:
+        match = re.search(r"```[a-zA-Z]*\s*\n?(.*?)\n?\s*```", text, re.DOTALL)
+        if match:
+            fenced = match.group(1).strip()
+            if fenced.startswith("{"):
+                obj = _extract_first_balanced_json_object(fenced, start_index=0)
+                if obj:
+                    json_str = obj
+            if not json_str:
+                json_str = fenced
+    if not json_str:
+        brace_start = text.find("{")
+        if brace_start != -1:
+            obj = _extract_first_balanced_json_object(text, start_index=brace_start)
             if obj:
-                return obj
-        return fenced
-    brace_start = text.find("{")
-    if brace_start != -1:
-        obj = _extract_first_balanced_json_object(text, start_index=brace_start)
-        if obj:
-            return obj
-    return None
+                json_str = obj
+                
+    return think_content if think_content else None, json_str
+
+
+def _extract_json(text: str) -> str | None:
+    return _extract_think_and_json(text)[1]
 
 
 

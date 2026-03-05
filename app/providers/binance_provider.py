@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import json
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from urllib.parse import urlencode
 
 import httpx
 import websockets
@@ -39,6 +43,153 @@ class BinanceProvider(ExchangeProvider):
         self.ws_base = settings.binance_ws_url.rstrip("/")
         self.futures_base = settings.binance_futures_url.rstrip("/")
         self._http_timeout = 15.0
+        self._time_offset_ms = 0
+
+    @staticmethod
+    def _ts_ms() -> int:
+        return int(time.time() * 1000)
+
+    @staticmethod
+    def _sign(secret: str, query: str) -> str:
+        return hmac.new(secret.encode("utf-8"), query.encode("utf-8"), hashlib.sha256).hexdigest()
+
+    def _ensure_api_credentials(self) -> tuple[str, str]:
+        api_key = (self.settings.binance_api_key or "").strip()
+        api_secret = (self.settings.binance_api_secret or "").strip()
+        if not api_key or not api_secret:
+            raise ValueError("BINANCE_API_KEY/BINANCE_API_SECRET are required for USER_DATA endpoints")
+        return api_key, api_secret
+
+    def _api_key_header(self) -> dict[str, str]:
+        api_key = (self.settings.binance_api_key or "").strip()
+        if not api_key:
+            raise ValueError("BINANCE_API_KEY is required for private endpoints")
+        return {"X-MBX-APIKEY": api_key}
+
+    async def _sync_server_time(self, base_url: str, *, client: httpx.AsyncClient | None = None) -> None:
+        path = "/fapi/v1/time" if "/fapi" in base_url or "fstream" in base_url else "/api/v3/time"
+        url = f"{base_url}{path}"
+        if client is not None:
+            resp = await client.get(url)
+            resp.raise_for_status()
+            data = resp.json()
+        else:
+            async with httpx.AsyncClient(timeout=self._http_timeout) as own_client:
+                resp = await own_client.get(url)
+                resp.raise_for_status()
+                data = resp.json()
+        server_time = int((data or {}).get("serverTime") or 0)
+        if server_time > 0:
+            self._time_offset_ms = server_time - self._ts_ms()
+
+    @staticmethod
+    def _parse_binance_error(response: httpx.Response | None) -> tuple[int | None, str]:
+        if response is None:
+            return None, ""
+        try:
+            payload = response.json()
+            if isinstance(payload, dict):
+                return int(payload.get("code")) if payload.get("code") is not None else None, str(payload.get("msg") or "")
+        except Exception:
+            pass
+        return None, response.text if response is not None else ""
+
+    @staticmethod
+    def _is_retryable_http_status(status_code: int) -> bool:
+        return status_code in {418, 429, 500, 502, 503, 504}
+
+    async def _signed_request(
+        self,
+        method: str,
+        base_url: str,
+        path: str,
+        params: dict[str, Any] | None = None,
+        *,
+        client: httpx.AsyncClient | None = None,
+    ) -> Any:
+        api_key, api_secret = self._ensure_api_credentials()
+        url = f"{base_url}{path}"
+        max_attempts = 4
+        attempt = 0
+        need_time_sync = self._time_offset_ms == 0
+
+        while True:
+            if need_time_sync:
+                try:
+                    await self._sync_server_time(base_url, client=client)
+                except Exception as exc:
+                    logger.warning("binance time sync failed before request: %s", exc)
+                need_time_sync = False
+
+            request_params = dict(params or {})
+            request_params.setdefault("timestamp", self._ts_ms() + self._time_offset_ms)
+            request_params.setdefault("recvWindow", self.settings.binance_recv_window)
+            canonical_items = sorted(request_params.items())
+            query = urlencode(canonical_items)
+            request_params = dict(canonical_items)
+            request_params["signature"] = self._sign(api_secret, query)
+            headers = {"X-MBX-APIKEY": api_key}
+
+            try:
+                if client is not None:
+                    resp = await client.request(method.upper(), url, params=request_params, headers=headers)
+                else:
+                    async with httpx.AsyncClient(timeout=self._http_timeout) as own_client:
+                        resp = await own_client.request(method.upper(), url, params=request_params, headers=headers)
+                resp.raise_for_status()
+                return resp.json() if resp.text else {}
+            except httpx.HTTPStatusError as exc:
+                status = exc.response.status_code
+                code, msg = self._parse_binance_error(exc.response)
+                # Binance -1021: timestamp drift. Re-sync and retry once quickly.
+                if code == -1021 and attempt < max_attempts - 1:
+                    await self._sync_server_time(base_url, client=client)
+                    attempt += 1
+                    continue
+                if self._is_retryable_http_status(status) and attempt < max_attempts - 1:
+                    backoff = min(8.0, (2 ** attempt) * 0.5)
+                    logger.warning("binance private request retry status=%s code=%s msg=%s", status, code, msg)
+                    await asyncio.sleep(backoff)
+                    attempt += 1
+                    continue
+                raise
+            except httpx.RequestError:
+                if attempt < max_attempts - 1:
+                    backoff = min(8.0, (2 ** attempt) * 0.5)
+                    await asyncio.sleep(backoff)
+                    attempt += 1
+                    continue
+                raise
+
+    async def _signed_get(
+        self,
+        base_url: str,
+        path: str,
+        params: dict[str, Any] | None = None,
+        *,
+        client: httpx.AsyncClient | None = None,
+    ) -> Any:
+        return await self._signed_request("GET", base_url, path, params=params, client=client)
+
+    async def _signed_post(
+        self,
+        base_url: str,
+        path: str,
+        params: dict[str, Any] | None = None,
+        *,
+        client: httpx.AsyncClient | None = None,
+    ) -> Any:
+        return await self._signed_request("POST", base_url, path, params=params, client=client)
+
+    async def _signed_put(
+        self,
+        base_url: str,
+        path: str,
+        params: dict[str, Any] | None = None,
+        *,
+        client: httpx.AsyncClient | None = None,
+    ) -> Any:
+        return await self._signed_request("PUT", base_url, path, params=params, client=client)
 
     @staticmethod
     def parse_ws_kline(payload: dict[str, Any]) -> Candle | None:
@@ -77,7 +228,7 @@ class BinanceProvider(ExchangeProvider):
 
     def _build_stream_url(self, symbols: list[str]) -> str:
         streams = [f"{symbol.lower()}@kline_1m" for symbol in symbols]
-        if self.settings.enable_miniticker:
+        if self.settings.enable_miniticker or getattr(self.settings, "anomaly_tick_flash_enabled", False):
             streams.extend(f"{symbol.lower()}@miniTicker" for symbol in symbols)
         stream_path = "/".join(streams)
         return f"{self.ws_base}?streams={stream_path}"
@@ -229,6 +380,108 @@ class BinanceProvider(ExchangeProvider):
         except Exception as exc:
             logger.warning("fetch_open_interest failed for %s: %s", symbol, exc)
             return None
+
+    async def get_margin_account(self, client: httpx.AsyncClient | None = None) -> dict[str, Any]:
+        return await self._signed_get(
+            self.rest_base,
+            "/sapi/v1/margin/account",
+            {},
+            client=client,
+        )
+
+    async def get_margin_trade_coeff(self, client: httpx.AsyncClient | None = None) -> dict[str, Any]:
+        return await self._signed_get(
+            self.rest_base,
+            "/sapi/v1/margin/tradeCoeff",
+            {},
+            client=client,
+        )
+
+    async def get_futures_account(self, client: httpx.AsyncClient | None = None) -> dict[str, Any]:
+        return await self._signed_get(
+            self.futures_base,
+            "/fapi/v2/account",
+            {},
+            client=client,
+        )
+
+    async def get_futures_balance(self, client: httpx.AsyncClient | None = None) -> list[dict[str, Any]]:
+        data = await self._signed_get(
+            self.futures_base,
+            "/fapi/v2/balance",
+            {},
+            client=client,
+        )
+        return data if isinstance(data, list) else []
+
+    async def get_futures_positions(
+        self,
+        client: httpx.AsyncClient | None = None,
+        symbol: str | None = None,
+    ) -> list[dict[str, Any]]:
+        params = {"symbol": symbol.upper()} if symbol else {}
+        data = await self._signed_get(
+            self.futures_base,
+            "/fapi/v3/positionRisk",
+            params,
+            client=client,
+        )
+        return data if isinstance(data, list) else []
+
+    async def create_futures_listen_key(self, client: httpx.AsyncClient | None = None) -> str:
+        headers = self._api_key_header()
+        url = f"{self.futures_base}/fapi/v1/listenKey"
+        response: dict[str, Any] = {}
+        for attempt in range(4):
+            try:
+                if client is not None:
+                    resp = await client.post(url, headers=headers)
+                else:
+                    async with httpx.AsyncClient(timeout=self._http_timeout) as own_client:
+                        resp = await own_client.post(url, headers=headers)
+                resp.raise_for_status()
+                response = resp.json()
+                break
+            except httpx.HTTPStatusError as exc:
+                if attempt >= 3 or not self._is_retryable_http_status(exc.response.status_code):
+                    raise
+                await asyncio.sleep(min(8.0, (2 ** attempt) * 0.5))
+        listen_key = str((response or {}).get("listenKey") or "").strip()
+        if not listen_key:
+            raise ValueError("Failed to create futures listenKey")
+        return listen_key
+
+    async def keepalive_futures_listen_key(self, listen_key: str, client: httpx.AsyncClient | None = None) -> None:
+        if not listen_key:
+            return
+        headers = self._api_key_header()
+        url = f"{self.futures_base}/fapi/v1/listenKey"
+        for attempt in range(4):
+            try:
+                if client is not None:
+                    resp = await client.put(url, params={"listenKey": listen_key}, headers=headers)
+                else:
+                    async with httpx.AsyncClient(timeout=self._http_timeout) as own_client:
+                        resp = await own_client.put(url, params={"listenKey": listen_key}, headers=headers)
+                resp.raise_for_status()
+                return
+            except httpx.HTTPStatusError as exc:
+                if attempt >= 3 or not self._is_retryable_http_status(exc.response.status_code):
+                    raise
+                await asyncio.sleep(min(8.0, (2 ** attempt) * 0.5))
+
+    async def consume_futures_user_stream(
+        self,
+        listen_key: str,
+        on_event,
+    ) -> None:
+        if not listen_key:
+            raise ValueError("listen_key is required")
+        ws_url = f"wss://fstream.binance.com/ws/{listen_key}"
+        async with websockets.connect(ws_url, ping_interval=20, ping_timeout=20, max_queue=1024) as ws:
+            async for raw_message in ws:
+                payload = json.loads(raw_message)
+                await on_event(payload)
 
 
 def _safe_float(value: Any) -> float | None:

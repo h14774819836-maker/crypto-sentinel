@@ -17,7 +17,9 @@ from app.ai.llm_runtime_reload import (
 from app.config import get_settings
 
 
-def test_signal_and_ack_file_roundtrip(tmp_path):
+def test_signal_and_ack_file_roundtrip(tmp_path, monkeypatch):
+    monkeypatch.setenv("LLM_HOT_RELOAD_USE_REDIS", "false")
+    get_settings.cache_clear()
     signal_file = tmp_path / "signals" / "llm_hot_reload_signal.json"
     ack_file = tmp_path / "signals" / "llm_hot_reload_ack.json"
 
@@ -78,6 +80,52 @@ def test_apply_llm_config_in_api_process_refreshes_module_settings(monkeypatch):
     views.settings = old_views_settings
     web_router.settings = old_web_router_settings
     api_telegram.settings = old_api_tg_settings
+
+
+def test_redis_publish_and_read_acks(monkeypatch):
+    """Test Redis backend: publish signal and read ACKs via mock."""
+    import json as _json
+
+    published: list[tuple[str, str]] = []
+    ack_store: dict[str, str] = {}
+
+    class MockRedis:
+        def publish(self, channel: str, message: str):
+            published.append((channel, message))
+
+        def hgetall(self, key: str):
+            return {k.encode(): v.encode() if isinstance(v, str) else v for k, v in ack_store.items()}
+
+        def hset(self, key: str, field: str, value: str):
+            ack_store[field] = value
+
+    def mock_from_url(url: str):
+        return MockRedis()
+
+    import redis as _redis_module
+    monkeypatch.setattr(_redis_module, "from_url", mock_from_url)
+    monkeypatch.setenv("LLM_HOT_RELOAD_USE_REDIS", "true")
+    get_settings.cache_clear()
+
+    from app.ai.llm_runtime_reload import (
+        _publish_llm_reload_signal_redis,
+        read_llm_reload_acks_redis,
+        write_llm_reload_ack_redis,
+    )
+
+    revision = _publish_llm_reload_signal_redis("redis://localhost:6379/0", source="pytest", reason="redis_test")
+    assert len(published) == 1
+    assert published[0][0] == "llm:reload"
+    payload = _json.loads(published[0][1])
+    assert payload["revision"] == revision
+    assert payload["source"] == "pytest"
+
+    write_llm_reload_ack_redis("redis://localhost:6379/0", "worker-1", revision, "ok", {"market": {"provider": "openrouter"}})
+    acks = read_llm_reload_acks_redis("redis://localhost:6379/0")
+    assert "worker-1" in acks
+    assert acks["worker-1"]["revision"] == revision
+    assert acks["worker-1"]["status"] == "ok"
+    assert acks["worker-1"]["details"]["market"]["provider"] == "openrouter"
 
 
 def test_refresh_llm_env_vars_from_dotenv_includes_nvidia_nim_key(tmp_path, monkeypatch):

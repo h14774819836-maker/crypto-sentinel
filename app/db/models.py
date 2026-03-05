@@ -11,6 +11,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    LargeBinary,
     String,
     Text,
     UniqueConstraint,
@@ -330,6 +331,75 @@ class FundingSnapshot(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
 
+class FuturesAccountSnapshot(Base):
+    __tablename__ = "futures_account_snapshots"
+    __table_args__ = (UniqueConstraint("ts", name="uq_futures_account_snapshots_ts"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True, nullable=False)
+    account_json: Mapped[dict | None] = mapped_column(JSON)
+    balance_json: Mapped[list | None] = mapped_column(JSON)
+    positions_json: Mapped[list | None] = mapped_column(JSON)
+    total_margin_balance: Mapped[float | None] = mapped_column(Float)
+    available_balance: Mapped[float | None] = mapped_column(Float)
+    total_maint_margin: Mapped[float | None] = mapped_column(Float)
+    btc_position_amt: Mapped[float | None] = mapped_column(Float)
+    btc_mark_price: Mapped[float | None] = mapped_column(Float)
+    btc_liquidation_price: Mapped[float | None] = mapped_column(Float)
+    btc_unrealized_pnl: Mapped[float | None] = mapped_column(Float)
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
+class MarginAccountSnapshot(Base):
+    __tablename__ = "margin_account_snapshots"
+    __table_args__ = (UniqueConstraint("ts", name="uq_margin_account_snapshots_ts"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True, nullable=False)
+    account_json: Mapped[dict | None] = mapped_column(JSON)
+    trade_coeff_json: Mapped[dict | None] = mapped_column(JSON)
+    margin_level: Mapped[float | None] = mapped_column(Float)
+    total_asset_of_btc: Mapped[float | None] = mapped_column(Float)
+    total_liability_of_btc: Mapped[float | None] = mapped_column(Float)
+    normal_bar: Mapped[float | None] = mapped_column(Float)
+    margin_call_bar: Mapped[float | None] = mapped_column(Float)
+    force_liquidation_bar: Mapped[float | None] = mapped_column(Float)
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
+class AccountStatsDaily(Base):
+    __tablename__ = "account_stats_daily"
+    __table_args__ = (UniqueConstraint("day_utc", name="uq_account_stats_daily_day_utc"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    day_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True, nullable=False)
+    equity_open: Mapped[float | None] = mapped_column(Float)
+    equity_high: Mapped[float | None] = mapped_column(Float)
+    equity_low: Mapped[float | None] = mapped_column(Float)
+    equity_close: Mapped[float | None] = mapped_column(Float)
+    sample_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_snapshot_ts: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+
+class AccountSnapshotRaw(Base):
+    __tablename__ = "account_snapshot_raw"
+    __table_args__ = (
+        UniqueConstraint("snapshot_type", "ts", name="uq_account_snapshot_raw_type_ts"),
+        Index("ix_account_snapshot_raw_ts_type", "ts", "snapshot_type"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    snapshot_type: Mapped[str] = mapped_column(String(16), index=True, nullable=False)  # futures|margin
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True, nullable=False)
+    payload_gzip: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    payload_size: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
 # ======== Intel / News ========
 
 
@@ -413,6 +483,10 @@ class YoutubeVideo(Base):
     analysis_last_error_type: Mapped[str | None] = mapped_column(String(64))
     analysis_last_error_code: Mapped[str | None] = mapped_column(String(64))
     analysis_last_error_message: Mapped[str | None] = mapped_column(Text)
+    # Explicit FSM (queryable status)
+    status: Mapped[str] = mapped_column(String(32), default="pending_subtitle", nullable=False, index=True)
+    status_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    asr_queued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
 

@@ -27,12 +27,14 @@ dependencies = [
   "youtube-transcript-api>=0.6.0",
   "yt-dlp>=2024.0.0",
   "faster-whisper>=1.0.0",
+  "redis>=5.0.0",
 ]
 
 [project.optional-dependencies]
 dev = [
   "pytest>=8.3.0",
-  "pytest-cov>=5.0.0"
+  "pytest-cov>=5.0.0",
+  "pytest-asyncio>=0.24.0"
 ]
 
 [project.scripts]

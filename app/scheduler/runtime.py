@@ -26,6 +26,10 @@ class WorkerRuntime:
     started_at: datetime
     version: str
     latest_prices: dict[str, float] = field(default_factory=dict)
+    tick_price_windows: dict[str, list[tuple[datetime, float]]] = field(default_factory=dict)
+    tick_flash_last_sent: dict[str, datetime] = field(default_factory=dict)
+    anomaly_diag_pending: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+    anomaly_diag_tasks: dict[str, asyncio.Task[Any]] = field(default_factory=dict)
     market_analyst: MarketAnalyst | None = None
     youtube_llm_provider: LLMProvider | None = None
     llm_reload_revision_applied: str = ""
@@ -35,4 +39,5 @@ class WorkerRuntime:
     sem_youtube: asyncio.Semaphore | None = None
     sem_binance: asyncio.Semaphore | None = None
     job_metrics: list[dict[str, Any]] = field(default_factory=list)
-
+    account_monitor_failed: bool = False
+    account_user_stream_failed: bool = False

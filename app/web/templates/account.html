@@ -1,0 +1,219 @@
+{% extends "base.html" %}
+{% set page_main_max = 'max-w-[1440px]' %}
+
+{% block title %}Crypto Sentinel - 账户监控{% endblock %}
+
+{% block content %}
+{% set page_badge_icon = 'wallet' %}
+{% set page_badge_text = '账户监控' %}
+{% set page_badge_i18n = 'account.badge' %}
+{% set page_badge_class = 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400' %}
+{% set page_title = '账户监控' %}
+{% set page_title_i18n = 'account.title' %}
+{% set page_subtitle = '合约余额、持仓风险与杠杆安全，一目了然。' %}
+{% set page_subtitle_i18n = 'account.subtitle' %}
+{% include "partials/page_header.html" %}
+
+<div class="grid grid-cols-1 xl:grid-cols-3 gap-6">
+  <section class="card glass-panel">
+    <div class="card-header bg-white/[0.02]">
+      <h3 class="card-title flex items-center gap-2">
+        <i data-lucide="piggy-bank" class="w-5 h-5 text-primary"></i>
+        <span data-i18n="account.futures_summary">合约账户汇总</span>
+      </h3>
+    </div>
+    <div class="p-5 space-y-3 text-sm">
+      <div class="flex justify-between"><span class="text-muted-foreground"
+          data-i18n="account.available_balance">可用余额</span><span id="fut-available">{{ futures_row.available_balance if
+          futures_row else "-" }}</span></div>
+      <div class="flex justify-between"><span class="text-muted-foreground"
+          data-i18n="account.total_maint_margin">维持保证金</span><span id="fut-maint">{{ futures_row.total_maint_margin if
+          futures_row else "-" }}</span></div>
+      <div class="flex justify-between"><span class="text-muted-foreground"
+          data-i18n="account.total_margin_balance">保证金总额</span><span id="fut-total">{{ futures_row.total_margin_balance
+          if futures_row else "-" }}</span></div>
+      <div class="text-xs text-muted-foreground pt-2"><span data-i18n="account.updated">更新时间</span>: <span
+          id="fut-updated">{{ futures_row.ts|bj_time if futures_row else "-" }}</span></div>
+    </div>
+  </section>
+
+  <section class="card glass-panel">
+    <div class="card-header bg-white/[0.02]">
+      <h3 class="card-title flex items-center gap-2">
+        <i data-lucide="crosshair" class="w-5 h-5 text-primary"></i>
+        <span>{{ watch_symbol }} <span data-i18n="account.position_title">持仓</span></span>
+      </h3>
+    </div>
+    <div class="p-5 space-y-3 text-sm">
+      <div class="flex justify-between"><span class="text-muted-foreground" data-i18n="account.position_amt">持仓数量</span>
+        <div><span id="pos-amt">{{ futures_row.btc_position_amt if futures_row else "-" }}</span> <span
+            class="text-xs text-muted-foreground">BTC</span></div>
+      </div>
+      <div class="flex justify-between"><span class="text-muted-foreground" data-i18n="account.mark_price">标记价格</span>
+        <div><span id="pos-mark">{{ futures_row.btc_mark_price if futures_row else "-" }}</span> <span
+            class="text-xs text-muted-foreground">USDT</span></div>
+      </div>
+      <div class="flex justify-between"><span class="text-muted-foreground"
+          data-i18n="account.liquidation_price">强平价格</span>
+        <div><span id="pos-liq">{{ futures_row.btc_liquidation_price if futures_row else "-" }}</span> <span
+            class="text-xs text-muted-foreground">USDT</span></div>
+      </div>
+      {% set pnl = futures_row.btc_unrealized_pnl|float if futures_row and futures_row.btc_unrealized_pnl else 0 %}
+      <div class="flex justify-between"><span class="text-muted-foreground"
+          data-i18n="account.unrealized_profit">浮动盈亏</span>
+        <div><span id="pos-pnl"
+            class="{{ 'text-emerald-500 font-medium' if pnl > 0 else 'text-red-500 font-medium' if pnl < 0 else '' }}">{{
+            futures_row.btc_unrealized_pnl if futures_row else "-" }}</span> <span
+            class="text-xs text-muted-foreground">USDT</span></div>
+      </div>
+      <div class="text-xs text-muted-foreground pt-2"><span data-i18n="account.updated">更新时间</span>: <span
+          id="pos-updated">{{ futures_row.ts|bj_time if futures_row else "-" }}</span></div>
+    </div>
+  </section>
+
+  <section class="card glass-panel">
+    <div class="card-header bg-white/[0.02]">
+      <h3 class="card-title flex items-center gap-2">
+        <i data-lucide="shield-alert" class="w-5 h-5 text-primary"></i>
+        <span data-i18n="account.margin_risk">杠杆风险</span>
+      </h3>
+    </div>
+    <div class="p-5 space-y-3 text-sm">
+      <div class="flex justify-between"><span class="text-muted-foreground"
+          data-i18n="account.margin_level">保证金率</span><span id="mar-level">{{ margin_row.margin_level if margin_row else
+          "-" }}</span></div>
+      <div class="flex justify-between"><span class="text-muted-foreground"
+          data-i18n="account.margin_call_bar">补仓线</span><span id="mar-call">{{ margin_row.margin_call_bar if margin_row
+          else "-" }}</span></div>
+      <div class="flex justify-between"><span class="text-muted-foreground"
+          data-i18n="account.force_liquidation_bar">强平线</span><span id="mar-force">{{ margin_row.force_liquidation_bar
+          if margin_row else "-" }}</span></div>
+      <div class="text-xs text-muted-foreground pt-2"><span data-i18n="account.updated">更新时间</span>: <span
+          id="mar-updated">{{ margin_row.ts|bj_time if margin_row else "-" }}</span></div>
+    </div>
+  </section>
+</div>
+
+<section class="card glass-panel mt-6">
+  <div class="card-header bg-white/[0.02]">
+    <h3 class="card-title flex items-center gap-2">
+      <i data-lucide="line-chart" class="w-5 h-5 text-primary"></i>
+      <span>账户权益曲线</span>
+    </h3>
+  </div>
+  <div class="p-5">
+    <div id="equity-chart" class="w-full h-[320px]"></div>
+    <div class="text-xs text-muted-foreground pt-3">
+      最近更新: <span id="equity-updated">-</span>
+    </div>
+  </div>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script
+  src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.2.1/dist/lightweight-charts.standalone.production.js"></script>
+<script>
+  function _fmt(v) {
+    if (v === null || v === undefined || v === "") return "-";
+    if (typeof v === "number") return Number(v).toFixed(6);
+    const n = Number(v);
+    return Number.isFinite(n) ? n.toFixed(6) : String(v);
+  }
+
+  let equityChart = null;
+  let equitySeries = null;
+
+  function _toNum(v) {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  }
+
+  function _initEquityChart() {
+    const container = document.getElementById("equity-chart");
+    if (!container || typeof LightweightCharts === "undefined") return;
+    if (equityChart) return;
+    equityChart = LightweightCharts.createChart(container, {
+      layout: { background: { color: "transparent" }, textColor: "#a6adbb" },
+      rightPriceScale: { borderVisible: false },
+      timeScale: { borderVisible: false, timeVisible: true, secondsVisible: false },
+      grid: {
+        vertLines: { color: "rgba(148,163,184,0.10)" },
+        horzLines: { color: "rgba(148,163,184,0.10)" },
+      },
+      crosshair: { mode: 1 },
+    });
+    equitySeries = equityChart.addAreaSeries({
+      lineColor: '#10b981',
+      topColor: 'rgba(16, 185, 129, 0.4)',
+      bottomColor: 'rgba(16, 185, 129, 0.0)',
+      lineWidth: 2,
+    });
+    const resize = () => {
+      if (equityChart) {
+        equityChart.applyOptions({ width: container.clientWidth, height: 320 });
+      }
+    };
+    resize();
+    window.addEventListener("resize", resize);
+  }
+
+  async function refreshEquityCurve() {
+    try {
+      if (!equityChart || !equitySeries) _initEquityChart();
+      if (!equitySeries) return;
+      const resp = await fetch("/api/account/equity-curve?days=180");
+      const data = await resp.json();
+      const items = Array.isArray(data.items) ? data.items : [];
+      const seriesData = items
+        .map((it) => ({
+          time: Number(it.ts),
+          value: _toNum(it.close),
+        }))
+        .filter((it) => Number.isFinite(it.time) && it.value !== null);
+      equitySeries.setData(seriesData);
+      if (seriesData.length) {
+        document.getElementById("equity-updated").textContent = new Date(seriesData[seriesData.length - 1].time * 1000).toISOString();
+      }
+    } catch (_) { }
+  }
+
+  async function refreshAccount() {
+    try {
+      const [futResp, marResp] = await Promise.all([
+        fetch("/api/account/futures"),
+        fetch("/api/account/margin"),
+      ]);
+      const fut = await futResp.json();
+      const mar = await marResp.json();
+      if (fut && fut.item) {
+        document.getElementById("fut-available").textContent = _fmt(fut.item.available_balance);
+        document.getElementById("fut-maint").textContent = _fmt(fut.item.total_maint_margin);
+        document.getElementById("fut-total").textContent = _fmt(fut.item.total_margin_balance);
+        document.getElementById("pos-amt").textContent = _fmt(fut.item.btc_position_amt);
+        document.getElementById("pos-mark").textContent = _fmt(fut.item.btc_mark_price);
+        document.getElementById("pos-liq").textContent = _fmt(fut.item.btc_liquidation_price);
+        const pnlEl = document.getElementById("pos-pnl");
+        const pnl = _toNum(fut.item.btc_unrealized_pnl);
+        pnlEl.textContent = _fmt(fut.item.btc_unrealized_pnl);
+        pnlEl.className = pnl > 0 ? "text-emerald-500 font-medium" : (pnl < 0 ? "text-red-500 font-medium" : "");
+        const ts = fut.item.ts || "-";
+        document.getElementById("fut-updated").textContent = ts;
+        document.getElementById("pos-updated").textContent = ts;
+      }
+      if (mar && mar.item) {
+        document.getElementById("mar-level").textContent = _fmt(mar.item.margin_level);
+        document.getElementById("mar-call").textContent = _fmt(mar.item.margin_call_bar);
+        document.getElementById("mar-force").textContent = _fmt(mar.item.force_liquidation_bar);
+        document.getElementById("mar-updated").textContent = mar.item.ts || "-";
+      }
+    } catch (_) { }
+  }
+
+  _initEquityChart();
+  refreshEquityCurve();
+  refreshAccount();
+  setInterval(refreshEquityCurve, 60000);
+  setInterval(refreshAccount, 10000);
+</script>
+{% endblock %}

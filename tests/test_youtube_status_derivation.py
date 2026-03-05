@@ -1,10 +1,10 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
-import app.web.views as views
-from app.web.views import _derive_youtube_statuses
+from app.web import youtube_helpers as views
+from app.web.youtube_helpers import _derive_youtube_statuses
 
 
 def _video(**kwargs):
@@ -136,6 +136,7 @@ def test_status_notes_are_clean_and_stable_for_common_states():
             _video(
                 transcript_text="hello",
                 needs_asr=False,
+                status="analyzing",
                 analysis_runtime_status="running",
                 analysis_stage="llm_request",
                 analysis_started_at=now - timedelta(seconds=15),
@@ -143,12 +144,13 @@ def test_status_notes_are_clean_and_stable_for_common_states():
             ),
             None,
             "running",
-            "Analyzing - llm_request",
+            "正在分析 - llm_request",
         ),
         (
             _video(
                 transcript_text="hello",
                 needs_asr=False,
+                status="analyzing",
                 analysis_runtime_status="queued",
                 analysis_stage="queued",
                 analysis_started_at=now - timedelta(seconds=15),
@@ -156,10 +158,10 @@ def test_status_notes_are_clean_and_stable_for_common_states():
             ),
             None,
             "queued",
-            "Queued for AI analysis",
+            "排队等待 AI 分析",
         ),
         (
-            _video(transcript_text="hello", needs_asr=False),
+            _video(transcript_text="hello", needs_asr=False, status="failed"),
             {
                 "vta_version": "1.0",
                 "provenance": {
@@ -169,31 +171,31 @@ def test_status_notes_are_clean_and_stable_for_common_states():
                 },
             },
             "failed_paused",
-            "AI analysis failed; manual retry required",
+            "AI 分析失败；需要手动重试",
         ),
         (
-            _video(transcript_text=None, needs_asr=True, asr_processed_at=now - timedelta(minutes=2), last_error="boom"),
+            _video(transcript_text=None, needs_asr=True, status="asr_failed", asr_processed_at=now - timedelta(minutes=2), last_error="boom"),
             None,
             "pending",
-            "ASR failed; manual retry required",
+            "ASR 失败；需要手动重试",
         ),
         (
-            _video(transcript_text=None, needs_asr=True, asr_processed_at=None, last_error=None),
+            _video(transcript_text=None, needs_asr=True, status="queued_asr", asr_processed_at=None, last_error=None),
             None,
             "pending",
-            "ASR queued",
+            "ASR 排队中",
         ),
         (
-            _video(transcript_text=None, needs_asr=False),
+            _video(transcript_text=None, needs_asr=False, status="pending_subtitle"),
             None,
             "pending",
-            "Waiting subtitles",
+            "正在等待字幕",
         ),
         (
-            _video(transcript_text="hello", needs_asr=False, analysis_runtime_status=None),
+            _video(transcript_text="hello", needs_asr=False, status="pending_analysis", analysis_runtime_status=None),
             None,
             "pending",
-            "Transcript ready, pending AI",
+            "文稿已就绪，等待 AI 分析",
         ),
     ]
 

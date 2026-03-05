@@ -1,7 +1,7 @@
 # Crypto Sentinel 系统架构与协作分析报告
 
-> 文档版本：`v2.2`  
-> 更新时间：`2026-03-03`  
+> 文档版本：`v2.3`  
+> 更新时间：`2026-03-04`  
 > 生成口径：基于当前仓库代码实现（As-Is），并补充建议演进方向（To-Be）  
 > 适用范围：`crypto_sentinel` 单体代码库（API + Worker 双进程协作）
 
@@ -31,10 +31,11 @@
 ## 摘要
 
 - `Crypto Sentinel` 代码形态是单体仓库，但运行态为 `CLI 编排 + API 进程 + Worker 进程 + 共享数据库` 的协作系统。
-- 前端为 `FastAPI + Jinja2 模板 + 原生 JavaScript + SSE` 的服务端渲染方案，覆盖市场总览、告警中心、YouTube 观点与 LLM 调试。
+- 前端为 `FastAPI + Jinja2 模板 + 原生 JavaScript + SSE` 的服务端渲染方案，覆盖市场总览、告警中心、YouTube 观点、策略回放与账户监控。
 - 核心技术栈：`FastAPI/Uvicorn`、`APScheduler`、`SQLAlchemy/Alembic`、`httpx/websockets`、`pandas/numpy`、`OpenAI-compatible LLM SDK`、`Pydantic Settings`。
 - 主业务链路包含：行情采集/聚合 → 指标计算 → 异常检测/告警 → AI 市场分析 → Telegram 推送；YouTube 链路含视频发现 → 字幕/ASR → VTA 洞察 → 共识 → 注入 AI 上下文；Intel 链路覆盖 RSS 情报采集 → 关键词/实体标注 → 风险温度摘要 → 前端看板。
-- 跨进程协作依赖数据库与 LLM 热更新的 signal/ack 文件协议；运维观测覆盖 `llm_calls`、`ai_analysis_failures` 与 `job_metrics` 文件快照。
+- 策略回放链路包含 `strategy_decisions`、评估回放、得分与特征统计；账户监控链路通过期货/杠杆账户快照落库与 UI 展示。
+- 跨进程协作依赖数据库与 LLM 热更新（Redis Pub/Sub 或 signal/ack 文件协议）；运维观测覆盖 `llm_calls`、`ai_analysis_failures` 与 `job_metrics` 文件快照。
 
 ## 总体架构与技术栈
 
@@ -109,7 +110,7 @@
 - API 负责页面渲染、管理接口、手动触发、SSE 流。
 - Worker 负责行情订阅、周期任务、外部轮询、告警推送。
 - Intel RSS 采集与摘要生成在 Worker 内以定时任务运行，结果提供给 API 展示与 AI 上下文。
-- 两进程通过共享数据库和 LLM 热更新文件信号协作。
+- 两进程通过共享数据库和 LLM 热更新（Redis Pub/Sub 或文件信号）协作。
 
 ### 风险与边界
 
@@ -126,7 +127,7 @@
 
 ### 系统总体架构图（System Architecture）
 
-图示：当前运行态的核心组件、外部依赖、共享数据库与 LLM 热更新文件协作链路。
+图示：当前运行态的核心组件、外部依赖、共享数据库与 LLM 热更新协作链路。
 
 ```mermaid
 flowchart LR
@@ -139,7 +140,7 @@ flowchart LR
         CLI["CLI Orchestrator (`app/cli.py`)"]
         API["FastAPI API (`app.main`)"]
         Worker["Worker (`app.worker.main`)"]
-        Signal["LLM signal/ack JSON (`data/*.json`)"]
+        Signal["LLM Redis Pub/Sub 或 signal/ack JSON (`data/*.json`)"]
     end
 
     subgraph Data["Data Layer"]
@@ -160,6 +161,7 @@ flowchart LR
     CLI --> Worker
 
     Browser -->|HTTP HTML/JSON/SSE| API
+    Browser -->|Kline WS| BWS
     TGUser -->|chat| TGAPI
 
     API --> DB
@@ -218,8 +220,11 @@ tests/              # pytest 测试
 - `app/web/templates/intel.html`
 - `app/web/templates/youtube.html`
 - `app/web/templates/llm_debug.html`
+- `app/web/templates/strategy.html`
+- `app/web/templates/account.html`
 - 样式：
 - `app/web/static/styles.css`
+- `app/web/static/strategy.js`
 - Tailwind CDN（模板内加载）
 - 图标/字体：
 - Lucide CDN
@@ -232,6 +237,7 @@ tests/              # pytest 测试
 - 交互：浏览器使用原生 `fetch` 调用 JSON API。
 - 长任务：使用 `EventSource` 消费 `SSE`（AI 分析流、ASR 进度）。
 - 部分 UI 刷新采用“重新抓取页面 HTML 后局部替换”的策略（`overview.html`）。
+- 策略回放页面使用 `lightweight-charts` 绘制 K 线，优先通过浏览器直连 Binance WS 增量刷新，失败则回退到 `/api/ohlcv` 的增量轮询。
 
 ### 关键代码路径/模块
 
@@ -307,6 +313,7 @@ sequenceDiagram
 - 主要路由模块：
 - `app/web/views.py`（页面 + 大部分 API）
 - `app/web/api_telegram.py`（Telegram Webhook）
+- `app/web/routes/*`（路由拆分与预留扩展）
 
 ### 关键代码路径/模块
 
@@ -323,11 +330,20 @@ sequenceDiagram
 | 页面 | GET | `/intel` | HTML | Intel 情报中心 |
 | 页面 | GET | `/youtube` | HTML | YouTube 管理与分析页 |
 | 页面 | GET | `/llm` | HTML | LLM 调试页 |
+| 页面 | GET | `/strategy` | HTML | 策略回放与研究 |
+| 页面 | GET | `/account` | HTML | 账户监控 |
 | 核心 | GET | `/api/market` | JSON | 市场快照 |
 | 核心 | GET | `/api/alerts` | JSON | 告警列表 |
 | 核心 | GET | `/api/health` | JSON | API/DB/Worker 健康状态 |
 | 核心 | GET | `/api/models` | JSON | LLM 模型列表 |
 | 核心 | GET | `/api/ai-signals` | JSON | AI 信号列表 |
+| 核心 | GET | `/api/ohlcv` | JSON | K 线与历史窗口 |
+| 核心 | GET | `/api/account/futures` | JSON | 合约账户快照 |
+| 核心 | GET | `/api/account/margin` | JSON | 杠杆账户快照 |
+| 策略 | GET | `/api/strategy/decisions` | JSON | 策略决策列表（raw/densified） |
+| 策略 | GET | `/api/strategy/decisions/{decision_id}` | JSON | 决策详情 |
+| 策略 | GET | `/api/strategy/scores` | JSON | 策略评分窗口 |
+| 策略 | GET | `/api/strategy/feature-stats` | JSON | 策略特征统计 |
 | Intel | GET | `/api/intel/news` | JSON | Intel 新闻列表 |
 | Intel | GET | `/api/intel/digest` | JSON | Intel 摘要与风险温度 |
 | AI | POST | `/api/ai-analyze` | JSON | 手动触发 AI 分析（含 dry_run） |
@@ -383,35 +399,38 @@ sequenceDiagram
 |---|---|---|---|
 | Browser -> API | HTTP | HTML / JSON | `app/web/views.py` |
 | Browser -> API | SSE | `text/event-stream` | `/api/ai-analyze/stream` 等 |
+| Browser -> Binance | WebSocket | JSON | `app/web/static/strategy.js`（K 线实时更新） |
 | Worker -> Binance | WebSocket | JSON | `app/providers/binance_provider.py` |
 | API/Worker -> 外部系统 | HTTPS | JSON / XML / HTML | `httpx` 调用 |
 | Telegram -> API | HTTPS Webhook | JSON | `app/web/api_telegram.py` |
 | Worker -> Telegram | HTTPS Polling/API | JSON | `app/alerts/telegram_poller.py`, `app/alerts/telegram.py` |
-| API <-> Worker | 文件协议 | JSON signal/ack | `app/ai/llm_runtime_reload.py`, `app/worker/llm_hot_reload.py` |
+| API <-> Worker | Redis Pub/Sub（默认）/ 文件协议（回退） | `llm:reload` 事件 / JSON signal/ack | `app/ai/llm_runtime_reload.py`, `app/worker/llm_hot_reload.py` |
 | API/Worker <-> DB | SQLAlchemy | ORM/SQL | `app/db/*` |
 
 ### 关键代码路径/模块
 
 - SSE：`app/web/views.py`
 - Binance WS：`app/providers/binance_provider.py`
+- 前端 WS：`app/web/static/strategy.js`（Browser 直连 Binance WS + 自动回退轮询）
 - Telegram Webhook/Polling：`app/web/api_telegram.py`, `app/alerts/telegram_poller.py`
-- LLM 热更新文件协作：`app/ai/llm_runtime_reload.py`, `app/worker/llm_hot_reload.py`
+- LLM 热更新：`app/ai/llm_runtime_reload.py`, `app/worker/llm_hot_reload.py`（Redis Pub/Sub 或文件协议）
 
 ### 数据/控制流
 
 - 前端长任务通过 SSE 获取 token/chunk/阶段性进度。
 - Worker 行情采集使用 Binance WS，补数/多周期同步使用 REST。
-- API 与 Worker 的 LLM 热更新采用“signal -> heartbeat 应用 -> ack”的最终一致机制。
+- 策略回放页前端优先使用 Binance WS 推送 K 线，异常时回退 `/api/ohlcv` 增量刷新。
+- API 与 Worker 的 LLM 热更新：**Redis 模式**（默认）采用 `llm:reload` Pub/Sub 事件，Worker 订阅后实时应用并写 ACK 到 Redis；**文件模式**（`LLM_HOT_RELOAD_USE_REDIS=false`）采用 signal -> heartbeat 轮询 -> ack。
 
 ### 风险与边界
 
 - SSE 缺少统一的断连取消策略。
-- 文件协议适用于单机/共享卷，不适合多副本 Worker。
+- 文件协议（回退模式）适用于单机/共享卷，不适合多副本 Worker。
 
 ### 目标方案（如适用）
 
 - 保留 SSE 用于运维型 UI（足够轻量）。
-- 多实例部署时改用 DB 表或消息队列传递热更新事件。
+- 多 Worker 部署使用 Redis 模式（默认）；文件模式仅用于无 Redis 的单 Worker 场景。
 
 ## 数据库设计与数据流
 
@@ -436,6 +455,13 @@ sequenceDiagram
 | 告警状态机 | `anomaly_state` | 告警状态持久化（hit/cooldown/active） |
 | 资金费率 | `funding_snapshots` | Funding/OI 快照 |
 | AI 信号 | `ai_signals` | LLM 信号与分析 JSON |
+| 策略 | `strategy_decisions` | 策略决策与回放索引 |
+| 策略 | `decision_executions` | 回放执行与填单结果 |
+| 策略 | `decision_evals` | 回放评估结果（TP/SL/OUTCOME） |
+| 策略 | `strategy_scores` | 评分窗口统计 |
+| 策略 | `strategy_feature_stats` | 特征分桶统计 |
+| 账户监控 | `futures_account_snapshots` | 合约账户快照 |
+| 账户监控 | `margin_account_snapshots` | 杠杆账户快照 |
 | Worker 状态 | `worker_status` | 心跳/版本/运行状态 |
 | Intel | `news_items` | 新闻条目、标签、风险评分 |
 | Intel | `intel_digest_cache` | Intel 摘要与风险温度缓存 |
@@ -456,10 +482,55 @@ sequenceDiagram
 | `ohlcv` | `symbol`, `timeframe`, `ts`, `open/high/low/close`, `volume` | K 线基础数据 |
 | `market_metrics` | `symbol`, `timeframe`, `ts`, `rsi_14`, `macd_hist`, `atr_14`, `bb_bandwidth`, `ema_ribbon_trend` | 指标结果 |
 | `ai_signals` | `symbol`, `ts`, `direction`, `entry_price`, `stop_loss`, `take_profit`, `analysis_json` | AI 信号落库 |
+| `strategy_decisions` | `symbol`, `decision_ts`, `manifest_id`, `position_side`, `entry_price` | 策略决策主表 |
+| `decision_evals` | `decision_id`, `tp_hit`, `sl_hit`, `outcome_raw`, `r_multiple_raw` | 回放评估结果 |
+| `strategy_scores` | `manifest_id`, `window_start_ts`, `win_rate`, `avg_r`, `split_type` | 策略评分窗口 |
+| `strategy_feature_stats` | `manifest_id`, `feature_key`, `bucket_key`, `win_rate` | 特征统计分桶 |
+| `futures_account_snapshots` | `ts`, `available_balance`, `btc_position_amt`, `btc_mark_price` | 合约账户快照 |
+| `margin_account_snapshots` | `ts`, `margin_level`, `margin_call_bar`, `force_liquidation_bar` | 杠杆账户快照 |
 | `alert_events` | `event_uid`, `symbol`, `ts`, `alert_type`, `severity`, `reason` | 告警事件 |
 | `news_items` | `ts_utc`, `source`, `category`, `title`, `url`, `severity`, `topics_json` | Intel 新闻条目 |
 | `intel_digest_cache` | `symbol`, `lookback_hours`, `digest_json`, `created_at` | Intel 摘要缓存 |
 | `youtube_videos` | `video_id`, `channel_id`, `published_at`, `transcript_text`, `analysis_runtime_*` | 视频与分析状态 |
+
+### 表结构变更视图（以 ER 图替代截图）
+
+```mermaid
+erDiagram
+    STRATEGY_DECISIONS ||--o{ DECISION_EVALS : evaluates
+    STRATEGY_DECISIONS ||--o{ DECISION_EXECUTIONS : executes
+    STRATEGY_DECISIONS ||--o{ STRATEGY_SCORES : aggregates
+    STRATEGY_DECISIONS ||--o{ STRATEGY_FEATURE_STATS : bucketizes
+
+    STRATEGY_DECISIONS {
+      string manifest_id
+      int decision_ts
+      string symbol
+      string position_side
+      float entry_price
+    }
+    DECISION_EVALS {
+      int decision_id
+      bool tp_hit
+      bool sl_hit
+      string outcome_raw
+    }
+    DECISION_EXECUTIONS {
+      int decision_id
+      float fill_price
+      float fee
+    }
+    STRATEGY_SCORES {
+      string manifest_id
+      int window_start_ts
+      float win_rate
+    }
+    STRATEGY_FEATURE_STATS {
+      string manifest_id
+      string feature_key
+      string bucket_key
+    }
+```
 
 ### 数据/控制流
 
@@ -467,6 +538,12 @@ sequenceDiagram
 - Binance -> `ohlcv` -> 聚合 -> `market_metrics` -> `alert_events` / `anomaly_state`
 - AI 分析：
 - `ohlcv` + `market_metrics` + `funding_snapshots` + `alert_events` + `youtube_consensus` -> `ai_signals`
+- AI 原始载荷：
+- `ai_signals.blob_ref` 指向 `data/blobs` 的压缩 JSON（`app/storage/blobs.py`）
+- 策略回放：
+- `ai_signals` -> `strategy_decisions` -> `decision_evals` -> `strategy_scores` / `strategy_feature_stats`
+- 账户监控：
+- Binance 账户接口 -> `futures_account_snapshots` / `margin_account_snapshots`
 - YouTube 分析：
 - `youtube_channels` -> `youtube_videos` -> transcript/ASR -> `youtube_insights` -> `youtube_consensus`
 - Intel 情报：
@@ -499,6 +576,10 @@ flowchart TD
     YTCons["youtube_consensus"] --> AICTX
     IntelDigest["intel_digest_cache"] --> AICTX
     AICTX --> AISig["ai_signals"]
+    AISig --> StratDec["strategy_decisions"]
+    StratDec --> StratEval["decision_evals"]
+    StratEval --> StratScore["strategy_scores"]
+    StratEval --> StratFeat["strategy_feature_stats"]
 
     Channels["youtube_channels"] --> Videos["youtube_videos"]
     YTData["YouTube RSS/CC/ASR"] --> Videos
@@ -507,6 +588,9 @@ flowchart TD
 
     IntelFeeds["RSS Feeds"] --> NewsItems["news_items"]
     NewsItems --> IntelDigest
+
+    Binance["Binance WS/REST"] --> FutSnap["futures_account_snapshots"]
+    Binance --> MarSnap["margin_account_snapshots"]
 
     LLMCalls["llm_calls"]:::obs
     WorkerStatus["worker_status"]:::obs
@@ -569,9 +653,13 @@ flowchart TD
 | `anomaly_job` | interval | 异常评分、状态机、推送 | 总是启用 |
 | `multi_tf_sync_job` | interval | 1h/4h 同步与指标 | 总是启用 |
 | `funding_rate_job` | interval | Funding/OI 快照同步 | 总是启用 |
+| `account_monitor_job` | interval | 合约/杠杆账户快照与风险告警 | `account_monitor_enabled` |
 | `intel_news_job` | interval | Intel RSS 新闻采集 | `intel_enabled` |
 | `intel_digest_job` | interval | Intel 摘要与风险温度生成 | `intel_enabled` |
 | `ai_analysis_job` | interval | 定时 AI 市场分析 | LLM 启用 |
+| `strategy_eval_job` | interval | 策略回放评估 | 总是启用 |
+| `strategy_scores_job` | interval | 策略评分与统计 | 总是启用 |
+| `strategy_research_job` | interval | 策略研究窗口刷新 | 总是启用 |
 | `youtube_sync_job` | interval | 视频发现/字幕抓取 | `youtube_enabled` |
 | `youtube_analyze_job` | interval | 视频 AI 分析/共识 | `youtube_enabled` |
 | `youtube_asr_backfill_job` | interval | 本地 ASR 补录 | `youtube_enabled && asr_enabled` |
@@ -723,12 +811,39 @@ flowchart TD
 #### 现状实现
 - `/api/llm/config` 修改 `.env` 中 LLM 配置（`app/web/views.py`）
 - API 进程即时刷新配置引用（`app/ai/llm_runtime_reload.py`）
-- 写 signal JSON；Worker 在 `heartbeat_job` 内应用并写 ack（`app/worker/llm_hot_reload.py`）
+- Redis 模式：API 发布 `llm:reload` 事件；Worker 订阅后实时应用并写 ACK 到 Redis。文件模式：写 signal JSON；Worker 在 `heartbeat_job` 内应用并写 ack（`app/worker/llm_hot_reload.py`）
 - LLM Debug 页面展示模型目录/分层与运行状态，并支持查看 `/api/llm/calls` 与 `/api/llm/failures`
 
 #### 风险与边界
-- 单机实用，但不适合多副本 Worker。
+- Redis 模式支持多 Worker；文件模式单机实用，不适合多副本 Worker。
 - 管理接口未鉴权时存在高风险。
+
+### 9. 策略回放与研究
+
+#### 现状实现
+- AI 信号落库后，`strategy_decisions` 记录核心决策参数（`app/db/repository.py`, `app/strategy/decision_writer.py`）
+- `build_manifest_id()` 生成策略配置哈希，关联 `manifest_id` 便于回放与评分对齐（`app/strategy/manifest.py`）
+- 回放评估使用 1m K 线窗口模拟成交/止盈止损，并写入 `decision_evals` 与 `decision_executions`（`app/scheduler/jobs.py`）
+- 评分与特征统计输出 `strategy_scores`、`strategy_feature_stats`，用于研究窗口与分桶评估（`app/scheduler/jobs.py`）
+- 前端策略回放页 `strategy.html` + `strategy.js` 使用 `lightweight-charts` 绘制 K 线，优先由浏览器直连 Binance WS 推送，失败时回退到 `/api/ohlcv` 增量拉取
+- K 线增量逻辑：`loadLatestOhlcvIncremental()` 以“最后一根 + 时间窗”补拉，并以 merge + trim 方式维持上限
+- 交互与性能优化：range 变更去抖、密度模式压缩（densified），Auto Refresh 每 3 秒刷新最新窗口
+
+#### 风险与边界
+- 评估依赖 1m K 线的完整性与时序一致性，缺口会影响评分稳定性。
+- 策略决策与 AI 信号的字段映射仍偏紧耦合，后续需要版本化治理。
+- Browser 直连 WS 对网络环境敏感，需保障 `BINANCE_WS_URL` 可访问；CDN/WS 失败时依赖 REST 回退的及时性。
+
+### 10. 账户监控
+
+#### 现状实现
+- `account_monitor_job` 通过 Binance 签名接口拉取合约/杠杆账户信息并写入快照表（`app/scheduler/jobs.py`）
+- `/account` 页面展示账户汇总与风险指标；前端每 10 秒刷新 `/api/account/futures` 与 `/api/account/margin`
+- 低余额与强平距离触发 Telegram 告警（`ACCOUNT_ALERT_*`）
+
+#### 风险与边界
+- 需要有效 `BINANCE_API_KEY/SECRET` 且具备期货权限与 IP 白名单，否则会出现 401。
+- 账户数据属于敏感信息，生产环境需开启鉴权与访问隔离。
 
 ## 关键代码路径时序分析
 
@@ -773,7 +888,37 @@ sequenceDiagram
 - 行情摄取、指标计算、异常检测是阶段式松耦合流水线。
 - 告警落库与推送分离，有利于幂等与可追溯。
 
-### 2. Worker 定时 AI 分析链路（`ai_analysis_job`）
+### 2. 策略回放 K 线实时链路（Browser WS + REST 回退）
+
+图示：策略回放页直连 Binance WS 更新 K 线，失败时回退增量 REST。
+
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant B as Browser (`strategy.html`)
+    participant WS as Binance WS
+    participant API as FastAPI (`/api/ohlcv`)
+    participant DB as DB
+
+    U->>B: Open /strategy
+    B->>API: GET /api/ohlcv (init range)
+    API->>DB: query ohlcv
+    API-->>B: ohlcv items
+    B->>WS: WebSocket subscribe kline
+    WS-->>B: kline push
+    alt ws error or timeout
+        B->>API: GET /api/ohlcv (incremental)
+        API->>DB: query delta window
+        API-->>B: ohlcv delta
+    end
+    B->>B: merge + trim + render
+```
+
+简要解读：
+- 前端优先走 WS，确保实时更新；WS 异常时回退到增量拉取保证稳定性。
+- 增量合并使用时间戳去重，避免重复或乱序。
+
+### 3. Worker 定时 AI 分析链路（`ai_analysis_job`）
 
 图示：定时 AI 市场分析从上下文构建到信号落库与推送。
 
@@ -806,7 +951,7 @@ sequenceDiagram
 简要解读：
 - 手动 AI 与定时 AI 共用 `MarketAnalyst`，差异主要在触发方式与交互输出（SSE vs 后台任务）。
 
-### 3. YouTube 处理链路（sync -> ASR -> analyze -> consensus）
+### 4. YouTube 处理链路（sync -> ASR -> analyze -> consensus）
 
 图示：YouTube 数据从发现视频到形成共识的多阶段流水线。
 
@@ -863,7 +1008,7 @@ sequenceDiagram
 - 该链路是多阶段异步流水线，允许局部失败停留并人工重试。
 - 视频“状态”由 `youtube_videos + youtube_insights` 联合推导，而非单字段状态机。
 
-### 4. Intel 情报链路（RSS -> Digest -> UI）
+### 5. Intel 情报链路（RSS -> Digest -> UI）
 
 图示：Intel 情报从 RSS 拉取、结构化标注、摘要生成到前端展示。
 
@@ -937,7 +1082,7 @@ sequenceDiagram
 
 简要解读：
 - 热更新是最终一致，生效延迟取决于 `heartbeat_job` 周期。
-- 单机方案简洁，但多实例需要中心化事件分发。
+- Redis 模式支持多实例；文件模式单机简洁。
 
 ### 6. Telegram 入站协作链路（Webhook / Polling -> Dispatcher -> Agent）
 
@@ -1048,10 +1193,20 @@ stateDiagram-v2
 - 配置集中在 `.env` 与 `app/config.py`
 - 默认 DB：`SQLite`（`DATABASE_URL=sqlite:///./data/crypto_sentinel.db`）
 - 本地启动：
-- `scripts/start.ps1`, `start.sh`, `start.bat`
+- `run.bat`, `run.ps1`, `scripts/start.ps1`, `start.sh`, `start.bat`
 - `python -m app.cli up ...`
 - 容器启动：
 - `docker-compose.yml`（`db`, `api`, `worker`）
+
+#### 近期启动变更
+- `run.bat` 统一执行 `alembic upgrade head` 后再启动 `app.cli up --no-db-init`，减少运行期 `create_all` 分歧。
+
+#### 关键配置项（新增/近期扩展）
+- 账户监控：`ACCOUNT_MONITOR_ENABLED`、`ACCOUNT_MONITOR_SECONDS`、`ACCOUNT_WATCH_SYMBOL`
+- 账户快照与告警：`ACCOUNT_ALERT_*`、`ACCOUNT_SNAPSHOT_RETENTION_DAYS`
+- 策略评估：`STRATEGY_EVAL_REPLAY_TF`、`STRATEGY_EVAL_JOB_SECONDS`、`STRATEGY_SCORES_JOB_SECONDS`
+- 市场 AI 日志：`MARKET_AI_LOG_LEVEL`、`MARKET_AI_LOG_VERBOSE`、`MARKET_AI_LOG_BACKUP_COUNT`
+- Binance WS：`BINANCE_WS_URL`（前端策略回放与行情图表直连）
 
 #### 环境能力现状
 - `dev/local`：可用
@@ -1082,6 +1237,7 @@ stateDiagram-v2
 #### 灰度发布与回滚（建议）
 - 灰度：按符号列表或环境标签切流，先灰度 Worker 再灰度 API。
 - 回滚：保留前一版本镜像 + DB 迁移回退预案（优先向前兼容）。
+- 策略回放 WS 灰度：先在 Test/Stage 打开 `BINANCE_WS_URL`，异常时回退为空或切换到稳定节点。
 
 #### 资源配额（建议）
 - 为 Worker 设置 CPU/内存限额，避免 ASR/AI 任务挤占 API。
@@ -1120,7 +1276,8 @@ stateDiagram-v2
 
 ### 日志规范
 - logging 统一格式：`%(asctime)s %(levelname)s [%(name)s] %(message)s`
-- AI 分析日志独立 RotatingFile（`data/logs/market_ai.log`）
+- AI 分析日志独立文件：`data/logs/market_ai.log`，仅输出 JSON 行文本
+- 日志按天滚动（UTC），保留份数由 `MARKET_AI_LOG_BACKUP_COUNT` 控制
 
 ### 配置管理
 - 主配置：`.env` + `pydantic-settings`（`app/config.py`）
@@ -1163,7 +1320,7 @@ flowchart LR
 
 简要解读：
 - `Migrate` 应成为显式发布步骤，替代运行期隐式 `create_all`。
-- 多副本部署时需要替换文件式热更新协议。
+- 多副本部署使用 Redis 模式（默认）；文件模式仅单 Worker。
 
 ## 性能瓶颈与优化方案
 
@@ -1178,6 +1335,7 @@ flowchart LR
 | 仓储层 N+1 查询 | `app/db/repository.py` 多处按 symbol 循环查询最新数据 | watchlist 扩大后 DB 压力上升 | 批量 SQL + 分组聚合 |
 | 指标计算增量仍需回看窗口 | `app/features/feature_pipeline.py` 增量也依赖回看窗口 | CPU 成本高 | 指标缓存/向量化优化 |
 | 手动 AI 刷新整页 HTML | `overview.html` 通过 `fetch(location.href)` 局部替换 | 带宽/解析浪费 | 返回片段/JSON 增量接口 |
+| 策略回放 K 线滞后 | 前端依赖全量加载或网络波动 | 体验不稳定 | Browser 直连 WS + 增量拉取回退 |
 | `httpx` 客户端生命周期偏短 | 多处调用临时创建 client | 连接复用差 | Provider 层复用 AsyncClient |
 | 手动 ASR/下载并发粗放 | `app/web/views.py` 内线程 + SSE | 资源耗尽风险 | 队列化 + 限并发 |
 | SSE 断连取消缺失 | `/api/ai-analyze/stream` 后台任务可能继续运行 | 浪费 LLM 成本 | 断连检测 + task cancellation |
@@ -1222,6 +1380,7 @@ flowchart LR
 - `.env` 明文持久化密钥，且可通过 UI 改写。
 - 缺少统一认证/授权/审计/速率限制。
 - 前端依赖外部 CDN，存在供应链与 CSP 风险。
+- 策略回放页浏览器直连 Binance WS，生产环境需补充 CSP/出站 allowlist 与网络可达性校验。
 
 ### 目标方案（To-Be）
 
@@ -1242,6 +1401,7 @@ flowchart LR
 #### 错误处理
 - `supervised_job()` 统一包裹任务异常并记录日志（`app/scheduler/jobs.py`）
 - Binance WS 断连重连与退避（`app/providers/binance_provider.py`）
+- 策略回放页 WS 自动重连 + 退避与 REST 回退（`app/web/static/strategy.js`）
 - LLM 调用重试（429/连接问题）与退避（`app/ai/openai_provider.py`）
 - Telegram 发送重试（`app/alerts/telegram.py`）
 - Telegram Poller 网络/HTTP 异常恢复（`app/alerts/telegram_poller.py`）
@@ -1253,6 +1413,7 @@ flowchart LR
 - `worker_status`
 - `llm_calls`
 - `ai_analysis_failures`
+- `futures_account_snapshots` / `margin_account_snapshots`
 - 任务运行快照：`data/job_metrics.json`（`app/ops/job_metrics.py`）
 - 运维接口：
 - `/api/health`
@@ -1261,6 +1422,8 @@ flowchart LR
 - `/api/llm/calls`
 - `/api/llm/failures`
 - `/api/llm/selfcheck`
+- `/api/account/futures`
+- `/api/account/margin`
 - CLI 诊断：`sentinel doctor`（`app/cli.py`）
 
 ### 风险与边界
@@ -1276,6 +1439,7 @@ flowchart LR
 - 结构化 JSON 日志
 - 关键 job 耗时/成功率指标
 - 基于日志或 DB 的告警阈值
+- 前端策略回放 WS 断连频次与回退率统计
 - 中期：
 - Prometheus + Grafana
 - Sentry 或 OpenTelemetry tracing
@@ -1288,6 +1452,7 @@ flowchart LR
 - 覆盖范围：CLI/AI/YouTube/Compose/文档检查等单元测试为主
 - 覆盖率：可选 `pytest-cov`，但未设定门槛
 - CI/CD：未配置自动化流水线
+- 策略回放 K 线实时链路缺少端到端验证
 
 ### 建议门禁
 - 最低覆盖率阈值（如行覆盖率 70% 起步）
@@ -1552,7 +1717,7 @@ Intel 可选启用（仅当需要情报中心）：
 
 2. 架构演进
 - 任务队列化：YouTube/AI/ASR 迁移到队列消费，降低 APScheduler 负载。
-- 多实例协作：替换文件式热更新为 DB/消息队列事件，支持多 Worker。
+- 多实例协作：Redis Pub/Sub 热更新（默认）支持多 Worker；文件模式可回退。
 - 数据服务化：拆分 Market/YouTube/AI 为独立服务或子包，便于迭代。
 
 3. 可观测与成本治理
@@ -1576,7 +1741,7 @@ Intel 可选启用（仅当需要情报中心）：
 - Telegram：`TELEGRAM_*`
 - LLM：`*_API_KEY`, `LLM_PROFILES_JSON`, `LLM_TASK_ROUTING_JSON`, `LLM_HOT_RELOAD_*`
 - AI 分析：`AI_ANALYSIS_INTERVAL_SECONDS`, `AI_SIGNAL_CONFIDENCE_THRESHOLD`, `AI_HISTORY_CANDLES`
-- 多周期与资金费率：`MULTI_TF_*`, `FUNDING_RATE_SYNC_SECONDS`, `BINANCE_FUTURES_URL`
+- 多周期与资金费率：`MULTI_TF_*`, `FUNDING_RATE_SYNC_SECONDS`, `BINANCE_FUTURES_URL`, `BINANCE_WS_URL`
 - YouTube 与 ASR：`YOUTUBE_*`, `ASR_*`
 - Intel 情报：`INTEL_*`
 
@@ -1634,17 +1799,25 @@ classDiagram
 | YouTube Insight | 单视频 AI 洞察（VTA） |
 | Consensus | 多视频共识聚合结果 |
 | SSE | Server-Sent Events，流式输出 |
-| LLM Hot Reload | LLM 配置热更新的 signal/ack 机制 |
+| LLM Hot Reload | LLM 配置热更新的 Redis Pub/Sub 或 signal/ack 机制 |
 
-### 附录 E：版本历史
+### 附录 E：API 变更日志与兼容性说明
+
+| 版本 | 变更 | 兼容性说明 | 废弃项 |
+|---|---|---|---|
+| v2.3 | 策略回放页引入 Browser 直连 Binance WS + REST 回退；前端注入 `binance_ws_url` | 服务端 API 无破坏性变更；旧前端仍可用 `/api/ohlcv` | 无 |
+| v2.2 | Intel 情报接口与摘要产出增强（`/api/intel/news`, `/api/intel/digest`） | 新增接口，旧客户端不受影响 | 无 |
+
+### 附录 F：版本历史
 
 | 版本 | 日期 | 说明 |
 |---|---|---|
+| v2.3 | 2026-03-04 | 补充策略回放实时链路、表结构视图、部署与配置变更 |
 | v2.2 | 2026-03-03 | 补充 Intel 情报链路、API/表结构/图示与验收步骤 |
 | v2.1 | 2026-03-03 | 补齐技术栈明细、非功能性设计、质量保障与验收说明 |
 | v2.0 | 2026-03-02 | 架构与模块总览版 |
 
-### 附录 F：后续文档建议（非本次实现）
+### 附录 G：后续文档建议（非本次实现）
 
 - `docs/runbook_deploy.md`（部署/回滚操作手册）
 - `docs/api_reference.md`（路由与返回结构清单）

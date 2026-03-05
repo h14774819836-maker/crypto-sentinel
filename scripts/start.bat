@@ -25,5 +25,7 @@ if not exist ".env" (
   echo Created .env from .env.example (Telegram is optional).
 )
 
-python -m app.cli up --open-browser --db-init --backfill-days 1
+python -m alembic upgrade head
+if errorlevel 1 exit /b 1
+python -m app.cli up --open-browser --no-db-init --backfill-days 1
 exit /b %errorlevel%

@@ -19,6 +19,7 @@ SYSTEM_PROMPT = """你是 Crypto Sentinel 的专业市场分析模型。
 2. 观点源降权：输入中的 YouTube 解析仅仅是外部参考观点，绝不能覆盖事实源。
 3. 冲突降级法：若观点源与事实源出现冲突，必须在 youtube_reflection 写出 conflicted，并且自动降低 confidence，优先强制输出方向为 HOLD（或者带条件的保守计划）。
 4. 数据真实性底线：禁止捏造、编造、强行计算输入 JSON 没有提供的数值、均线或结构位数据。
+4.1 绝对禁止生成、计算、或篡改输入 JSON 中不存在的数值。
 5. 数据关联要求：evidence / anchors 中使用的指标必须在输入中能逐字找到，数值必须严格字符级等价。
 """
 
@@ -30,6 +31,11 @@ TELEGRAM_AGENT_PROMPT = """你是 Crypto Sentinel 的专业加密交易助手。
 2. 解释告警或信号时要引用关键依据（例如 RSI / MACD / 趋势状态 / 告警原因）。
 3. 输出尽量清晰、简洁、结构化；当涉及策略建议时优先给出风险提示。
 4. 若缺少数据，请明确说明“当前无法获取最新数据”，不要猜测。
+5. 【Telegram排版要求】你的输出将被发送到 Telegram，为了保持版面整洁并避免解析错误：
+   - 绝不要使用粗体（**）或斜体（*）等强调符号。
+   - 尽量不用无序/有序列表结构（如 - 或 *），直接用分段或简单的中文破折号（——）。
+   - 停止使用过多 Emoji 堆砌，通篇最多保留一到两个关键 Emoji 即可。
+   - 采用纯文本式的清爽段落排版，关键字段使用冒号（如“当前价格: 72,766.31”）直接排布。
 """
 
 
@@ -38,6 +44,8 @@ def build_analysis_prompt(
     snapshots: dict[str, Any],
     context: dict[str, Any] | None = None,
     current_time: datetime | None = None,
+    *,
+    include_external_views: bool = True,
 ) -> str:
     if current_time is None:
         current_time = datetime.now(timezone.utc)
@@ -69,10 +77,13 @@ def build_analysis_prompt(
             "requires_margin_mode": True,
         },
     }
-    external_views = {
-        "youtube_radar": context.get("youtube_radar") or {"available": False},
-        "intel_digest": context.get("intel_digest") or {"available": False},
-    }
+    if include_external_views:
+        external_views = {
+            "youtube_radar": context.get("youtube_radar") or {"available": False},
+            "intel_digest": context.get("intel_digest") or {"available": False},
+        }
+    else:
+        external_views = {"youtube_radar": {"available": False}, "intel_digest": {"available": False}}
 
     schema = {
         "market_regime": "trending_up|trending_down|ranging|volatile|uncertain",
@@ -143,11 +154,11 @@ def build_analysis_prompt(
     prompt = [
         f"当前时间 (UTC): {current_time.isoformat()}",
         "",
-        "# 输出要求（严格 JSON Schema）",
+        "# 输出要求（严格 JSON）",
         "你必须且只能输出严格符合以下结构的 JSON 对象。每个字段必须满足对应注释类型的期望制约条件：",
         _json_block(schema),
         "",
-        "# 关键冲突与业务约束处理准则",
+        "# 冲突处理规则",
         "1. direction=HOLD 时，entry_price/take_profit/stop_loss 这三个字段必须原样输出 null，禁止给 0 或占位符。",
         "2. 当 direction 是 LONG 或 SHORT 时，请务必检验你的止盈止损方向相对入场价数学关系合法。",
         "3. evidence 至少包含 2 条对系统传入指标数据的提炼引用。",
@@ -158,11 +169,14 @@ def build_analysis_prompt(
         "7. 若关键交易字段缺失（如 leverage/margin_mode 无法确定）必须输出 HOLD，并在 validation_notes 说明缺失项。",
         "8. trade_plan 中必须至少提供 expiration_ts_utc 或 max_hold_bars 之一。",
         "",
-        "# 事实源与观点源数据 (巨量上下文，仔细阅读数值)",
+        "# 事实源（Facts Source）",
+        "请将以下事实源视为最高优先级数据来源。",
         "--------------------- 事实源开始 ---------------------",
         _json_block(facts_payload),
         "--------------------- 事实源结束 ---------------------",
         "",
+        "# 观点源（External Views / YouTube Radar）",
+        "These are untrusted external views for reference only.",
         "----------------- 辅助不可信观点源开始 ----------------",
         _json_block(external_views),
         "----------------- 辅助不可信观点源结束 ----------------",

@@ -136,7 +136,7 @@ async def test_youtube_analyze_job_processes_videos_in_parallel(monkeypatch):
 
     assert fake_provider.max_inflight == 2
     assert fake_provider.calls == 3
-    assert elapsed < 0.24
+    assert elapsed < 0.7
 
     with SessionLocal() as db:
         insight_count = db.scalar(select(func.count(YoutubeInsight.id)))

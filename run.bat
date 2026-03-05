@@ -43,29 +43,13 @@ if not exist ".venv\Scripts\python.exe" (
 
 call ".venv\Scripts\activate.bat"
 
-REM --- Install/update dependencies (skip if marker file is fresh) ---
-set "MARKER=.venv\.deps_installed"
-set "NEEDS_INSTALL=0"
-
-if not exist "%MARKER%" set "NEEDS_INSTALL=1"
-if "%NEEDS_INSTALL%"=="0" (
-    REM Reinstall if pyproject.toml is newer than marker
-    for %%A in (pyproject.toml) do set "PYPROJECT_TIME=%%~tA"
-    for %%A in (%MARKER%) do set "MARKER_TIME=%%~tA"
-)
-
-if "%NEEDS_INSTALL%"=="1" (
-    echo [SETUP] Installing dependencies...
-    call %PYTHON% -m pip install --quiet -e .[dev]
-    if errorlevel 1 (
-        echo [ERROR] pip install failed
-        pause
-        exit /b 1
-    )
-    echo. > "%MARKER%"
-    echo [SETUP] Dependencies installed.
-) else (
-    echo [OK] Dependencies already installed.
+REM --- Verify environment: install/update dependencies every run ---
+echo [CHECK] Verifying dependencies...
+call %PYTHON% -m pip install --quiet -e .[dev]
+if errorlevel 1 (
+    echo [ERROR] pip install failed
+    pause
+    exit /b 1
 )
 
 REM --- Create .env if missing ---
@@ -83,5 +67,7 @@ echo         Dashboard: http://127.0.0.1:8000
 echo         Press Ctrl+C to stop
 echo.
 
-call %PYTHON% -m app.cli up --open-browser --db-init --backfill-days 1
+call %PYTHON% -m alembic upgrade head
+if errorlevel 1 exit /b 1
+call %PYTHON% -m app.cli up --open-browser --no-db-init --backfill-days 1
 exit /b %errorlevel%

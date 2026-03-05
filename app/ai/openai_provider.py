@@ -104,6 +104,9 @@ class OpenAICompatibleProvider(LLMProvider):
         aliases = {
             "nvidia_nim/qwen3.5-397b-a17b": "qwen/qwen3.5-397b-a17b",
             "nvidia_nim/kimi-k2.5": "moonshotai/kimi-k2.5",
+            "nvidia_nim/llama-3_1-nemotron-ultra-253b-v1": "nvidia/llama-3.1-nemotron-ultra-253b-v1",
+            "nvidia_nim/deepseek-v3_2": "deepseek-ai/deepseek-v3_2",
+            "nvidia_nim/nemotron-3-nano-30b-a3b": "nvidia/nemotron-3-nano-30b-a3b",
         }
         return aliases.get(model_norm.lower(), model_norm)
 
@@ -308,11 +311,11 @@ class OpenAICompatibleProvider(LLMProvider):
         }
         if not self._is_reasoner_model(effective_model):
             kwargs["temperature"] = temperature
-        # NOTE: Ark / Doubao 2.0 Pro reasoning is built-in.
-        # Do NOT pass `thinking` or `reasoning` params — the Ark Responses API
-        # does not accept them. Reasoning content is returned automatically
-        # via response.output items of type "reasoning" and streamed via
-        # "response.reasoning_text.delta" events.
+        thinking_type = "enabled" if use_reasoning else "disabled"
+        kwargs["thinking"] = {"type": thinking_type}
+        effort = self.config.reasoning_effort or "medium"
+        if use_reasoning or self.config.reasoning_effort:
+            kwargs["reasoning"] = {"effort": effort}
         if isinstance(response_format, dict) and _s(response_format.get("type")).lower() == "json_object":
             kwargs["text"] = {"format": {"type": "json_object"}}
 
@@ -502,7 +505,7 @@ class OpenAICompatibleProvider(LLMProvider):
             stream_callback=stream_callback,
         )
         request_summary["configured_model"] = effective_model
-        logger.debug("LLM upstream request summary: %s", request_summary)
+
 
         retries = 0
         base_delay = 1.0

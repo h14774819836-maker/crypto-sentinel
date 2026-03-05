@@ -1,4 +1,4 @@
-﻿import logging
+import logging
 import asyncio
 from datetime import datetime, timezone
 from typing import Any
@@ -10,6 +10,7 @@ from app.db.session import SessionLocal
 from app.alerts.telegram import TelegramClient
 from app.alerts.message_builder import TelegramMessage, build_ai_signal_message, build_anomaly_message
 from app.db.models import AiSignal, AlertEvent
+from app.utils.time import ensure_utc
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +28,17 @@ def _tg_trace(msg: str, *args) -> None:
 def _clean_cache():
     if len(_processed_updates) > _MAX_CACHE_SIZE:
         _processed_updates.clear() # Simplistic ring-flush for MVP
+
+
+def _extract_message_id(resp: dict | None) -> int | None:
+    """Extract message_id from Telegram sendMessage response."""
+    if not resp or not resp.get("ok"):
+        return None
+    r = resp.get("result")
+    if isinstance(r, dict):
+        mid = r.get("message_id")
+        return int(mid) if isinstance(mid, int) else None
+    return None
 
 
 def _truncate_telegram_text(text: str) -> str:
@@ -187,8 +199,12 @@ async def _handle_message(client: TelegramClient, message: dict[str, Any], setti
             llm_config.base_url,
             bool(llm_config.api_key),
         )
-        asyncio.create_task(client._post("sendChatAction", {"chat_id": chat_id, "action": "typing"}))
-        _tg_trace("已发送 typing 动作 chat_id=%s", chat_id)
+        status_resp = await client._post("sendMessage", {
+            "chat_id": chat_id,
+            "text": "⏳ 正在思考...",
+            "parse_mode": "HTML",
+        })
+        status_msg_id = _extract_message_id(status_resp)
 
         try:
             from app.ai.openai_provider import OpenAICompatibleProvider
@@ -210,6 +226,9 @@ async def _handle_message(client: TelegramClient, message: dict[str, Any], setti
             _tg_trace("LLM交互异常 chat_id=%s error=%s", chat_id, e)
             logger.exception("[telegram_dispatcher] Error handling interactive chat message: %s", e)
             await client._post("sendMessage", {"chat_id": chat_id, "text": f"❌ Agent 运行时故障: {e}"})
+        finally:
+            if status_msg_id is not None:
+                await client.delete_message(status_msg_id, chat_id=chat_id)
         
         return
 
@@ -219,7 +238,15 @@ async def _handle_message(client: TelegramClient, message: dict[str, Any], setti
     args = parts[1:]
     _tg_trace("命令消息 chat_id=%s cmd=%s args=%s", chat_id, cmd, args)
 
+    status_msg_id: int | None = None
     try:
+        status_resp = await client._post("sendMessage", {
+            "chat_id": chat_id,
+            "text": "⏳ 正在处理...",
+            "parse_mode": "HTML",
+        })
+        status_msg_id = _extract_message_id(status_resp)
+
         if cmd == "/help":
             await _cmd_help(client, chat_id)
         elif cmd == "/status":
@@ -236,6 +263,9 @@ async def _handle_message(client: TelegramClient, message: dict[str, Any], setti
     except Exception as e:
         logger.exception("[telegram_dispatcher] Error executing command %s: %s", cmd, e)
         await client._post("sendMessage", {"chat_id": chat_id, "text": f"❌ 执行命令时出错: {e}"})
+    finally:
+        if status_msg_id is not None:
+            await client.delete_message(status_msg_id, chat_id=chat_id)
 
 
 async def _handle_callback_query(client: TelegramClient, callback_query: dict[str, Any], settings):
@@ -260,14 +290,18 @@ async def _handle_callback_query(client: TelegramClient, callback_query: dict[st
 
     if data.startswith("explain:"):
         source_id = data.split(":", 1)[1]
-        await client._post("sendMessage", {
+        status_resp = await client._post("sendMessage", {
             "chat_id": chat_id,
             "text": f"⏳ 正在请求大模型分析信号源 `{source_id}` 的深度逻辑...",
             "parse_mode": "Markdown"
         })
-        asyncio.create_task(_process_explain_signal(client, chat_id, source_id, settings))
+        status_msg_id = _extract_message_id(status_resp)
+        asyncio.create_task(_process_explain_signal(client, chat_id, source_id, settings, status_msg_id))
 
-async def _process_explain_signal(client: TelegramClient, chat_id: int, source_id: str, settings: Any):
+async def _process_explain_signal(
+    client: TelegramClient, chat_id: int, source_id: str, settings: Any,
+    status_message_id: int | None = None,
+):
     from sqlalchemy import select
     from app.db.session import SessionLocal
     from app.db.models import AiSignal
@@ -278,10 +312,14 @@ async def _process_explain_signal(client: TelegramClient, chat_id: int, source_i
             signal: AiSignal | None = db.scalar(select(AiSignal).where(AiSignal.id == signal_id))
         except ValueError:
             await client._post("sendMessage", {"chat_id": chat_id, "text": "❌ 无效的信号 ID。"})
+            if status_message_id is not None:
+                await client.delete_message(status_message_id, chat_id=chat_id)
             return
             
     if not signal:
         await client._post("sendMessage", {"chat_id": chat_id, "text": f"❌ 未在数据库中找到 ID=`{source_id}` 的信号记录。"})
+        if status_message_id is not None:
+            await client.delete_message(status_message_id, chat_id=chat_id)
         return
         
     prompt = (
@@ -297,10 +335,14 @@ async def _process_explain_signal(client: TelegramClient, chat_id: int, source_i
         llm_config = settings.resolve_llm_config(llm_task)
     except Exception as e:
         await client._post("sendMessage", {"chat_id": chat_id, "text": f"⚠️ 配置加载失败: {e}"})
+        if status_message_id is not None:
+            await client.delete_message(status_message_id, chat_id=chat_id)
         return
         
     if not llm_config.enabled or not llm_config.api_key:
          await client._post("sendMessage", {"chat_id": chat_id, "text": "⚠️ 当前未开启 AI 或缺少 API Key。"})
+         if status_message_id is not None:
+             await client.delete_message(status_message_id, chat_id=chat_id)
          return
          
     try:
@@ -320,6 +362,9 @@ async def _process_explain_signal(client: TelegramClient, chat_id: int, source_i
     except Exception as e:
         logger.exception("[telegram_dispatcher] Error explaining signal %s: %s", source_id, e)
         await client._post("sendMessage", {"chat_id": chat_id, "text": f"❌ 解读信号时发生错误: {e}"})
+    finally:
+        if status_message_id is not None:
+            await client.delete_message(status_message_id, chat_id=chat_id)
 
 # --- Commands ---
 
@@ -346,7 +391,7 @@ async def _cmd_status(client: TelegramClient, chat_id: int, settings):
     # Calculate uptime relative
     worker_status = "在线 ✅"
     if worker_last_seen:
-        diff_secs = (datetime.now(timezone.utc) - worker_last_seen).total_seconds()
+        diff_secs = (datetime.now(timezone.utc) - ensure_utc(worker_last_seen)).total_seconds()
         if diff_secs > settings.worker_heartbeat_seconds * 3:
             worker_status = "失联 ⚠️"
 
@@ -404,10 +449,18 @@ async def _cmd_analyze(client: TelegramClient, chat_id: int, args: list[str], se
         return
         
     symbol = args[0].upper()
-    await client._post("sendMessage", {"chat_id": chat_id, "text": "⏳ 正在拉取最新的多时间框架数据，请稍候...", "parse_mode": "Markdown"})
-    asyncio.create_task(_process_analyze_signal(client, chat_id, symbol, settings))
+    status_resp = await client._post("sendMessage", {
+        "chat_id": chat_id,
+        "text": "⏳ 正在分析，请稍候...",
+        "parse_mode": "Markdown",
+    })
+    status_msg_id = _extract_message_id(status_resp)
+    asyncio.create_task(_process_analyze_signal(client, chat_id, symbol, settings, status_msg_id))
 
-async def _process_analyze_signal(client: TelegramClient, chat_id: int, symbol: str, settings: Any):
+async def _process_analyze_signal(
+    client: TelegramClient, chat_id: int, symbol: str, settings: Any,
+    status_message_id: int | None = None,
+):
     from sqlalchemy import select
     from app.db.session import SessionLocal
     from app.ai.market_context_builder import build_market_analysis_context
@@ -416,6 +469,8 @@ async def _process_analyze_signal(client: TelegramClient, chat_id: int, symbol: 
         get_recent_market_metrics,
         list_recent_ohlcv,
         get_latest_funding_snapshots,
+        get_latest_futures_account_snapshot,
+        get_latest_margin_account_snapshot,
         list_alerts,
         insert_ai_signal
     )
@@ -428,16 +483,21 @@ async def _process_analyze_signal(client: TelegramClient, chat_id: int, symbol: 
         llm_config = settings.resolve_llm_config("market")
     except Exception as e:
         await client._post("sendMessage", {"chat_id": chat_id, "text": f"⚠️ 配置加载失败: {e}"})
+        if status_message_id is not None:
+            await client.delete_message(status_message_id, chat_id=chat_id)
         return
         
     if not llm_config.enabled or not llm_config.api_key:
          await client._post("sendMessage", {"chat_id": chat_id, "text": "⚠️ 当前未开启市场 AI（market profile）或缺少 API Key。"})
+         if status_message_id is not None:
+             await client.delete_message(status_message_id, chat_id=chat_id)
          return
 
     provider = OpenAICompatibleProvider(llm_config)
     analyst = MarketAnalyst(settings, provider, llm_config)
     
     tf_data: dict[str, Any] = {}
+    account_snapshot: dict[str, Any] | None = None
     with SessionLocal() as session:
         all_tfs = ["1m"] + settings.multi_tf_interval_list
         for tf in all_tfs:
@@ -488,12 +548,75 @@ async def _process_analyze_signal(client: TelegramClient, chat_id: int, symbol: 
             for a in recent_alerts_rows
             if a.symbol == symbol
         ]
+        futures_row = get_latest_futures_account_snapshot(session)
+        margin_row = get_latest_margin_account_snapshot(session)
+
+        def _to_float(value: Any) -> float | None:
+            try:
+                if value is None:
+                    return None
+                return float(value)
+            except (TypeError, ValueError):
+                return None
+
+        def _liq_distance(mark_price: float, liq_price: float, position_amt: float) -> float | None:
+            if mark_price <= 0 or liq_price <= 0 or position_amt == 0:
+                return None
+            if position_amt > 0:
+                val = (mark_price - liq_price) / mark_price
+            else:
+                val = (liq_price - mark_price) / mark_price
+            return (val * 100.0) if val >= 0 else None
+
+        futures_payload = {
+            "total_margin_balance": _to_float(getattr(futures_row, "total_margin_balance", None)),
+            "available_balance": _to_float(getattr(futures_row, "available_balance", None)),
+            "total_maint_margin": _to_float(getattr(futures_row, "total_maint_margin", None)),
+            "position_amt": _to_float(getattr(futures_row, "btc_position_amt", None)),
+            "mark_price": _to_float(getattr(futures_row, "btc_mark_price", None)),
+            "liquidation_price": _to_float(getattr(futures_row, "btc_liquidation_price", None)),
+            "unrealized_pnl": _to_float(getattr(futures_row, "btc_unrealized_pnl", None)),
+        }
+        if (
+            futures_payload["mark_price"] is not None
+            and futures_payload["liquidation_price"] is not None
+            and futures_payload["position_amt"] is not None
+        ):
+            futures_payload["liq_distance_pct"] = _liq_distance(
+                float(futures_payload["mark_price"]),
+                float(futures_payload["liquidation_price"]),
+                float(futures_payload["position_amt"]),
+            )
+        margin_payload = {
+            "margin_level": _to_float(getattr(margin_row, "margin_level", None)),
+            "margin_call_bar": _to_float(getattr(margin_row, "margin_call_bar", None)),
+            "force_liquidation_bar": _to_float(getattr(margin_row, "force_liquidation_bar", None)),
+            "total_liability_of_btc": _to_float(getattr(margin_row, "total_liability_of_btc", None)),
+        }
+        as_of = getattr(futures_row, "ts", None) or getattr(margin_row, "ts", None)
+        account_snapshot = {
+            "watch_symbol": settings.account_watch_symbol.upper(),
+            "as_of_utc": as_of,
+            "futures": futures_payload,
+            "margin": margin_payload,
+            "risk_flags": {
+                "available_balance_low": (
+                    futures_payload.get("available_balance") is not None
+                    and float(futures_payload["available_balance"]) < float(settings.account_alert_min_available_balance)
+                ),
+                "margin_near_call": (
+                    margin_payload.get("margin_level") is not None
+                    and margin_payload.get("margin_call_bar") is not None
+                    and float(margin_payload["margin_level"]) <= float(margin_payload["margin_call_bar"])
+                ),
+            },
+        }
         
     if not tf_data:
         await client._post("sendMessage", {"chat_id": chat_id, "text": f"❌ 数据库中没有 `{symbol}` 的行情数据，无法分析。", "parse_mode": "Markdown"})
+        if status_message_id is not None:
+            await client.delete_message(status_message_id, chat_id=chat_id)
         return
-        
-    await client._post("sendMessage", {"chat_id": chat_id, "text": f"🧠 数据准备完毕。正在调用大模型({llm_config.model})进行推理..."})
     
     try:
         context = build_market_analysis_context(
@@ -504,6 +627,7 @@ async def _process_analyze_signal(client: TelegramClient, chat_id: int, symbol: 
             funding_history=None,
             youtube_consensus=None,
             youtube_insights=None,
+            account_snapshot=account_snapshot,
             expected_timeframes=["4h", "1h", "15m", "5m", "1m"],
         )
         sigs, llm_meta = await analyst.analyze(symbol, tf_data, context=context)
@@ -555,3 +679,6 @@ async def _process_analyze_signal(client: TelegramClient, chat_id: int, symbol: 
     except Exception as e:
         logger.exception("[telegram_dispatcher] AI analysis failed for %s", symbol)
         await client._post("sendMessage", {"chat_id": chat_id, "text": "❌ 分析时发生错误（内部处理失败）。请稍后重试。"})
+    finally:
+        if status_message_id is not None:
+            await client.delete_message(status_message_id, chat_id=chat_id)

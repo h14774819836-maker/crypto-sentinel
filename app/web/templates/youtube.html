@@ -1260,7 +1260,7 @@
         setNote(tr('yt.action.parsing_channel', '正在解析频道 ID...', 'Parsing channel ID...'), 'text-muted-foreground');
 
         try {
-            const resp = await fetch('/api/youtube/channels', {
+            const resp = await adminFetch('/api/youtube/channels', {
                 method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url }),
             });
             const data = await resp.json();
@@ -1287,7 +1287,7 @@
     async function removeChannel(channelId) {
         if (!confirm(tr('yt.action.confirm_unbind', '确定要解除绑定该频道并清除追踪数据吗？', 'Unbind this channel and purge tracking data?'))) return;
         try {
-            const resp = await fetch(`/api/youtube/channels/${channelId}`, { method: 'DELETE' });
+            const resp = await adminFetch(`/api/youtube/channels/${channelId}`, { method: 'DELETE' });
             if ((await resp.json()).ok) document.getElementById(`row-${channelId}`)?.remove();
             else alert(tr('yt.error.unbind_failed', '解除绑定失败', 'Failed to unbind'));
         } catch (err) { alert(`${tr('yt.error.network', 'Error', 'Error')}: ${err.message}`); }
@@ -1306,7 +1306,7 @@
         log(tr('yt.action.initiating_sync', '正在启用同步：获取最新视频...', 'Initiating sync: fetching latest videos...'), 'text-blue-400');
 
         try {
-            const resp = await fetch('/api/youtube/sync', { method: 'POST' });
+            const resp = await adminFetch('/api/youtube/sync', { method: 'POST' });
             const data = await resp.json();
             if (data.ok && data.results) {
                 data.results.forEach((r) => {
@@ -1354,7 +1354,7 @@
         updateVideoStatus(videoId, 'neutral', initializingText);
 
         try {
-            const resp = await fetch(`/api/youtube/asr/${videoId}`, { method: 'POST' });
+            const resp = await adminFetch(`/api/youtube/asr/${videoId}`, { method: 'POST' });
             const ct = resp.headers.get('content-type') || '';
 
             if (ct.includes('text/event-stream')) {
@@ -1410,7 +1410,7 @@
             }
         }
         try {
-            const resp = await fetch(`/api/youtube/analyze/${videoId}`, {
+            const resp = await adminFetch(`/api/youtube/analyze/${videoId}`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ force: false }),
@@ -1606,7 +1606,7 @@
         const locatingText = tr('yt.asr.status.locating', '正在定位 ASR 引擎...', 'Locating ASR Engine...');
         setModelStatus('loading', locatingText);
         try {
-            const resp = await fetch('/api/youtube/asr/model');
+            const resp = await adminFetch('/api/youtube/asr/model');
             const data = await resp.json();
             setModelFields(data);
             if (data.ready) {
@@ -1640,7 +1640,7 @@
         setModelProgress('Initiating secure transfer...');
 
         try {
-            const resp = await fetch('/api/youtube/asr/model', { method: 'POST' });
+            const resp = await adminFetch('/api/youtube/asr/model', { method: 'POST' });
             const ct = resp.headers.get('content-type') || '';
             let shouldRefreshStatus = false;
 

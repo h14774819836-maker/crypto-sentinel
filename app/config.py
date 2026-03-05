@@ -158,6 +158,30 @@ MODEL_CATALOG: list[dict[str, Any]] = [
         "defaults": dict(TIER_DEFAULTS["premium"]),
     },
     {
+        "id": "nvidia_nim/llama-3_1-nemotron-ultra-253b-v1",
+        "label": "NVIDIA NIM · Llama Nemotron Ultra 253B",
+        "provider": "nvidia_nim",
+        "tier": "premium",
+        "description": "NVIDIA NIM \u9ad8\u6027\u80fd\u63a8\u7406\u6a21\u578b\uff0c253B \u53c2\u6570",
+        "defaults": dict(TIER_DEFAULTS["premium"]),
+    },
+    {
+        "id": "nvidia_nim/deepseek-v3_2",
+        "label": "NVIDIA NIM · DeepSeek V3.2",
+        "provider": "nvidia_nim",
+        "tier": "premium",
+        "description": "NVIDIA NIM \u9ad8\u6027\u80fd DeepSeek V3.2 \u6a21\u578b",
+        "defaults": dict(TIER_DEFAULTS["premium"]),
+    },
+    {
+        "id": "nvidia_nim/nemotron-3-nano-30b-a3b",
+        "label": "NVIDIA NIM · Nemotron 3 Nano 30B",
+        "provider": "nvidia_nim",
+        "tier": "cheap",
+        "description": "NVIDIA NIM \u5feb\u901f\u54cd\u5e94\u804a\u5929\u6a21\u578b\uff0c30B MoE",
+        "defaults": dict(TIER_DEFAULTS["cheap"]),
+    },
+    {
         "id": "minimax/minimax-m2.5",
         "label": "MiniMax M2.5",
         "provider": "openrouter",
@@ -283,6 +307,20 @@ class Settings(BaseSettings):
         populate_by_name=True,
     )
 
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls,
+        init_settings,
+        env_settings,
+        dotenv_settings,
+        file_secret_settings,
+    ):
+        return env_settings, dotenv_settings, file_secret_settings, init_settings
+
+    # Admin auth
+    admin_token: str = Field(default="", alias="ADMIN_TOKEN")
+
     app_name: str = "Crypto Sentinel"
     app_env: str = Field(default="dev", alias="APP_ENV")
     app_version: str = Field(default="0.1.0", alias="APP_VERSION")
@@ -299,30 +337,51 @@ class Settings(BaseSettings):
     database_url: str = Field(default="sqlite:///./data/crypto_sentinel.db", alias="DATABASE_URL")
     db_enforce_postgres_envs: str = Field(default="stage,prod", alias="DB_ENFORCE_POSTGRES_ENVS")
     db_disable_fallback_envs: str = Field(default="stage,prod", alias="DB_DISABLE_FALLBACK_ENVS")
+    db_allow_fallback_create_all: bool = Field(default=False, alias="DB_ALLOW_FALLBACK_CREATE_ALL")
 
-    watchlist: str = Field(default="BTCUSDT,ETHUSDT,SOLUSDT", alias="WATCHLIST")
+    watchlist: str = Field(default="BTCUSDT", alias="WATCHLIST")
 
     binance_rest_url: str = Field(default="https://api.binance.com", alias="BINANCE_REST_URL")
     binance_ws_url: str = Field(default="wss://stream.binance.com:9443/stream", alias="BINANCE_WS_URL")
+    binance_api_key: str = Field(default="", alias="BINANCE_API_KEY")
+    binance_api_secret: str = Field(default="", alias="BINANCE_API_SECRET")
+    binance_recv_window: int = Field(default=5000, alias="BINANCE_RECV_WINDOW")
     enable_miniticker: bool = Field(default=False, alias="ENABLE_MINITICKER")
 
     poll_seconds: int = Field(default=10, alias="POLL_SECONDS")
     kline_sync_seconds: int = Field(default=60, alias="KLINE_SYNC_SECONDS")
     gap_fill_interval_seconds: int = Field(default=120, alias="GAP_FILL_INTERVAL_SECONDS")
     backfill_days_default: int = Field(default=7, alias="BACKFILL_DAYS_DEFAULT")
+    account_monitor_enabled: bool = Field(default=False, alias="ACCOUNT_MONITOR_ENABLED", description="是否启用账户监控：定时拉取合约/杠杆账户快照并发送风险告警")
+    account_monitor_seconds: int = Field(default=15, alias="ACCOUNT_MONITOR_SECONDS", description="账户监控轮询间隔（秒）")
+    account_watch_symbol: str = Field(default="BTCUSDT", alias="ACCOUNT_WATCH_SYMBOL", description="关注的交易对，用于持仓/强平价格展示")
+    account_alert_min_available_balance: float = Field(default=10.0, alias="ACCOUNT_ALERT_MIN_AVAILABLE_BALANCE", description="可用余额告警阈值(USDT)，低于此值触发 ACCOUNT_AVAILABLE_BALANCE_LOW")
+    account_alert_liq_distance_pct: float = Field(default=5.0, alias="ACCOUNT_ALERT_LIQ_DISTANCE_PCT", description="强平距离告警阈值(%)，标记价与强平价距离小于此值时触发")
+    account_alert_liq_atr_multiplier: float = Field(default=1.5, alias="ACCOUNT_ALERT_LIQ_ATR_MULTIPLIER", description="强平风险动态阈值：阈值%=ATR_MULTIPLIER*(ATR14/markPrice)*100")
+    account_alert_liq_static_floor_pct: float = Field(default=5.0, alias="ACCOUNT_ALERT_LIQ_STATIC_FLOOR_PCT", description="动态阈值静态下限(%)，最终阈值=max(动态阈值, 静态下限)")
+    account_alert_margin_level_buffer: float = Field(default=0.2, alias="ACCOUNT_ALERT_MARGIN_LEVEL_BUFFER", description="杠杆风险告警：margin_level 低于 margin_call_bar*(1-此值) 时触发")
+    account_user_stream_enabled: bool = Field(default=False, alias="ACCOUNT_USER_STREAM_ENABLED")
+    account_user_stream_keepalive_seconds: int = Field(default=3000, alias="ACCOUNT_USER_STREAM_KEEPALIVE_SECONDS")
+    account_monitor_ws_fallback_seconds: int = Field(default=60, alias="ACCOUNT_MONITOR_WS_FALLBACK_SECONDS")
+    account_snapshot_retention_days: int = Field(default=14, alias="ACCOUNT_SNAPSHOT_RETENTION_DAYS")
+    account_snapshot_change_tolerance: float = Field(default=0.0001, alias="ACCOUNT_SNAPSHOT_CHANGE_TOLERANCE", description="账户快照去重容差，关键标量变化绝对值小于该值视为无变化")
+    account_snapshot_raw_enabled: bool = Field(default=True, alias="ACCOUNT_SNAPSHOT_RAW_ENABLED", description="是否将原始账户 JSON 压缩写入冷表 account_snapshot_raw")
+    account_snapshot_main_store_raw: bool = Field(default=False, alias="ACCOUNT_SNAPSHOT_MAIN_STORE_RAW", description="是否在主快照表继续保留原始 JSON（建议关闭，改由冷表存储）")
+    account_snapshot_raw_retention_days: int = Field(default=30, alias="ACCOUNT_SNAPSHOT_RAW_RETENTION_DAYS", description="冷表 account_snapshot_raw 保留天数")
+    account_daily_stats_enabled: bool = Field(default=True, alias="ACCOUNT_DAILY_STATS_ENABLED", description="是否启用账户日级权益曲线聚合（daily OHLC）")
 
     worker_id: str = Field(default="worker-1", alias="WORKER_ID")
     worker_heartbeat_seconds: int = Field(default=15, alias="WORKER_HEARTBEAT_SECONDS")
 
-    alert_cooldown_seconds: int = Field(default=1800, alias="ALERT_COOLDOWN_SECONDS")
+    alert_cooldown_seconds: int = Field(default=1800, alias="ALERT_COOLDOWN_SECONDS", description="同类型告警冷却时间(秒)，同一 symbol+alert_type 在此时间内不重复发送")
 
     vol_p75_min_candles: int = Field(default=10080, alias="VOL_P75_MIN_CANDLES")
     vol_fallback_min_candles: int = Field(default=200, alias="VOL_FALLBACK_MIN_CANDLES")
     vol_fallback_k: float = Field(default=2.0, alias="VOL_FALLBACK_K")
 
-    telegram_enabled: bool = Field(default=False, alias="TELEGRAM_ENABLED")
-    telegram_bot_token: str = Field(default="", alias="TELEGRAM_BOT_TOKEN")
-    telegram_chat_id: str = Field(default="", alias="TELEGRAM_CHAT_ID")
+    telegram_enabled: bool = Field(default=False, alias="TELEGRAM_ENABLED", description="是否启用 Telegram 告警推送")
+    telegram_bot_token: str = Field(default="", alias="TELEGRAM_BOT_TOKEN", description="Telegram Bot Token，从 @BotFather 创建机器人后获得")
+    telegram_chat_id: str = Field(default="", alias="TELEGRAM_CHAT_ID", description="接收告警的 Chat ID，与机器人对话后用 getUpdates 获取")
     telegram_webhook_secret: str = Field(default="", alias="TELEGRAM_WEBHOOK_SECRET")
     telegram_allowed_chat_ids: str = Field(default="", alias="TELEGRAM_ALLOWED_CHAT_IDS")
     telegram_inbound_mode: str = Field(default="polling", alias="TELEGRAM_INBOUND_MODE")
@@ -344,12 +403,19 @@ class Settings(BaseSettings):
     llm_task_routing_json: str = Field(default="{}", alias="LLM_TASK_ROUTING_JSON")
     llm_hot_reload_signal_file: str = Field(default="data/llm_hot_reload_signal.json", alias="LLM_HOT_RELOAD_SIGNAL_FILE")
     llm_hot_reload_ack_file: str = Field(default="data/llm_hot_reload_ack.json", alias="LLM_HOT_RELOAD_ACK_FILE")
+    redis_url: str = Field(default="redis://localhost:6379/0", alias="REDIS_URL")
+    llm_hot_reload_use_redis: bool = Field(default=True, alias="LLM_HOT_RELOAD_USE_REDIS")
 
     llm_allowed_models: str = Field(default="", alias="LLM_ALLOWED_MODELS")
 
     ai_analysis_interval_seconds: int = Field(default=600, alias="AI_ANALYSIS_INTERVAL_SECONDS")
     ai_signal_confidence_threshold: int = Field(default=70, alias="AI_SIGNAL_CONFIDENCE_THRESHOLD")
     ai_history_candles: int = Field(default=50, alias="AI_HISTORY_CANDLES")
+    ai_two_stage_enabled: bool = Field(default=True, alias="AI_TWO_STAGE_ENABLED")
+    ai_scan_confidence_threshold: int = Field(default=60, alias="AI_SCAN_CONFIDENCE_THRESHOLD")
+    ai_min_context_on_poor_data: bool = Field(default=True, alias="AI_MIN_CONTEXT_ON_POOR_DATA")
+    ai_min_context_on_non_tradeable: bool = Field(default=True, alias="AI_MIN_CONTEXT_ON_NON_TRADEABLE")
+    ai_external_views_on_low_conf_only: bool = Field(default=True, alias="AI_EXTERNAL_VIEWS_ON_LOW_CONF_ONLY")
     llm_market_temperature: float = Field(default=0.1, alias="LLM_MARKET_TEMPERATURE")
     grounding_mode: str = Field(default="balanced", alias="GROUNDING_MODE")
     grounding_severe_multiplier: float = Field(default=3.0, alias="GROUNDING_SEVERE_MULTIPLIER")
@@ -391,6 +457,20 @@ class Settings(BaseSettings):
     anomaly_cooldown_seconds_score_80_84: int = Field(default=1800, alias="ANOMALY_COOLDOWN_SECONDS_SCORE_80_84")
     anomaly_cooldown_seconds_score_85_91: int = Field(default=3600, alias="ANOMALY_COOLDOWN_SECONDS_SCORE_85_91")
     anomaly_cooldown_seconds_score_92_plus: int = Field(default=600, alias="ANOMALY_COOLDOWN_SECONDS_SCORE_92_PLUS")
+    anomaly_flash_enabled: bool = Field(default=True, alias="ANOMALY_FLASH_ENABLED")
+    anomaly_flash_require_mtf_confirm: bool = Field(default=False, alias="ANOMALY_FLASH_REQUIRE_MTF_CONFIRM")
+    anomaly_ai_diagnostic_enabled: bool = Field(default=True, alias="ANOMALY_AI_DIAGNOSTIC_ENABLED")
+    anomaly_ai_diagnostic_timeout_seconds: int = Field(default=120, alias="ANOMALY_AI_DIAGNOSTIC_TIMEOUT_SECONDS")
+    anomaly_ai_diagnostic_batch_window_seconds: int = Field(default=45, alias="ANOMALY_AI_DIAGNOSTIC_BATCH_WINDOW_SECONDS")
+    anomaly_ai_diagnostic_lookback_minutes: int = Field(default=5, alias="ANOMALY_AI_DIAGNOSTIC_LOOKBACK_MINUTES")
+    anomaly_ai_diagnostic_max_alerts: int = Field(default=8, alias="ANOMALY_AI_DIAGNOSTIC_MAX_ALERTS")
+    anomaly_alert_ref_enabled: bool = Field(default=True, alias="ANOMALY_ALERT_REF_ENABLED")
+    anomaly_ai_intel_lookback_hours: int = Field(default=4, alias="ANOMALY_AI_INTEL_LOOKBACK_HOURS")
+    anomaly_ai_youtube_lookback_hours: int = Field(default=4, alias="ANOMALY_AI_YOUTUBE_LOOKBACK_HOURS")
+    anomaly_tick_flash_enabled: bool = Field(default=True, alias="ANOMALY_TICK_FLASH_ENABLED")
+    anomaly_tick_flash_lookback_seconds: int = Field(default=15, alias="ANOMALY_TICK_FLASH_LOOKBACK_SECONDS")
+    anomaly_tick_flash_ret_threshold: float = Field(default=0.0018, alias="ANOMALY_TICK_FLASH_RET_THRESHOLD")
+    anomaly_tick_flash_cooldown_seconds: int = Field(default=90, alias="ANOMALY_TICK_FLASH_COOLDOWN_SECONDS")
     telegram_alert_template_style: str = Field(default="readable", alias="TELEGRAM_ALERT_TEMPLATE_STYLE")
     telegram_alert_include_debug: bool = Field(default=True, alias="TELEGRAM_ALERT_INCLUDE_DEBUG")
 
@@ -435,6 +515,7 @@ class Settings(BaseSettings):
     asr_max_videos_per_run: int = Field(default=3, alias="ASR_MAX_VIDEOS_PER_RUN")
     asr_audio_cache_dir: str = Field(default="data/audio", alias="ASR_AUDIO_CACHE_DIR")
     asr_keep_audio: bool = Field(default=False, alias="ASR_KEEP_AUDIO")
+    asr_max_concurrent: int = Field(default=2, alias="ASR_MAX_CONCURRENT")
 
     # Feature incremental pipeline
     feature_incremental_enabled: bool = Field(default=True, alias="FEATURE_INCREMENTAL_ENABLED")

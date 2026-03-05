@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import gzip
+import json
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -8,18 +10,31 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
+from app.youtube.status import (
+    ASR_FAILED,
+    ANALYZING,
+    COMPLETED,
+    FAILED,
+    PENDING_ANALYSIS,
+    PENDING_SUBTITLE,
+    QUEUED_ASR,
+)
 from app.db.models import (
+    AccountSnapshotRaw,
+    AccountStatsDaily,
     AiSignal,
     AlertEvent,
     AnomalyState,
     DecisionEval,
     DecisionExecution,
+    FuturesAccountSnapshot,
     FundingSnapshot,
     IntelDigestCache,
     LlmCall,
     MarketMetric,
     NewsItem,
     Ohlcv,
+    MarginAccountSnapshot,
     StrategyDecision,
     StrategyFeatureStat,
     StrategyScore,
@@ -133,6 +148,31 @@ def mark_alert_sent(session: Session, event_uid: str) -> None:
     session.commit()
 
 
+def get_alert_event_by_uid(session: Session, event_uid: str) -> AlertEvent | None:
+    return session.scalar(select(AlertEvent).where(AlertEvent.event_uid == event_uid).limit(1))
+
+
+def update_alert_event_delivery(
+    session: Session,
+    *,
+    event_uid: str,
+    updates: dict[str, Any],
+    commit: bool = True,
+) -> bool:
+    event = get_alert_event_by_uid(session, event_uid)
+    if event is None:
+        return False
+    metrics = dict(event.metrics_json or {})
+    delivery = dict(metrics.get("delivery") or {})
+    delivery.update({k: v for k, v in (updates or {}).items() if v is not None})
+    metrics["delivery"] = delivery
+    event.metrics_json = metrics
+    event.updated_at = datetime.now(timezone.utc)
+    if commit:
+        session.commit()
+    return True
+
+
 def get_anomaly_state(session: Session, state_key: str) -> AnomalyState | None:
     return session.scalar(
         select(AnomalyState).where(AnomalyState.state_key == state_key).limit(1)
@@ -225,7 +265,7 @@ def get_worker_last_seen(session: Session, worker_id: str | None = None) -> date
     else:
         query = query.order_by(WorkerStatus.last_seen.desc())
     row = session.scalar(query)
-    return row.last_seen if row else None
+    return _to_utc_or_none(row.last_seen) if row else None
 
 
 def get_latest_ohlcv_ts(session: Session, symbol: str, timeframe: str) -> datetime | None:
@@ -1115,6 +1155,286 @@ def get_recent_funding_snapshots_for_symbol(
     return rows
 
 
+def upsert_futures_account_snapshot(session: Session, payload: dict[str, Any], commit: bool = True) -> None:
+    values = {**payload}
+    stmt = _upsert_stmt(
+        session,
+        FuturesAccountSnapshot,
+        values,
+        conflict_cols=["ts"],
+        update_cols=[
+            "account_json",
+            "balance_json",
+            "positions_json",
+            "total_margin_balance",
+            "available_balance",
+            "total_maint_margin",
+            "btc_position_amt",
+            "btc_mark_price",
+            "btc_liquidation_price",
+            "btc_unrealized_pnl",
+            "last_seen_at",
+        ],
+    )
+    session.execute(stmt)
+    if commit:
+        session.commit()
+
+
+def get_latest_futures_account_snapshot(session: Session) -> FuturesAccountSnapshot | None:
+    return session.scalar(
+        select(FuturesAccountSnapshot)
+        .order_by(FuturesAccountSnapshot.ts.desc())
+        .limit(1)
+    )
+
+
+def get_recent_futures_account_snapshots(session: Session, limit: int = 96) -> list[FuturesAccountSnapshot]:
+    rows = list(
+        session.scalars(
+            select(FuturesAccountSnapshot)
+            .order_by(FuturesAccountSnapshot.ts.desc())
+            .limit(limit)
+        )
+    )
+    rows.reverse()
+    return rows
+
+
+def upsert_margin_account_snapshot(session: Session, payload: dict[str, Any], commit: bool = True) -> None:
+    values = {**payload}
+    stmt = _upsert_stmt(
+        session,
+        MarginAccountSnapshot,
+        values,
+        conflict_cols=["ts"],
+        update_cols=[
+            "account_json",
+            "trade_coeff_json",
+            "margin_level",
+            "total_asset_of_btc",
+            "total_liability_of_btc",
+            "normal_bar",
+            "margin_call_bar",
+            "force_liquidation_bar",
+            "last_seen_at",
+        ],
+    )
+    session.execute(stmt)
+    if commit:
+        session.commit()
+
+
+def get_latest_margin_account_snapshot(session: Session) -> MarginAccountSnapshot | None:
+    return session.scalar(
+        select(MarginAccountSnapshot)
+        .order_by(MarginAccountSnapshot.ts.desc())
+        .limit(1)
+    )
+
+
+def get_recent_margin_account_snapshots(session: Session, limit: int = 96) -> list[MarginAccountSnapshot]:
+    rows = list(
+        session.scalars(
+            select(MarginAccountSnapshot)
+            .order_by(MarginAccountSnapshot.ts.desc())
+            .limit(limit)
+        )
+    )
+    rows.reverse()
+    return rows
+
+
+def touch_futures_account_snapshot_last_seen(
+    session: Session,
+    *,
+    snapshot_id: int,
+    seen_at: datetime,
+    commit: bool = True,
+) -> None:
+    row = session.scalar(
+        select(FuturesAccountSnapshot)
+        .where(FuturesAccountSnapshot.id == int(snapshot_id))
+        .limit(1)
+    )
+    if row is None:
+        return
+    row.last_seen_at = seen_at
+    if commit:
+        session.commit()
+
+
+def touch_margin_account_snapshot_last_seen(
+    session: Session,
+    *,
+    snapshot_id: int,
+    seen_at: datetime,
+    commit: bool = True,
+) -> None:
+    row = session.scalar(
+        select(MarginAccountSnapshot)
+        .where(MarginAccountSnapshot.id == int(snapshot_id))
+        .limit(1)
+    )
+    if row is None:
+        return
+    row.last_seen_at = seen_at
+    if commit:
+        session.commit()
+
+
+def upsert_account_snapshot_raw(
+    session: Session,
+    *,
+    snapshot_type: str,
+    ts: datetime,
+    payload: dict[str, Any] | list[Any] | None,
+    commit: bool = True,
+) -> None:
+    raw = json.dumps(payload or {}, ensure_ascii=False, separators=(",", ":"), default=str).encode("utf-8")
+    values = {
+        "snapshot_type": str(snapshot_type or "").strip().lower(),
+        "ts": ts,
+        "payload_gzip": gzip.compress(raw, compresslevel=6),
+        "payload_size": len(raw),
+    }
+    stmt = _upsert_stmt(
+        session,
+        AccountSnapshotRaw,
+        values,
+        conflict_cols=["snapshot_type", "ts"],
+        update_cols=["payload_gzip", "payload_size"],
+    )
+    session.execute(stmt)
+    if commit:
+        session.commit()
+
+
+def purge_old_account_snapshot_raw(session: Session, *, cutoff: datetime, commit: bool = True) -> int:
+    stmt = delete(AccountSnapshotRaw).where(AccountSnapshotRaw.ts < cutoff)
+    result = session.execute(stmt)
+    if commit:
+        session.commit()
+    return int(result.rowcount or 0)
+
+
+def _floor_day_utc(ts: datetime) -> datetime:
+    ts_utc = ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+    ts_utc = ts_utc.astimezone(timezone.utc)
+    return ts_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+def _to_utc_or_none(ts: datetime | None) -> datetime | None:
+    if ts is None:
+        return None
+    if not isinstance(ts, datetime):
+        return None
+    if ts.tzinfo is None:
+        return ts.replace(tzinfo=timezone.utc)
+    return ts.astimezone(timezone.utc)
+
+
+def upsert_account_stats_daily(
+    session: Session,
+    *,
+    sample_ts: datetime,
+    equity_value: float | None,
+    commit: bool = True,
+) -> None:
+    if equity_value is None:
+        return
+    sample_ts_utc = _to_utc_or_none(sample_ts) or sample_ts
+    day_utc = _floor_day_utc(sample_ts_utc)
+    now = datetime.now(timezone.utc)
+    row = session.scalar(
+        select(AccountStatsDaily)
+        .where(AccountStatsDaily.day_utc == day_utc)
+        .limit(1)
+    )
+    if row is None:
+        row = AccountStatsDaily(
+            day_utc=day_utc,
+            equity_open=equity_value,
+            equity_high=equity_value,
+            equity_low=equity_value,
+            equity_close=equity_value,
+            sample_count=1,
+            last_snapshot_ts=sample_ts_utc,
+            created_at=now,
+            updated_at=now,
+        )
+        session.add(row)
+    else:
+        if row.equity_open is None:
+            row.equity_open = equity_value
+        if row.equity_high is None or equity_value > row.equity_high:
+            row.equity_high = equity_value
+        if row.equity_low is None or equity_value < row.equity_low:
+            row.equity_low = equity_value
+        row.equity_close = equity_value
+        row.sample_count = int(row.sample_count or 0) + 1
+        row_last_ts = _to_utc_or_none(getattr(row, "last_snapshot_ts", None))
+        # Defensive fallback: malformed historical rows should not crash scheduler.
+        if row_last_ts is None:
+            row.last_snapshot_ts = sample_ts_utc
+        elif sample_ts_utc >= row_last_ts:
+            row.last_snapshot_ts = sample_ts_utc
+        row.updated_at = now
+    if commit:
+        session.commit()
+
+
+def list_account_stats_daily(
+    session: Session,
+    *,
+    start_day: datetime | None = None,
+    end_day: datetime | None = None,
+    limit: int = 365,
+) -> list[AccountStatsDaily]:
+    stmt = select(AccountStatsDaily)
+    if start_day is not None:
+        stmt = stmt.where(AccountStatsDaily.day_utc >= _floor_day_utc(start_day))
+    if end_day is not None:
+        stmt = stmt.where(AccountStatsDaily.day_utc <= _floor_day_utc(end_day))
+    stmt = stmt.order_by(AccountStatsDaily.day_utc.desc()).limit(max(1, int(limit)))
+    rows = list(session.scalars(stmt))
+    rows.reverse()
+    return rows
+
+
+def get_latest_futures_account_snapshot_in_range(
+    session: Session,
+    *,
+    start_ts: datetime,
+    end_ts: datetime,
+) -> FuturesAccountSnapshot | None:
+    return session.scalar(
+        select(FuturesAccountSnapshot)
+        .where(
+            FuturesAccountSnapshot.ts >= start_ts,
+            FuturesAccountSnapshot.ts < end_ts,
+        )
+        .order_by(FuturesAccountSnapshot.ts.desc())
+        .limit(1)
+    )
+
+
+def purge_old_futures_account_snapshots(session: Session, *, cutoff: datetime, commit: bool = True) -> int:
+    stmt = delete(FuturesAccountSnapshot).where(FuturesAccountSnapshot.ts < cutoff)
+    result = session.execute(stmt)
+    if commit:
+        session.commit()
+    return int(result.rowcount or 0)
+
+
+def purge_old_margin_account_snapshots(session: Session, *, cutoff: datetime, commit: bool = True) -> int:
+    stmt = delete(MarginAccountSnapshot).where(MarginAccountSnapshot.ts < cutoff)
+    result = session.execute(stmt)
+    if commit:
+        session.commit()
+    return int(result.rowcount or 0)
+
+
 # --------------- Intel / News ---------------
 
 
@@ -1247,8 +1567,13 @@ def list_youtube_channels(session: Session, enabled_only: bool = True) -> list[Y
 
 def upsert_youtube_video(session: Session, payload: dict[str, Any], commit: bool = True) -> None:
     values = {**payload}
+    now = datetime.now(timezone.utc)
     if "created_at" not in values:
-        values["created_at"] = datetime.now(timezone.utc)
+        values["created_at"] = now
+    if "status" not in values:
+        values["status"] = PENDING_SUBTITLE
+    if "status_updated_at" not in values:
+        values["status_updated_at"] = now
     stmt = _upsert_stmt(
         session,
         YoutubeVideo,
@@ -1358,6 +1683,27 @@ def list_videos_needing_asr(
     return _merge_youtube_queue_with_rescue(session, base_query, limit=limit, rescue_oldest=rescue_oldest)
 
 
+def list_videos_stuck_in_asr(
+    session: Session,
+    stuck_hours: float = 2.0,
+    limit: int = 50,
+) -> list[YoutubeVideo]:
+    """Videos stuck in QUEUED_ASR longer than stuck_hours (for dead-task alerting)."""
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=stuck_hours)
+    return list(
+        session.scalars(
+            select(YoutubeVideo)
+            .where(
+                YoutubeVideo.status == QUEUED_ASR,
+                YoutubeVideo.status_updated_at.is_not(None),
+                YoutubeVideo.status_updated_at < cutoff,
+            )
+            .order_by(YoutubeVideo.status_updated_at.asc())
+            .limit(limit)
+        )
+    )
+
+
 def update_youtube_video_transcript(
     session: Session,
     video_id: str,
@@ -1370,10 +1716,22 @@ def update_youtube_video_transcript(
     row = session.scalar(select(YoutubeVideo).where(YoutubeVideo.video_id == video_id))
     if not row:
         return
+    now = datetime.now(timezone.utc)
     row.transcript_text = transcript_text
     row.transcript_lang = transcript_lang
     row.needs_asr = needs_asr
-    row.processed_at = processed_at or datetime.now(timezone.utc)
+    row.processed_at = processed_at or now
+    if transcript_text:
+        row.status = PENDING_ANALYSIS
+        row.status_updated_at = now
+        row.asr_queued_at = None
+    elif needs_asr:
+        row.status = QUEUED_ASR
+        row.status_updated_at = now
+        row.asr_queued_at = row.asr_queued_at or now
+    else:
+        row.status = PENDING_SUBTITLE
+        row.status_updated_at = now
     if commit:
         session.commit()
 
@@ -1391,14 +1749,38 @@ def update_youtube_video_asr_result(
     row = session.scalar(select(YoutubeVideo).where(YoutubeVideo.video_id == video_id))
     if not row:
         return
+    now = datetime.now(timezone.utc)
     row.asr_backend = asr_backend
     row.asr_model = asr_model
-    row.asr_processed_at = datetime.now(timezone.utc)
+    row.asr_processed_at = now
     row.last_error = last_error
     if transcript_text:
         row.transcript_text = transcript_text
         row.transcript_lang = transcript_lang
         row.needs_asr = False
+        row.status = PENDING_ANALYSIS
+        row.status_updated_at = now
+        row.asr_queued_at = None
+    else:
+        row.status = ASR_FAILED
+        row.status_updated_at = now
+    if commit:
+        session.commit()
+
+
+def update_youtube_video_status(
+    session: Session,
+    video_id: str,
+    status: str,
+    *,
+    commit: bool = True,
+) -> None:
+    now = datetime.now(timezone.utc)
+    session.execute(
+        update(YoutubeVideo)
+        .where(YoutubeVideo.video_id == video_id)
+        .values(status=status, status_updated_at=now)
+    )
     if commit:
         session.commit()
 
@@ -1424,6 +1806,7 @@ def update_youtube_video_analysis_runtime(
     if not row:
         return
 
+    now = datetime.now(timezone.utc)
     if reset:
         row.analysis_runtime_status = None
         row.analysis_stage = None
@@ -1435,10 +1818,18 @@ def update_youtube_video_analysis_runtime(
         row.analysis_last_error_type = None
         row.analysis_last_error_code = None
         row.analysis_last_error_message = None
+        row.status = PENDING_ANALYSIS
+        row.status_updated_at = now
 
-    now = datetime.now(timezone.utc)
     if status is not _UNSET:
         row.analysis_runtime_status = status  # type: ignore[assignment]
+        rt = str(status or "").lower()
+        if rt in ("queued", "running"):
+            row.status = ANALYZING
+            row.status_updated_at = now
+        elif rt in ("failed_paused", "failed"):
+            row.status = FAILED
+            row.status_updated_at = now
     if stage is not _UNSET:
         row.analysis_stage = stage  # type: ignore[assignment]
     if started_at is not _UNSET:
@@ -1449,6 +1840,9 @@ def update_youtube_video_analysis_runtime(
         row.analysis_updated_at = updated_at  # type: ignore[assignment]
     if finished_at is not _UNSET:
         row.analysis_finished_at = finished_at  # type: ignore[assignment]
+        if finished_at and str(status or "").lower() == "done":
+            row.status = COMPLETED
+            row.status_updated_at = now
     if retry_count is not _UNSET:
         row.analysis_retry_count = max(0, int(retry_count))  # type: ignore[assignment]
     if next_retry_at is not _UNSET:
@@ -1504,6 +1898,8 @@ def bulk_mark_youtube_videos_analysis_queued(
         "analysis_started_at": ts,
         "analysis_updated_at": ts,
         "analysis_finished_at": None,
+        "status": ANALYZING,
+        "status_updated_at": ts,
     }
     if reset_retry:
         values.update({

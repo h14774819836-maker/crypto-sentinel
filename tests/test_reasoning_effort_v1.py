@@ -28,18 +28,15 @@ async def test_reasoning_effort_propagation():
         mock_client = MagicMock()
         mock_openai_class.return_value = mock_client
         provider.client = mock_client
-        
-        # Mock chat.completions.create
         mock_response = MagicMock()
-        mock_response.choices = [MagicMock(message=MagicMock(content="OK", reasoning_content="thinking..."))]
-        mock_response.usage = MagicMock(prompt_tokens=10, completion_tokens=10, total_tokens=20)
-        mock_client.chat.completions.create = AsyncMock(return_value=mock_response)
+        mock_response.output_text = "OK"
+        mock_response.output = []
+        mock_response.usage = MagicMock(input_tokens=10, output_tokens=10, total_tokens=20)
+        mock_client.responses.create = AsyncMock(return_value=mock_response)
 
-        # Call generate_response
         messages = [{"role": "user", "content": "hello"}]
         await provider.generate_response(messages)
 
-        # Assert reasoning_effort was passed
-        args, kwargs = mock_client.chat.completions.create.call_args
-        assert kwargs["reasoning_effort"] == "medium"
+        args, kwargs = mock_client.responses.create.call_args
+        assert (kwargs.get("reasoning") or {}).get("effort") == "medium"
         assert kwargs["model"] == "doubao-seed-2-0-pro-260215"

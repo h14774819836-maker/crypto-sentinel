@@ -4,10 +4,13 @@ import asyncio
 from types import SimpleNamespace
 
 from app.ai.llm_runtime_reload import read_llm_reload_ack, write_llm_reload_signal
+from app.config import get_settings
 import app.worker.llm_hot_reload as worker_reload
 
 
 def test_worker_maybe_reload_applies_new_revision_and_writes_ack(tmp_path, monkeypatch):
+    monkeypatch.setenv("LLM_HOT_RELOAD_USE_REDIS", "false")
+    get_settings.cache_clear()
     signal_file = tmp_path / "llm_hot_reload_signal.json"
     ack_file = tmp_path / "llm_hot_reload_ack.json"
     revision = write_llm_reload_signal(str(signal_file), source="pytest", reason="worker_reload")

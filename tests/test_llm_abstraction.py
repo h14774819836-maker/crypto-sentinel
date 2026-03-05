@@ -10,6 +10,20 @@ from app.config import Settings
 from app.ai.provider import LLMRateLimitError, LLMCapabilities
 from app.ai.openai_provider import OpenAICompatibleProvider
 
+@pytest.fixture(autouse=True)
+def clear_llm_env(monkeypatch):
+    keys = [
+        "LLM_PROFILES_JSON",
+        "LLM_TASK_ROUTING_JSON",
+        "OPENAI_API_KEY",
+        "DEEPSEEK_API_KEY",
+        "OPENROUTER_API_KEY",
+        "ARK_API_KEY",
+        "NVIDIA_NIM_API_KEY",
+    ]
+    for key in keys:
+        monkeypatch.delenv(key, raising=False)
+
 @pytest.fixture
 def mock_settings():
     import json

@@ -132,12 +132,14 @@ LLM_PROFILES_JSON={"general":{"provider":"deepseek","model":"deepseek-chat","use
 LLM_TASK_ROUTING_JSON={"telegram_chat":"general","market":"market","youtube":"youtube","selfcheck":"general"}
 LLM_HOT_RELOAD_SIGNAL_FILE=data/llm_hot_reload_signal.json
 LLM_HOT_RELOAD_ACK_FILE=data/llm_hot_reload_ack.json
+REDIS_URL=redis://localhost:6379/0
+LLM_HOT_RELOAD_USE_REDIS=true
 ```
 
-### LLM ????????????
-- `/llm` ????????????????API ???????
-- Worker ???? `LLM_HOT_RELOAD_SIGNAL_FILE` / `LLM_HOT_RELOAD_ACK_FILE` ?????????????? `WORKER_HEARTBEAT_SECONDS` ???
-- ??????? signal revision ? Worker ACK ???????????????
+### LLM 热更新
+- `/llm` 页面可编辑配置并保存，API 即时刷新
+- **Redis 模式（默认）**：`LLM_HOT_RELOAD_USE_REDIS=true` 时，API 发布 `llm:reload` Pub/Sub 事件，Worker 订阅后实时应用；支持多 Worker 高可用
+- **文件模式（回退）**：`LLM_HOT_RELOAD_USE_REDIS=false` 时，使用 `LLM_HOT_RELOAD_SIGNAL_FILE` / `LLM_HOT_RELOAD_ACK_FILE`，Worker 在 heartbeat 内轮询；仅适用于单 Worker
 
 
 说明：

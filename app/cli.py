@@ -155,6 +155,8 @@ def initialize_database(
     fallback_fn: Callable[[str], None] = fallback_create_all,
 ) -> str:
     strict_mode = enforce_migration_strict_mode(settings)
+    allow_fallback_raw = getattr(settings, "db_allow_fallback_create_all", None)
+    allow_fallback = True if allow_fallback_raw is None else bool(allow_fallback_raw)
     if ALEMBIC_INI_PATH.exists() and MIGRATIONS_PATH.exists():
         cmd = build_alembic_upgrade_command()
         result = runner(
@@ -176,10 +178,10 @@ def initialize_database(
         error_text = "\n".join(item for item in [stderr_text, stdout_text] if item)
         logger.warning("Alembic upgrade failed (exit=%s). stderr=%s", result.returncode, stderr_text)
 
-        if strict_mode:
+        if strict_mode or not allow_fallback:
             raise RuntimeError(
-                "Alembic upgrade failed in strict migration mode. "
-                "Fallback/stamp/create_all are disabled for this APP_ENV."
+                "Alembic upgrade failed. Fallback/stamp/create_all are disabled. "
+                "Run `alembic upgrade head` before starting services or set DB_ALLOW_FALLBACK_CREATE_ALL=true."
             )
 
         if _is_sqlite_url(settings.database_url):
@@ -217,10 +219,10 @@ def initialize_database(
                     stamp_result.stderr.strip(),
                 )
     else:
-        if strict_mode:
+        if strict_mode or not allow_fallback:
             raise RuntimeError(
-                "Alembic metadata is unavailable in strict migration mode. "
-                "Refusing to run fallback/create_all."
+                "Alembic metadata is unavailable. Refusing to run fallback/create_all. "
+                "Ensure alembic.ini and migrations are present, or set DB_ALLOW_FALLBACK_CREATE_ALL=true."
             )
         logger.warning("Alembic unavailable (missing alembic.ini or migrations directory)")
 

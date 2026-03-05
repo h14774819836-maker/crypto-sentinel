@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from fastapi.testclient import TestClient
 
 from app.main import app
-import app.web.views as views
+import app.web.routers.api_market as api_market
 
 
 def test_ai_signals_api_returns_analysis_summary_and_handles_null_analysis(monkeypatch):
@@ -53,7 +53,7 @@ def test_ai_signals_api_returns_analysis_summary_and_handles_null_analysis(monke
             created_at=datetime.now(timezone.utc),
         ),
     ]
-    monkeypatch.setattr(views, "list_ai_signals", lambda db, limit=50, symbol=None: rows)
+    monkeypatch.setattr(api_market, "list_ai_signals", lambda db, limit=50, symbol=None: rows)
     client = TestClient(app)
     resp = client.get("/api/ai-signals")
     assert resp.status_code == 200

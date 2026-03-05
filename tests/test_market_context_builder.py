@@ -1,9 +1,15 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
-from app.ai.market_context_builder import build_market_analysis_context
+from app.ai.market_context_builder import (
+    CONTEXT_MODE_MINIMAL,
+    build_market_analysis_context,
+    filter_snapshots_for_context_mode,
+    resolve_context_mode,
+    to_minimal_context,
+)
 
 
 def _snap(ts: datetime):
@@ -180,3 +186,117 @@ def test_market_context_builder_marks_stale_higher_tf_as_degraded():
     assert "4h" in (dq.get("stale_timeframes") or [])
     assert dq["overall"] in {"DEGRADED", "POOR"}
     assert any("周期数据延迟" in n for n in dq["notes"])
+
+
+def test_market_context_builder_injects_compact_account_snapshot():
+    now = datetime(2026, 3, 1, 12, 0, tzinfo=timezone.utc)
+    ctx = build_market_analysis_context(
+        symbol="BTCUSDT",
+        snapshots=_snapshots(now),
+        recent_alerts=[],
+        funding_current={"ts": now - timedelta(minutes=20), "last_funding_rate": 0.0002, "open_interest": 1200},
+        funding_history=[],
+        youtube_consensus=None,
+        youtube_insights=None,
+        account_snapshot={
+            "watch_symbol": "BTCUSDT",
+            "as_of_utc": now.isoformat(),
+            "futures": {
+                "available_balance": 88.2,
+                "total_margin_balance": 120.5,
+                "position_amt": 0.01,
+                "mark_price": 100.0,
+                "liquidation_price": 90.0,
+                "raw_dump": "x" * 5000,  # should be dropped by compact snapshot builder
+            },
+            "margin": {"margin_level": 1.35, "margin_call_bar": 1.1},
+            "risk_flags": {"available_balance_low": True},
+        },
+        now=now,
+    )
+
+    account = ctx.get("account_snapshot") or {}
+    assert account.get("watch_symbol") == "BTCUSDT"
+    assert account.get("futures", {}).get("available_balance") == 88.2
+    assert "raw_dump" not in (account.get("futures") or {})
+    budget = ctx.get("input_budget_meta") or {}
+    assert "account_snapshot_chars_before_clip" in budget
+    assert "account_snapshot_chars_after_clip" in budget
+
+
+def test_market_context_builder_minimal_mode():
+    now = datetime(2026, 3, 1, 12, 0, tzinfo=timezone.utc)
+    ctx = build_market_analysis_context(
+        symbol="BTCUSDT",
+        snapshots=_snapshots(now),
+        recent_alerts=[{"symbol": "BTCUSDT", "alert_type": "X", "severity": "high", "reason": "test", "ts": now.isoformat()}],
+        funding_current={"ts": now - timedelta(minutes=20), "last_funding_rate": 0.0002, "open_interest": 1200},
+        funding_history=[],
+        youtube_consensus=None,
+        youtube_insights=None,
+        now=now,
+        context_mode=CONTEXT_MODE_MINIMAL,
+    )
+    assert ctx["youtube_radar"]["available"] is False
+    assert ctx["intel_digest"] == {}
+    assert ctx["account_snapshot"] == {}
+    assert ctx["alerts_digest"]["top_events"] == []
+    assert "minimal_context" in (ctx.get("input_budget_meta") or {}).get("clip_steps_applied", [])
+    assert set(ctx["brief"]["timeframes"]) <= {"1m", "5m"}
+    assert "tradeable_gate" in ctx["brief"]
+    assert "funding_deltas" in ctx
+    assert "data_quality" in ctx
+
+
+def test_resolve_context_mode():
+    assert resolve_context_mode(
+        data_quality={"overall": "GOOD"},
+        tradeable_gate={"tradeable": True},
+        min_context_on_poor_data=True,
+        min_context_on_non_tradeable=True,
+    ) == "full"
+    assert resolve_context_mode(
+        data_quality={"overall": "POOR"},
+        tradeable_gate={"tradeable": True},
+        min_context_on_poor_data=True,
+        min_context_on_non_tradeable=True,
+    ) == "minimal"
+    assert resolve_context_mode(
+        data_quality={"overall": "GOOD"},
+        tradeable_gate={"tradeable": False},
+        min_context_on_poor_data=True,
+        min_context_on_non_tradeable=True,
+    ) == "minimal"
+    assert resolve_context_mode(
+        data_quality={"overall": "POOR"},
+        tradeable_gate={"tradeable": False},
+        min_context_on_poor_data=False,
+        min_context_on_non_tradeable=False,
+    ) == "full"
+
+
+def test_filter_snapshots_for_context_mode():
+    snapshots = {"4h": {}, "1h": {}, "15m": {}, "5m": {}, "1m": {}}
+    minimal = filter_snapshots_for_context_mode(snapshots, CONTEXT_MODE_MINIMAL)
+    assert set(minimal.keys()) == {"5m", "1m"}
+    full = filter_snapshots_for_context_mode(snapshots, "full")
+    assert full == snapshots
+
+
+def test_to_minimal_context():
+    now = datetime(2026, 3, 1, 12, 0, tzinfo=timezone.utc)
+    full = build_market_analysis_context(
+        symbol="BTCUSDT",
+        snapshots=_snapshots(now),
+        recent_alerts=[],
+        funding_current={"ts": now - timedelta(minutes=20), "last_funding_rate": 0.0002, "open_interest": 1200},
+        funding_history=[],
+        youtube_consensus=None,
+        youtube_insights=None,
+        now=now,
+    )
+    minimal = to_minimal_context(full, symbol="BTCUSDT", snapshots=_snapshots(now))
+    assert minimal["youtube_radar"]["available"] is False
+    assert minimal["intel_digest"] == {}
+    assert minimal["account_snapshot"] == {}
+    assert "minimal_context" in (minimal.get("input_budget_meta") or {}).get("clip_steps_applied", [])

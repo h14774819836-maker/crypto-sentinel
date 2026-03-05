@@ -110,9 +110,16 @@
           </div>
           <span class="text-xs text-muted-foreground">{{ item.ts_utc|bj_time("%m-%d %H:%M") }}</span>
         </div>
-        <a href="{{ item.url }}" target="_blank" class="text-sm md:text-base font-medium hover:text-primary transition-colors">
-          {{ item.title }}
-        </a>
+        <div class="flex items-start gap-2">
+          <a href="{{ item.url }}" target="_blank" class="text-sm md:text-base font-medium hover:text-primary transition-colors flex-1 min-w-0">
+            {{ item.title }}
+          </a>
+          <button type="button" class="intel-translate-btn shrink-0 px-2 py-1 text-xs rounded bg-primary/10 hover:bg-primary/20 text-primary border border-primary/20 transition-colors flex items-center gap-1" data-title="{{ item.title|e }}">
+            <i data-lucide="languages" class="w-3.5 h-3.5"></i>
+            <span>翻译</span>
+          </button>
+        </div>
+        <div class="intel-translated mt-2 text-sm text-primary/90 hidden"></div>
         <div class="text-xs text-muted-foreground mt-2">
           region={{ item.region or "-" }} · topics={{ (item.topics_json or [])|join(", ") if item.topics_json else "-" }}
           · entities={{ (item.entities_json or [])|join(", ") if item.entities_json else "-" }}
@@ -125,5 +132,60 @@
 </section>
 
 <p class="text-xs text-muted-foreground mt-4">情报仅供参考，不构成投资建议。</p>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+{% if intel_enabled and items %}
+<script>
+(function() {
+  document.querySelectorAll('.intel-translate-btn').forEach(function(btn) {
+    btn.addEventListener('click', async function() {
+      var title = this.getAttribute('data-title') || '';
+      if (!title.trim()) return;
+      var article = this.closest('article');
+      var translatedEl = article ? article.querySelector('.intel-translated') : null;
+      var originalText = btn.querySelector('span');
+      if (translatedEl && translatedEl.classList.contains('!block')) {
+        translatedEl.classList.add('hidden');
+        translatedEl.classList.remove('!block');
+        translatedEl.textContent = '';
+        if (originalText) originalText.textContent = '翻译';
+        return;
+      }
+      if (btn.disabled) return;
+      btn.disabled = true;
+      if (originalText) originalText.textContent = '翻译中...';
+      try {
+        var r = await fetch('/api/translate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text: title })
+        });
+        var d = await r.json();
+        if (r.ok && d.translated) {
+          if (translatedEl) {
+            translatedEl.textContent = '译文：' + d.translated;
+            translatedEl.classList.remove('hidden');
+            translatedEl.classList.add('!block');
+            if (originalText) originalText.textContent = '收起';
+          }
+        } else {
+          if (originalText) originalText.textContent = '翻译';
+          alert(d.detail || '翻译失败');
+        }
+      } catch (e) {
+        if (originalText) originalText.textContent = '翻译';
+        alert('翻译服务不可用');
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  });
+  if (window.lucide && window.lucide.createIcons) {
+    window.lucide.createIcons();
+  }
+})();
+</script>
 {% endif %}
 {% endblock %}

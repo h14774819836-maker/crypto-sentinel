@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -8,7 +8,7 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-import app.scheduler.jobs as jobs_module
+import app.scheduler._jobs_impl as jobs_module  # Module where globals (_YT_*) live
 from app.db.models import YoutubeInsight, YoutubeVideo
 from app.db.repository import update_youtube_video_analysis_runtime, upsert_youtube_video, update_youtube_video_transcript
 from app.db.session import Base

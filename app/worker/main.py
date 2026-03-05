@@ -13,7 +13,8 @@ from app.db.guards import ensure_db_backend_allowed
 from app.db.session import SessionLocal
 from app.logging import logger, setup_logging
 from app.providers.binance_provider import BinanceProvider
-from app.scheduler.jobs import startup_backfill_job, supervised_job, ws_consumer_job
+from app.scheduler.jobs import account_user_stream_job, startup_backfill_job, supervised_job, ws_consumer_job
+from app.worker.llm_hot_reload import run_llm_reload_subscriber
 from app.scheduler.runtime import WorkerRuntime
 from app.scheduler.scheduler import build_scheduler
 
@@ -127,6 +128,15 @@ async def run_worker() -> None:
     scheduler.start()
 
     ws_task = asyncio.create_task(supervised_job("ws_consumer_job", ws_consumer_job, runtime))
+    llm_reload_task: asyncio.Task | None = None
+    if getattr(settings, "llm_hot_reload_use_redis", True):
+        llm_reload_task = asyncio.create_task(run_llm_reload_subscriber(runtime), name="llm_reload_subscriber")
+    account_ws_task: asyncio.Task | None = None
+    if settings.account_user_stream_enabled:
+        account_ws_task = asyncio.create_task(
+            supervised_job("account_user_stream_job", account_user_stream_job, runtime),
+            name="account_user_stream_job",
+        )
 
     logger.info("Worker started with watchlist=%s", settings.watchlist_symbols)
     try:
@@ -140,8 +150,14 @@ async def run_worker() -> None:
         if tg_poller_task is not None:
             tg_poller_task.cancel()
             await asyncio.gather(tg_poller_task, return_exceptions=True)
+        if llm_reload_task is not None:
+            llm_reload_task.cancel()
+            await asyncio.gather(llm_reload_task, return_exceptions=True)
         ws_task.cancel()
         await asyncio.gather(ws_task, return_exceptions=True)
+        if account_ws_task is not None:
+            account_ws_task.cancel()
+            await asyncio.gather(account_ws_task, return_exceptions=True)
         scheduler.shutdown(wait=False)
         if runtime.http_client is not None:
             await runtime.http_client.aclose()

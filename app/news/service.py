@@ -198,9 +198,10 @@ class IntelService:
         results = await asyncio.gather(*tasks, return_exceptions=True)
         items: list[dict[str, Any]] = []
         seen_url_hash: set[str] = set()
+        failures: list[str] = []
         for result in results:
             if isinstance(result, Exception):
-                logger.warning("intel feed fetch failed: %s", result)
+                failures.append(str(result))
                 continue
             for item in result:
                 uh = str(item.get("url_hash") or "")
@@ -208,6 +209,14 @@ class IntelService:
                     continue
                 seen_url_hash.add(uh)
                 items.append(item)
+        if failures:
+            # Keep one compact warning per run instead of one warning per source.
+            sample = " | ".join(failures[:3])
+            logger.warning(
+                "intel feed fetch failed_count=%d sample_errors=%s",
+                len(failures),
+                sample,
+            )
         items.sort(key=lambda x: x.get("ts_utc") or datetime.now(timezone.utc), reverse=True)
         return items[: max(1, int(max_items_per_run))]
 

@@ -2,8 +2,11 @@ from datetime import datetime, timezone
 
 from app.alerts.message_builder import (
     TelegramMessage,
+    build_ai_diagnostic_alert,
+    build_alert_ref,
     build_ai_signal_message,
     build_anomaly_message,
+    build_flash_alert,
     escape_html,
     fmt_dt_bjt,
     fmt_price,
@@ -84,6 +87,45 @@ def test_build_anomaly_message_legacy_fallback():
     msg = build_anomaly_message(payload)
     assert "BTCUSDT 异常" in msg.text
     assert "VOLATILITY_SURGE" in msg.text
+
+
+def test_build_alert_ref():
+    ts = datetime(2025, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    ref = build_alert_ref("SOLUSDT", "1d152da2abcdef", ts)
+    assert ref.startswith("A250101-2000-SOL-1D15")
+
+
+def test_build_flash_alert():
+    payload = {
+        "event_uid": "event-123",
+        "symbol": "SOLUSDT",
+        "alert_type": "MOMENTUM_ANOMALY_UP",
+        "reason": "1m 异动",
+        "ts": datetime(2025, 1, 1, 12, 0, 0, tzinfo=timezone.utc),
+        "metrics_json": {
+            "score": 84,
+            "direction": "UP",
+            "regime": "VOLATILE",
+            "observations": {"ret_1m": 0.0046, "volume_zscore": 1.94},
+        },
+    }
+    msg = build_flash_alert(payload, latest_price=101.234, alert_ref="A250101-2000-SOL-1D15")
+    assert msg.kind == "anomaly_flash"
+    assert "#A250101-2000-SOL-1D15" in msg.text
+    assert "现价: 101.23" in msg.text
+    assert "正在调用 AI" in msg.text
+
+
+def test_build_ai_diagnostic_alert():
+    msg = build_ai_diagnostic_alert(
+        symbol="SOLUSDT",
+        alert_ref="A250101-2000-SOL-1D15",
+        diagnosis_text="更偏向顺势突破，关注回踩是否守住。",
+        summary_reason="1m 快速上冲",
+    )
+    assert msg.kind == "anomaly_ai_diagnostic"
+    assert "AI诊断 #A250101-2000-SOL-1D15" in msg.text
+    assert "核心推演" in msg.text
 
 
 class DummyAiSignal:

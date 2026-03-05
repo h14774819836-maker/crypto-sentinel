@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
@@ -7,6 +7,7 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from app.config import get_settings
 from app.db.models import WorkerStatus, YoutubeVideo
 from app.db.repository import (
     upsert_youtube_video,
@@ -90,7 +91,7 @@ def test_youtube_videos_api_returns_queue_summary_and_worker_fields(monkeypatch)
             assert item["queue_state"] == "running"
             assert item["analysis_elapsed_seconds"] >= 1
             assert item["analysis_stalled"] is False
-            assert item["status_notes"] == "Analyzing - llm_request"
+            assert item["status_notes"] == "正在分析 - llm_request"
             assert item["analysis_retry_scheduled"] is False
             assert item["analysis_retry_eta_seconds"] is None
             assert "?" not in (item["status_notes"] or "")
@@ -102,7 +103,7 @@ def test_youtube_videos_api_returns_queue_summary_and_worker_fields(monkeypatch)
             assert data2["analysis_status"] == "running"
             assert data2["queue_state"] == "running"
             assert data2["worker_status"]["is_online"] is True
-            assert data2["status_notes"] == "Analyzing - llm_request"
+            assert data2["status_notes"] == "正在分析 - llm_request"
             assert data2["analysis_retry_scheduled"] is False
             assert "effective_llm" in data2
             assert "?" not in (data2["status_notes"] or "")
@@ -137,6 +138,14 @@ def test_youtube_api_exposes_retry_wait_and_queue_summary(monkeypatch):
             last_error_type="timeout",
             last_error_code="timeout",
             last_error_message="request timeout",
+        )
+        db.add(
+            WorkerStatus(
+                worker_id="test-worker",
+                started_at=now - timedelta(hours=1),
+                last_seen=now - timedelta(seconds=2),
+                version="test",
+            )
         )
         db.commit()
 
@@ -179,6 +188,8 @@ def test_youtube_api_exposes_retry_wait_and_queue_summary(monkeypatch):
 
 
 def test_youtube_manual_retry_analyze_marks_runtime_queued(monkeypatch):
+    monkeypatch.setenv("ADMIN_TOKEN", "test-admin-token")
+    get_settings.cache_clear()
     session_local = _setup_db()
     now = datetime.now(timezone.utc)
     with session_local() as db:
@@ -219,7 +230,11 @@ def test_youtube_manual_retry_analyze_marks_runtime_queued(monkeypatch):
 
     try:
         with TestClient(app) as client:
-            resp = client.post("/api/youtube/analyze/v_retry", json={"force": False})
+            resp = client.post(
+                "/api/youtube/analyze/v_retry",
+                json={"force": False},
+                headers={"Authorization": "Bearer test-admin-token"},
+            )
             assert resp.status_code == 200
             payload = resp.json()
             assert payload["ok"] is True
