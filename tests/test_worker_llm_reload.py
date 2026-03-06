@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
+import pytest
+
 from app.ai.llm_runtime_reload import read_llm_reload_ack, write_llm_reload_signal
 from app.config import get_settings
 import app.worker.llm_hot_reload as worker_reload
@@ -48,3 +50,33 @@ def test_worker_maybe_reload_applies_new_revision_and_writes_ack(tmp_path, monke
     assert ack["status"] == "ok"
     assert ack["details"]["market"]["provider"] == "openrouter"
 
+
+def test_split_worker_subscriber_rejects_file_fallback():
+    runtime = SimpleNamespace(
+        settings=SimpleNamespace(
+            worker_role_normalized="core",
+            llm_hot_reload_use_redis=False,
+            llm_hot_reload_poll_seconds=1,
+            redis_url="redis://localhost:6379/0",
+        ),
+        llm_reload_revision_applied="",
+    )
+
+    with pytest.raises(RuntimeError):
+        asyncio.run(worker_reload.run_llm_reload_subscriber(runtime))
+
+
+def test_split_worker_subscriber_requires_redis_available(monkeypatch):
+    runtime = SimpleNamespace(
+        settings=SimpleNamespace(
+            worker_role_normalized="ai",
+            llm_hot_reload_use_redis=True,
+            llm_hot_reload_poll_seconds=1,
+            redis_url="redis://localhost:6379/0",
+        ),
+        llm_reload_revision_applied="",
+    )
+
+    monkeypatch.setattr(worker_reload, "_redis_available", lambda _url: False)
+    with pytest.raises(RuntimeError):
+        asyncio.run(worker_reload.run_llm_reload_subscriber(runtime))

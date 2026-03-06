@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import logging
@@ -34,6 +34,13 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def _strict_redis_reload_required(settings: Settings) -> bool:
+    role = str(getattr(settings, "worker_role_normalized", "") or "").strip().lower()
+    if role not in {"all", "core", "ai"}:
+        role = str(getattr(settings, "worker_role", "all") or "").strip().lower()
+    return role in {"core", "ai"}
+
+
 def _ensure_parent_dir(path_str: str) -> None:
     parent = Path(path_str).expanduser().resolve().parent
     parent.mkdir(parents=True, exist_ok=True)
@@ -56,25 +63,21 @@ def _read_json_file(path_str: str) -> dict[str, Any] | None:
         with path.open("r", encoding="utf-8") as f:
             data = json.load(f)
     except json.JSONDecodeError as exc:
-        logger.warning("[LLM热更新] JSON 解析失败 path=%s error=%s", path, exc)
+        logger.warning("[LLM hot reload] JSON parse failed path=%s error=%s", path, exc)
         return None
     except OSError as exc:
-        logger.warning("[LLM热更新] 读取文件失败 path=%s error=%s", path, exc)
+        logger.warning("[LLM hot reload] read file failed path=%s error=%s", path, exc)
         return None
     return data if isinstance(data, dict) else None
 
 
 def refresh_llm_env_vars_from_dotenv(env_path: str | None = None) -> None:
-    """Refresh only LLM-related env vars from .env into current process env.
-
-    Pydantic Settings reads process env before .env. UI writes .env at runtime,
-    so we need to sync changed LLM keys into os.environ before cache_clear().
-    """
+    """Refresh only LLM-related env vars from .env into current process env."""
     path = str(Path(env_path).expanduser().resolve()) if env_path else str(ENV_PATH)
     try:
         values = dotenv_values(path)
     except Exception as exc:  # pragma: no cover - defensive logging
-        logger.warning("[LLM热更新] 刷新进程环境变量失败 path=%s error=%s", path, exc)
+        logger.warning("[LLM hot reload] refresh process env failed path=%s error=%s", path, exc)
         return
 
     for key, value in values.items():
@@ -97,7 +100,7 @@ def apply_llm_config_in_api_process() -> Settings:
         web_views.settings = refreshed_settings
         refreshed_modules.append("app.web.views")
     except Exception as exc:  # pragma: no cover - defensive logging
-        logger.warning("[LLM热更新][API] 刷新 app.web.views.settings 失败: %s", exc)
+        logger.warning("[LLM hot reload][API] refresh app.web.views.settings failed: %s", exc)
 
     try:
         import app.web.router as web_router
@@ -105,7 +108,7 @@ def apply_llm_config_in_api_process() -> Settings:
         web_router.settings = refreshed_settings
         refreshed_modules.append("app.web.router")
     except Exception as exc:  # pragma: no cover - defensive logging
-        logger.warning("[LLM热更新][API] 刷新 app.web.router.settings 失败: %s", exc)
+        logger.warning("[LLM hot reload][API] refresh app.web.router.settings failed: %s", exc)
 
     try:
         import app.web.shared as web_shared
@@ -113,7 +116,7 @@ def apply_llm_config_in_api_process() -> Settings:
         web_shared.settings = refreshed_settings
         refreshed_modules.append("app.web.shared")
     except Exception as exc:  # pragma: no cover - defensive logging
-        logger.warning("[LLM热更新][API] 刷新 app.web.shared.settings 失败: %s", exc)
+        logger.warning("[LLM hot reload][API] refresh app.web.shared.settings failed: %s", exc)
 
     try:
         import app.web.api_telegram as api_telegram
@@ -121,9 +124,9 @@ def apply_llm_config_in_api_process() -> Settings:
         api_telegram.settings = refreshed_settings
         refreshed_modules.append("app.web.api_telegram")
     except Exception as exc:  # pragma: no cover - defensive logging
-        logger.warning("[LLM热更新][API] 刷新 app.web.api_telegram.settings 失败: %s", exc)
+        logger.warning("[LLM hot reload][API] refresh app.web.api_telegram.settings failed: %s", exc)
 
-    logger.warning("[LLM热更新][API] 已刷新配置缓存 modules=%s", refreshed_modules)
+    logger.warning("[LLM hot reload][API] settings cache refreshed modules=%s", refreshed_modules)
     return refreshed_settings
 
 
@@ -141,15 +144,15 @@ def _publish_llm_reload_signal_redis(redis_url: str, *, source: str = "llm_ui", 
     try:
         client = redis.from_url(redis_url)
         client.publish(_LLM_RELOAD_CHANNEL, json.dumps(payload, ensure_ascii=False))
-        logger.warning("[LLM热更新] 已发布 Redis signal revision=%s channel=%s", revision, _LLM_RELOAD_CHANNEL)
+        logger.warning("[LLM hot reload] published redis signal revision=%s channel=%s", revision, _LLM_RELOAD_CHANNEL)
     except Exception as exc:
-        logger.exception("[LLM热更新] Redis 发布失败 revision=%s error=%s", revision, exc)
+        logger.exception("[LLM hot reload] redis publish failed revision=%s error=%s", revision, exc)
         raise
     return revision
 
 
 def read_llm_reload_acks_redis(redis_url: str) -> dict[str, dict[str, Any]]:
-    """Read all worker ACKs from Redis hash. Returns {worker_id: {revision, status, details, applied_at}}."""
+    """Read all worker ACKs from Redis hash. Returns {worker_id: payload}."""
     import redis
 
     try:
@@ -165,16 +168,19 @@ def read_llm_reload_acks_redis(redis_url: str) -> dict[str, dict[str, Any]]:
                 if isinstance(data, dict):
                     result[worker_id] = data
             except (json.JSONDecodeError, TypeError):
-                logger.warning("[LLM热更新] Redis ACK 解析失败 worker_id=%s", worker_id)
+                logger.warning("[LLM hot reload] redis ACK parse failed worker_id=%s", worker_id)
         return result
     except Exception as exc:
-        # Redis is optional in local setups; avoid warning spam on status polling.
-        logger.debug("[LLM热更新] Redis ACK unavailable error=%s", exc)
+        logger.debug("[LLM hot reload] redis ACK unavailable error=%s", exc)
         return {}
 
 
 def write_llm_reload_ack_redis(
-    redis_url: str, worker_id: str, revision: str, status: str, details: dict[str, Any] | None = None
+    redis_url: str,
+    worker_id: str,
+    revision: str,
+    status: str,
+    details: dict[str, Any] | None = None,
 ) -> None:
     """Write worker ACK to Redis hash."""
     import redis
@@ -188,20 +194,35 @@ def write_llm_reload_ack_redis(
     try:
         client = redis.from_url(redis_url)
         client.hset(_LLM_RELOAD_ACK_KEY, worker_id, json.dumps(payload, ensure_ascii=False))
-        logger.warning("[LLM热更新] 已写入 Redis ACK worker_id=%s revision=%s status=%s", worker_id, revision, status)
+        logger.warning("[LLM hot reload] wrote redis ACK worker_id=%s revision=%s status=%s", worker_id, revision, status)
     except Exception as exc:
-        logger.exception("[LLM热更新] Redis 写入 ACK 失败 worker_id=%s revision=%s error=%s", worker_id, revision, exc)
+        logger.exception("[LLM hot reload] redis write ACK failed worker_id=%s revision=%s error=%s", worker_id, revision, exc)
         raise
 
 
 def write_llm_reload_signal(signal_file: str, *, source: str = "llm_ui", reason: str = "config_saved") -> str:
     """Publish reload signal via Redis or file backend based on config."""
     settings = get_settings()
+    strict_redis = _strict_redis_reload_required(settings)
+
     if getattr(settings, "llm_hot_reload_use_redis", True):
         try:
             return _publish_llm_reload_signal_redis(settings.redis_url, source=source, reason=reason)
         except Exception as exc:
-            logger.warning("[LLM热更新] Redis 不可用，回退到文件信号 error=%s", exc)
+            if strict_redis:
+                logger.exception(
+                    "[LLM hot reload] strict redis mode publish failed source=%s reason=%s error=%s",
+                    source,
+                    reason,
+                    exc,
+                )
+                raise
+            logger.warning("[LLM hot reload] Redis unavailable, fallback to file signal error=%s", exc)
+    elif strict_redis:
+        raise RuntimeError(
+            "Split-worker mode requires Redis hot-reload publishing (LLM_HOT_RELOAD_USE_REDIS=true)."
+        )
+
     revision = f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}-{uuid4().hex[:8]}"
     payload = {
         "revision": revision,
@@ -210,7 +231,7 @@ def write_llm_reload_signal(signal_file: str, *, source: str = "llm_ui", reason:
         "reason": reason,
     }
     _atomic_write_json(signal_file, payload)
-    logger.warning("[LLM热更新] 已写入 signal revision=%s path=%s", revision, signal_file)
+    logger.warning("[LLM hot reload] wrote file signal revision=%s path=%s", revision, signal_file)
     return revision
 
 
@@ -226,7 +247,7 @@ def write_llm_reload_ack(ack_file: str, revision: str, status: str, details: dic
         "details": details or {},
     }
     _atomic_write_json(ack_file, payload)
-    logger.warning("[LLM热更新] 已写入 ACK revision=%s status=%s path=%s", revision, status, ack_file)
+    logger.warning("[LLM hot reload] wrote file ACK revision=%s status=%s path=%s", revision, status, ack_file)
 
 
 def read_llm_reload_ack(ack_file: str) -> dict[str, Any] | None:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import os
 import sqlite3
 import signal
@@ -88,6 +89,49 @@ def build_runtime_env(settings, backfill_days: int) -> dict[str, str]:
     env["DATABASE_URL"] = settings.database_url
     env["BACKFILL_DAYS_DEFAULT"] = str(backfill_days)
     env["PYTHONUNBUFFERED"] = "1"
+    return env
+
+
+def build_api_env_for_multi_worker(
+    settings,
+    backfill_days: int,
+    *,
+    worker_id: str,
+    redis_url: str,
+) -> dict[str, str]:
+    env = build_runtime_env(settings, backfill_days)
+    env["WORKER_ROLE"] = "core"
+    env["WORKER_ID"] = worker_id
+    env["REDIS_URL"] = redis_url
+    env["LLM_HOT_RELOAD_USE_REDIS"] = "true"
+    env["AI_MANUAL_PREFLIGHT_MODE"] = str(
+        getattr(settings, "ai_manual_preflight_mode", "stale_guarded") or "stale_guarded"
+    )
+    env["OPS_JOB_METRICS_FILES_JSON"] = json.dumps(
+        {
+            "core": "data/job_metrics_core.json",
+            "ai": "data/job_metrics_ai.json",
+        },
+        ensure_ascii=False,
+    )
+    return env
+
+
+def build_worker_env(
+    settings,
+    backfill_days: int,
+    worker_role: str,
+    worker_id: str,
+    *,
+    redis_url: str = "",
+) -> dict[str, str]:
+    """Build env for a single worker process (core or ai)."""
+    env = build_runtime_env(settings, backfill_days)
+    env["WORKER_ROLE"] = worker_role
+    env["WORKER_ID"] = worker_id
+    if redis_url:
+        env["REDIS_URL"] = redis_url
+    env["LLM_HOT_RELOAD_USE_REDIS"] = "true"
     return env
 
 
@@ -374,9 +418,33 @@ def command_up(args: argparse.Namespace) -> int:
 
     api_command = build_api_command(host=args.host, port=args.port)
     worker_command = build_worker_command()
+    multi_worker = getattr(args, "multi_worker", False)
 
-    api_process = start_process(api_command, runtime_env, "API")
-    worker_process = start_process(worker_command, runtime_env, "Worker")
+    if multi_worker:
+        redis_url = (getattr(settings, "redis_url", None) or "").strip()
+        if not redis_url:
+            logger.error("Multi-worker mode requires REDIS_URL in .env (e.g. redis://localhost:6379/0)")
+            return 1
+        logger.info("Multi-worker: API + Core Worker + AI Worker (REDIS_URL=%s)", redis_url.split("@")[-1] if "@" in redis_url else redis_url)
+        api_env = build_api_env_for_multi_worker(
+            settings,
+            args.backfill_days,
+            worker_id="worker-core-1",
+            redis_url=redis_url,
+        )
+        env_core = build_worker_env(
+            settings, args.backfill_days, "core", "worker-core-1", redis_url=redis_url
+        )
+        env_ai = build_worker_env(
+            settings, args.backfill_days, "ai", "worker-ai-1", redis_url=redis_url
+        )
+        api_process = start_process(api_command, api_env, "API")
+        worker_core_process = start_process(worker_command, env_core, "Worker(core)")
+        worker_ai_process = start_process(worker_command, env_ai, "Worker(ai)")
+        worker_process = None
+    else:
+        api_process = start_process(api_command, runtime_env, "API")
+        worker_process = start_process(worker_command, runtime_env, "Worker")
 
     logger.info("Dashboard: http://%s:%d", args.host, args.port)
     logger.info("Health: http://%s:%d/api/health", args.host, args.port)
@@ -400,23 +468,49 @@ def command_up(args: argparse.Namespace) -> int:
 
     exit_code = 0
     try:
-        while not stop_event.is_set():
-            api_exit = api_process.poll()
-            worker_exit = worker_process.poll()
-            if api_exit is not None:
-                logger.error("API process exited unexpectedly: %s", api_exit)
-                exit_code = api_exit or 1
-                stop_event.set()
-                break
-            if worker_exit is not None:
-                logger.error("Worker process exited unexpectedly: %s", worker_exit)
-                exit_code = worker_exit or 1
-                stop_event.set()
-                break
-            time.sleep(0.5)
+        if multi_worker:
+            while not stop_event.is_set():
+                api_exit = api_process.poll()
+                core_exit = worker_core_process.poll()
+                ai_exit = worker_ai_process.poll()
+                if api_exit is not None:
+                    logger.error("API process exited unexpectedly: %s", api_exit)
+                    exit_code = api_exit or 1
+                    stop_event.set()
+                    break
+                if core_exit is not None:
+                    logger.error("Worker(core) process exited unexpectedly: %s", core_exit)
+                    exit_code = core_exit or 1
+                    stop_event.set()
+                    break
+                if ai_exit is not None:
+                    logger.error("Worker(ai) process exited unexpectedly: %s", ai_exit)
+                    exit_code = ai_exit or 1
+                    stop_event.set()
+                    break
+                time.sleep(0.5)
+        else:
+            while not stop_event.is_set():
+                api_exit = api_process.poll()
+                worker_exit = worker_process.poll()
+                if api_exit is not None:
+                    logger.error("API process exited unexpectedly: %s", api_exit)
+                    exit_code = api_exit or 1
+                    stop_event.set()
+                    break
+                if worker_exit is not None:
+                    logger.error("Worker process exited unexpectedly: %s", worker_exit)
+                    exit_code = worker_exit or 1
+                    stop_event.set()
+                    break
+                time.sleep(0.5)
     finally:
         stop_process(api_process, "API")
-        stop_process(worker_process, "Worker")
+        if multi_worker:
+            stop_process(worker_core_process, "Worker(core)")
+            stop_process(worker_ai_process, "Worker(ai)")
+        else:
+            stop_process(worker_process, "Worker")
         for sig, handler in previous_handlers.items():
             try:
                 signal.signal(sig, handler)
@@ -541,8 +635,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Crypto Sentinel CLI")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    up_parser = subparsers.add_parser("up", help="Start API + Worker")
+    up_parser = subparsers.add_parser("up", help="Start API + Worker(s)")
     up_parser.add_argument("--open-browser", action="store_true", help="Open dashboard after API becomes healthy")
+    up_parser.add_argument("--multi-worker", dest="multi_worker", action="store_true", help="Start API + Core Worker + AI Worker (requires Redis)")
     up_parser.add_argument("--host", type=str, default="127.0.0.1", help="API host (default: 127.0.0.1)")
     up_parser.add_argument("--port", type=int, default=8000, help="API port (default: 8000)")
     up_parser.add_argument("--backfill-days", type=int, default=0, help="Worker startup backfill days (default: 0)")

@@ -153,3 +153,28 @@ async def test_telegram_agent_hides_thinking_blocks_in_final_reply(db_session, d
 
     res = await agent.chat(chat_id=321, user_message="btc 价格")
     assert res["text"] == "BTC 现在约 10 万美元。"
+
+
+@pytest.mark.anyio
+async def test_telegram_agent_dedupes_think_separator(db_session, dummy_provider):
+    agent = TelegramAgent(provider=dummy_provider, max_history=5)
+    dummy_provider.mock_responses = [
+        {
+            "content": "你好\n\nthink>\n\n你好",
+            "prompt_tokens": 12,
+            "completion_tokens": 6,
+            "cost": 0.0002,
+            "model": "dummy-model",
+        }
+    ]
+
+    import app.alerts.telegram_agent as agent_module
+
+    class MockSessionLocal:
+        def __enter__(self): return db_session
+        def __exit__(self, *args): pass
+
+    agent_module.SessionLocal = MockSessionLocal
+
+    res = await agent.chat(chat_id=322, user_message="你好")
+    assert res["text"] == "你好"

@@ -380,7 +380,9 @@ class Settings(BaseSettings):
     account_daily_stats_enabled: bool = Field(default=True, alias="ACCOUNT_DAILY_STATS_ENABLED", description="是否启用账户日级权益曲线聚合（daily OHLC）")
 
     worker_id: str = Field(default="worker-1", alias="WORKER_ID")
+    worker_role: str = Field(default="all", alias="WORKER_ROLE")
     worker_heartbeat_seconds: int = Field(default=15, alias="WORKER_HEARTBEAT_SECONDS")
+    worker_id_strict_unique: bool = Field(default=True, alias="WORKER_ID_STRICT_UNIQUE")
 
     alert_cooldown_seconds: int = Field(default=1800, alias="ALERT_COOLDOWN_SECONDS", description="同类型告警冷却时间(秒)，同一 symbol+alert_type 在此时间内不重复发送")
 
@@ -418,6 +420,9 @@ class Settings(BaseSettings):
     llm_allowed_models: str = Field(default="", alias="LLM_ALLOWED_MODELS")
 
     ai_analysis_interval_seconds: int = Field(default=600, alias="AI_ANALYSIS_INTERVAL_SECONDS")
+    ai_manual_preflight_mode: str = Field(default="legacy", alias="AI_MANUAL_PREFLIGHT_MODE")
+    ai_manual_preflight_stale_seconds: int = Field(default=300, alias="AI_MANUAL_PREFLIGHT_STALE_SECONDS")
+    ai_manual_preflight_lock_seconds: int = Field(default=120, alias="AI_MANUAL_PREFLIGHT_LOCK_SECONDS")
     ai_signal_confidence_threshold: int = Field(default=70, alias="AI_SIGNAL_CONFIDENCE_THRESHOLD")
     ai_history_candles: int = Field(default=50, alias="AI_HISTORY_CANDLES")
     ai_two_stage_enabled: bool = Field(default=True, alias="AI_TWO_STAGE_ENABLED")
@@ -546,10 +551,16 @@ class Settings(BaseSettings):
     # Ops/metrics
     ops_job_metrics_window: int = Field(default=200, alias="OPS_JOB_METRICS_WINDOW")
     ops_job_metrics_file: str = Field(default="data/job_metrics.json", alias="OPS_JOB_METRICS_FILE")
+    ops_job_metrics_files_json: str = Field(default="", alias="OPS_JOB_METRICS_FILES_JSON")
 
     @property
     def watchlist_symbols(self) -> List[str]:
         return [item.strip().upper() for item in self.watchlist.split(",") if item.strip()]
+
+    @property
+    def worker_role_normalized(self) -> str:
+        role = (self.worker_role or "").strip().lower()
+        return role if role in {"all", "core", "ai"} else "all"
 
     @property
     def db_enforce_postgres_env_list(self) -> List[str]:
@@ -587,6 +598,24 @@ class Settings(BaseSettings):
     @property
     def feature_timeframe_list(self) -> List[str]:
         return [item.strip() for item in self.feature_timeframes.split(",") if item.strip()]
+
+    @property
+    def ops_job_metrics_files_map(self) -> dict[str, str]:
+        if not self.ops_job_metrics_files_json:
+            return {}
+        try:
+            raw = json.loads(self.ops_job_metrics_files_json)
+        except json.JSONDecodeError:
+            return {}
+        if not isinstance(raw, dict):
+            return {}
+        out: dict[str, str] = {}
+        for key, value in raw.items():
+            k = str(key or "").strip().lower()
+            v = str(value or "").strip()
+            if k and v:
+                out[k] = v
+        return out
 
     @property
     def youtube_channel_id_list(self) -> List[str]:

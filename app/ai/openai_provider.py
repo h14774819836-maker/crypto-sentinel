@@ -518,7 +518,9 @@ class OpenAICompatibleProvider(LLMProvider):
                 extra["thinking"] = {"type": "enabled"}
                 api_kwargs["extra_body"] = extra
             elif provider_l == "nvidia_nim" and is_kimi:
-                # Kimi modelcard 要求：temperature=1.0, top_p=0.95，否则思考过程很弱
+                extra = dict(api_kwargs.get("extra_body") or {})
+                extra["chat_template_kwargs"] = {"thinking": True}
+                api_kwargs["extra_body"] = extra
                 api_kwargs["temperature"] = 1.0
                 api_kwargs["top_p"] = 0.95
             elif self.config.reasoning_effort:

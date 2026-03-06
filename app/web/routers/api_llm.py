@@ -23,6 +23,11 @@ router.add_api_route(
     methods=["GET"],
 )
 router.add_api_route(
+    "/api/llm/status.hot_reload.workers",
+    views.llm_hot_reload_workers_api,
+    methods=["GET"],
+)
+router.add_api_route(
     "/api/llm/calls",
     views.llm_calls_api,
     methods=["GET"],

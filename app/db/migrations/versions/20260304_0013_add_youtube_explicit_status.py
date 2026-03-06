@@ -17,15 +17,47 @@ depends_on = None
 
 
 def upgrade() -> None:
+    conn = op.get_bind()
+    existing_columns = {
+        str(col.get("name") or "")
+        for col in sa.inspect(conn).get_columns("youtube_videos")
+    }
+
     with op.batch_alter_table("youtube_videos", schema=None) as batch_op:
-        batch_op.add_column(sa.Column("status", sa.String(length=32), nullable=True))
-        batch_op.add_column(sa.Column("status_updated_at", sa.DateTime(timezone=True), nullable=True))
-        batch_op.add_column(sa.Column("asr_queued_at", sa.DateTime(timezone=True), nullable=True))
-        batch_op.create_index(batch_op.f("ix_youtube_videos_status"), ["status"], unique=False)
-        batch_op.create_index(batch_op.f("ix_youtube_videos_status_updated_at"), ["status_updated_at"], unique=False)
+        if "analysis_runtime_status" not in existing_columns:
+            batch_op.add_column(sa.Column("analysis_runtime_status", sa.String(length=32), nullable=True))
+        if "analysis_stage" not in existing_columns:
+            batch_op.add_column(sa.Column("analysis_stage", sa.String(length=32), nullable=True))
+        if "analysis_started_at" not in existing_columns:
+            batch_op.add_column(sa.Column("analysis_started_at", sa.DateTime(timezone=True), nullable=True))
+        if "analysis_updated_at" not in existing_columns:
+            batch_op.add_column(sa.Column("analysis_updated_at", sa.DateTime(timezone=True), nullable=True))
+        if "analysis_finished_at" not in existing_columns:
+            batch_op.add_column(sa.Column("analysis_finished_at", sa.DateTime(timezone=True), nullable=True))
+        if "analysis_retry_count" not in existing_columns:
+            batch_op.add_column(
+                sa.Column("analysis_retry_count", sa.Integer(), nullable=False, server_default=sa.text("0"))
+            )
+        if "analysis_next_retry_at" not in existing_columns:
+            batch_op.add_column(sa.Column("analysis_next_retry_at", sa.DateTime(timezone=True), nullable=True))
+        if "analysis_last_error_type" not in existing_columns:
+            batch_op.add_column(sa.Column("analysis_last_error_type", sa.String(length=64), nullable=True))
+        if "analysis_last_error_code" not in existing_columns:
+            batch_op.add_column(sa.Column("analysis_last_error_code", sa.String(length=64), nullable=True))
+        if "analysis_last_error_message" not in existing_columns:
+            batch_op.add_column(sa.Column("analysis_last_error_message", sa.Text(), nullable=True))
+        if "status" not in existing_columns:
+            batch_op.add_column(sa.Column("status", sa.String(length=32), nullable=True))
+        if "status_updated_at" not in existing_columns:
+            batch_op.add_column(sa.Column("status_updated_at", sa.DateTime(timezone=True), nullable=True))
+        if "asr_queued_at" not in existing_columns:
+            batch_op.add_column(sa.Column("asr_queued_at", sa.DateTime(timezone=True), nullable=True))
+        if "status" not in existing_columns:
+            batch_op.create_index(batch_op.f("ix_youtube_videos_status"), ["status"], unique=False)
+        if "status_updated_at" not in existing_columns:
+            batch_op.create_index(batch_op.f("ix_youtube_videos_status_updated_at"), ["status_updated_at"], unique=False)
 
     # Backfill: derive initial status from existing fields
-    conn = op.get_bind()
     dialect = conn.dialect.name
     if dialect == "sqlite":
         has_valid_insight = "EXISTS (SELECT 1 FROM youtube_insights i WHERE i.video_id = youtube_videos.video_id AND i.analyst_view_json IS NOT NULL)"
@@ -59,3 +91,13 @@ def downgrade() -> None:
         batch_op.drop_column("asr_queued_at")
         batch_op.drop_column("status_updated_at")
         batch_op.drop_column("status")
+        batch_op.drop_column("analysis_last_error_message")
+        batch_op.drop_column("analysis_last_error_code")
+        batch_op.drop_column("analysis_last_error_type")
+        batch_op.drop_column("analysis_next_retry_at")
+        batch_op.drop_column("analysis_retry_count")
+        batch_op.drop_column("analysis_finished_at")
+        batch_op.drop_column("analysis_updated_at")
+        batch_op.drop_column("analysis_started_at")
+        batch_op.drop_column("analysis_stage")
+        batch_op.drop_column("analysis_runtime_status")

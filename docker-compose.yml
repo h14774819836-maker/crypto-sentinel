@@ -13,12 +13,31 @@ services:
     volumes:
       - pg_data:/var/lib/postgresql/data
 
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    volumes:
+      - redis_data:/data
+
   migrate:
     build:
       context: .
       dockerfile: docker/Dockerfile
     environment:
       DATABASE_URL: postgresql+psycopg://sentinel:sentinel@db:5432/crypto_sentinel
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      ALL_PROXY: ${ALL_PROXY:-}
+      NO_PROXY: ${NO_PROXY:-}
+      http_proxy: ${http_proxy:-}
+      https_proxy: ${https_proxy:-}
+      all_proxy: ${all_proxy:-}
+      no_proxy: ${no_proxy:-}
     depends_on:
       db:
         condition: service_healthy
@@ -32,9 +51,27 @@ services:
       dockerfile: docker/Dockerfile
     environment:
       DATABASE_URL: postgresql+psycopg://sentinel:sentinel@db:5432/crypto_sentinel
+      WORKER_ROLE: core
+      WORKER_ID: worker-core-1
+      LLM_HOT_RELOAD_USE_REDIS: "true"
+      REDIS_URL: redis://redis:6379/0
+      AI_MANUAL_PREFLIGHT_MODE: stale_guarded
+      AI_MANUAL_PREFLIGHT_STALE_SECONDS: "300"
+      AI_MANUAL_PREFLIGHT_LOCK_SECONDS: "120"
+      OPS_JOB_METRICS_FILES_JSON: '{"core":"data/job_metrics_core.json","ai":"data/job_metrics_ai.json"}'
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      ALL_PROXY: ${ALL_PROXY:-}
+      NO_PROXY: ${NO_PROXY:-}
+      http_proxy: ${http_proxy:-}
+      https_proxy: ${https_proxy:-}
+      all_proxy: ${all_proxy:-}
+      no_proxy: ${no_proxy:-}
     depends_on:
       migrate:
         condition: service_completed_successfully
+      redis:
+        condition: service_healthy
     command: sh -c "uvicorn app.main:app --host 0.0.0.0 --port 8000"
     volumes:
       - .:/app
@@ -47,12 +84,62 @@ services:
       dockerfile: docker/Dockerfile
     environment:
       DATABASE_URL: postgresql+psycopg://sentinel:sentinel@db:5432/crypto_sentinel
+      WORKER_ROLE: core
+      WORKER_ID: worker-core-1
+      WORKER_ID_STRICT_UNIQUE: "true"
+      LLM_HOT_RELOAD_USE_REDIS: "true"
+      REDIS_URL: redis://redis:6379/0
+      OPS_JOB_METRICS_FILE: data/job_metrics_core.json
+      LANG: C.UTF-8
+      PYTHONIOENCODING: utf-8
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      ALL_PROXY: ${ALL_PROXY:-}
+      NO_PROXY: ${NO_PROXY:-}
+      http_proxy: ${http_proxy:-}
+      https_proxy: ${https_proxy:-}
+      all_proxy: ${all_proxy:-}
+      no_proxy: ${no_proxy:-}
     depends_on:
       migrate:
         condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    command: sh -c "python -m app.worker.main"
+    volumes:
+      - .:/app
+
+  worker_ai:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    environment:
+      DATABASE_URL: postgresql+psycopg://sentinel:sentinel@db:5432/crypto_sentinel
+      WORKER_ROLE: ai
+      WORKER_ID: worker-ai-1
+      WORKER_ID_STRICT_UNIQUE: "true"
+      LLM_HOT_RELOAD_USE_REDIS: "true"
+      REDIS_URL: redis://redis:6379/0
+      OPS_JOB_METRICS_FILE: data/job_metrics_ai.json
+      LANG: C.UTF-8
+      PYTHONIOENCODING: utf-8
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      ALL_PROXY: ${ALL_PROXY:-}
+      NO_PROXY: ${NO_PROXY:-}
+      http_proxy: ${http_proxy:-}
+      https_proxy: ${https_proxy:-}
+      all_proxy: ${all_proxy:-}
+      no_proxy: ${no_proxy:-}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
     command: sh -c "python -m app.worker.main"
     volumes:
       - .:/app
 
 volumes:
   pg_data:
+  redis_data:

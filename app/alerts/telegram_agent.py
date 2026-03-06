@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from typing import Any
 from datetime import datetime, timezone
 import logging
@@ -15,10 +16,10 @@ from app.db.repository import (
     update_telegram_session,
 )
 from app.ai.provider import LLMProvider, LLMRateLimitError, LLMTimeoutError
-from app.ai.prompts import TELEGRAM_AGENT_PROMPT, NEMOTRON_DETAILED_THINKING_PREFIX
+from app.ai.prompts import TELEGRAM_AGENT_PROMPT
 from app.ai.thinking_summarizer import ThinkingSummarizer
 from app.ai.telegram_thinking_summary import _summarize_and_edit_telegram
-from app.ai.thinking_summary_utils import strip_think_tags, extract_from_thinking_blocks
+from app.ai.thinking_summary_utils import strip_think_tags
 from app.agents.tools import agent_tools, ToolCategory
 
 logger = logging.getLogger(__name__)
@@ -26,6 +27,38 @@ logger = logging.getLogger(__name__)
 
 def _tg_trace(msg: str, *args) -> None:
     logger.warning("[TG交互追踪][agent] " + msg, *args)
+
+
+def _collapse_ws(text: str) -> str:
+    return re.sub(r"\s+", " ", text or "").strip()
+
+
+def _dedupe_repeated_text(text: str) -> str:
+    t = (text or "").strip()
+    if not t:
+        return ""
+    parts = [p.strip() for p in re.split(r"\n{2,}", t) if p.strip()]
+    if len(parts) >= 2 and len(parts) % 2 == 0:
+        mid = len(parts) // 2
+        first = "\n\n".join(parts[:mid]).strip()
+        second = "\n\n".join(parts[mid:]).strip()
+        if first and second and _collapse_ws(first) == _collapse_ws(second):
+            return first
+    half = len(t) // 2
+    if half > 0 and _collapse_ws(t[:half]) == _collapse_ws(t[half:]):
+        return t[:half].strip()
+    return t
+
+
+def _clean_telegram_reply(text: str) -> str:
+    t = (text or "").strip()
+    if not t:
+        return ""
+    t = re.sub(r"(?im)^\s*think>\s*$", "", t)
+    t = re.sub(r"(?im)^\s*think>\s*", "", t)
+    t = t.replace("think>", "")
+    t = re.sub(r"\n{3,}", "\n\n", t).strip()
+    return _dedupe_repeated_text(t)
 
 
 class TelegramAgent:
@@ -77,9 +110,6 @@ class TelegramAgent:
 
         # 2. Build Messages Array
         system_content = TELEGRAM_AGENT_PROMPT
-        model_for_prompt = getattr(self.provider, "model", "") or ""
-        if "nemotron" in (model_for_prompt or "").lower():
-            system_content = f"{NEMOTRON_DETAILED_THINKING_PREFIX}\n\n{system_content}"
         messages = [{"role": "system", "content": system_content}]
         
         # Inject Summary as System Context if available
@@ -114,13 +144,7 @@ class TelegramAgent:
         reasoning_content = (response.get("reasoning_content", "") or "").strip()
         model_used = response.get("model", "") or ""
         content_part = strip_think_tags(raw_content, keep_explicit_cot=False)
-        final_content = content_part
-        if not final_content and reasoning_content:
-            final_content = reasoning_content
-        if not final_content and raw_content:
-            fallback = extract_from_thinking_blocks(raw_content)
-            if fallback:
-                final_content = fallback
+        final_content = _clean_telegram_reply(content_part)
         if not final_content:
             _tg_trace(
                 "空回复 raw_len=%d reasoning_len=%d model=%s",

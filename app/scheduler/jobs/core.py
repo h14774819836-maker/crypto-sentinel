@@ -10,6 +10,7 @@ from app.logging import logger
 from app.ops.job_metrics import append_job_metric
 from app.scheduler.runtime import WorkerRuntime
 from app.worker.llm_hot_reload import maybe_reload_llm_runtime_from_signal
+from app.worker.runtime_guard import touch_worker_identity_lease
 
 
 async def supervised_job(job_name: str, coro_func, runtime: WorkerRuntime) -> None:
@@ -48,6 +49,10 @@ async def supervised_job(job_name: str, coro_func, runtime: WorkerRuntime) -> No
 async def heartbeat_job(runtime: WorkerRuntime) -> None:
     if not getattr(runtime.settings, "llm_hot_reload_use_redis", True):
         await maybe_reload_llm_runtime_from_signal(runtime)
+    try:
+        await touch_worker_identity_lease(runtime.settings)
+    except Exception as exc:
+        logger.warning("Worker identity lease refresh failed: %s", exc)
     from datetime import datetime, timezone
 
     now = datetime.now(timezone.utc)

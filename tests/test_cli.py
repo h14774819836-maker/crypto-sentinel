@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sqlite3
 import sys
 from pathlib import Path
@@ -219,3 +220,29 @@ def test_up_handles_interrupt_and_stops_both_processes(monkeypatch):
     assert runtime_env_values[1]["DATABASE_URL"] == settings.database_url
     assert runtime_env_values[0]["BACKFILL_DAYS_DEFAULT"] == "0"
     assert set(stopped_names) == {"API", "Worker"}
+
+
+def test_build_api_env_for_multi_worker_sets_core_identity_and_metrics_map():
+    settings = SimpleNamespace(
+        database_url="sqlite:///./data/test.db",
+        ai_manual_preflight_mode="stale_guarded",
+    )
+
+    env = cli.build_api_env_for_multi_worker(
+        settings,
+        backfill_days=1,
+        worker_id="worker-core-1",
+        redis_url="redis://localhost:6379/0",
+    )
+
+    assert env["DATABASE_URL"] == settings.database_url
+    assert env["BACKFILL_DAYS_DEFAULT"] == "1"
+    assert env["WORKER_ROLE"] == "core"
+    assert env["WORKER_ID"] == "worker-core-1"
+    assert env["REDIS_URL"] == "redis://localhost:6379/0"
+    assert env["LLM_HOT_RELOAD_USE_REDIS"] == "true"
+    assert env["AI_MANUAL_PREFLIGHT_MODE"] == "stale_guarded"
+    assert json.loads(env["OPS_JOB_METRICS_FILES_JSON"]) == {
+        "core": "data/job_metrics_core.json",
+        "ai": "data/job_metrics_ai.json",
+    }

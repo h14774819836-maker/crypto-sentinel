@@ -205,3 +205,26 @@ def test_llm_config_get_returns_warnings_for_bad_profile():
     assert len(warnings) > 0
     assert any("general" in w for w in warnings)
     assert any("market" in w for w in warnings)
+
+def test_llm_hot_reload_workers_alias_endpoint(monkeypatch):
+    _ensure_admin_token(monkeypatch)
+    client = TestClient(app)
+
+    monkeypatch.setenv("LLM_HOT_RELOAD_USE_REDIS", "true")
+    monkeypatch.setenv("REDIS_URL", "redis://localhost:6379/0")
+    config.get_settings.cache_clear()
+
+    monkeypatch.setattr(views, "refresh_llm_env_vars_from_dotenv", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        views,
+        "read_llm_reload_acks_redis",
+        lambda _url: {"worker-core-1": {"revision": "r1", "status": "ok"}},
+    )
+
+    resp = client.get("/api/llm/status.hot_reload.workers", headers=_auth_headers())
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["ok"] is True
+    assert data["mode"] == "redis"
+    assert data["count"] == 1
+    assert "worker-core-1" in data["workers"]

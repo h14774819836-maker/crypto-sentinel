@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 from types import SimpleNamespace
 
+import pytest
+
 import app.web.api_telegram as api_telegram
 import app.web.router as web_router
 import app.web.views as views
@@ -147,3 +149,20 @@ def test_refresh_llm_env_vars_from_dotenv_includes_nvidia_nim_key(tmp_path, monk
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = original
+
+
+def test_write_signal_strict_redis_mode_does_not_fallback_to_file(monkeypatch, tmp_path):
+    import app.ai.llm_runtime_reload as reload_module
+
+    signal_file = tmp_path / "signal.json"
+    monkeypatch.setenv("WORKER_ROLE", "core")
+    monkeypatch.setenv("LLM_HOT_RELOAD_USE_REDIS", "true")
+    get_settings.cache_clear()
+
+    def _raise_publish(*_args, **_kwargs):
+        raise RuntimeError("redis down")
+
+    monkeypatch.setattr(reload_module, "_publish_llm_reload_signal_redis", _raise_publish)
+    with pytest.raises(RuntimeError):
+        reload_module.write_llm_reload_signal(str(signal_file), source="pytest", reason="strict_mode")
+    assert signal_file.exists() is False

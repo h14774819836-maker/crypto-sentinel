@@ -500,8 +500,10 @@ tests/              # pytest 测试
 
 - Worker 入口：`app/worker/main.py`
 - 调度器定义：`app/scheduler/scheduler.py`
-- 任务实现：`app/scheduler/jobs.py`
+- 任务实现：`app/scheduler/_jobs_impl.py`（由 `app/scheduler/jobs` 导出）
 - 模式：`asyncio + APScheduler + Binance WS 常驻消费者`
+- 多 Worker 启动：`app/cli.py` 的 `up --multi-worker`，启动 API + Core Worker + AI Worker
+- 角色分配：通过 `WORKER_ROLE` / `WORKER_ID` / `REDIS_URL` 环境变量划分与约束
 
 ### 关键代码路径/模块
 
@@ -509,6 +511,8 @@ tests/              # pytest 测试
 - `app/scheduler/scheduler.py`
 - `app/scheduler/jobs.py`
 - `app/providers/binance_provider.py`
+- `app/cli.py`
+- `app/worker/runtime_guard.py`
 
 ### 数据/控制流
 
@@ -517,29 +521,32 @@ tests/              # pytest 测试
 - 构建 LLM Provider（market/youtube）
 - 可选启动 Telegram Polling
 - 启动 `APScheduler`
-- 启动常驻 `ws_consumer_job`
+- Core Worker：启动常驻 `ws_consumer_job`、可选账户 WS、执行行情/账户/YouTube/Intel 等周期任务
+- AI Worker：按 LLM 可用性启用 AI 分析与策略回放类任务
+- 多 Worker 约束：`runtime_guard` 通过 Redis 租约保证 `WORKER_ID` 唯一并要求 `LLM_HOT_RELOAD_USE_REDIS=true`
 - 周期任务并行推进市场、AI、YouTube、运维链路。
 
 ### 调度任务矩阵（核心）
 
-| Job ID | 类型 | 说明 | 开关条件 |
-|---|---|---|---|
-| `heartbeat_job` | interval | Worker 心跳 + 热更新检查 | 总是启用 |
-| `gap_fill_job` | interval | 1m K 线补缺与聚合修复 | 总是启用 |
-| `feature_job` | interval | 指标计算（1m） | 总是启用 |
-| `anomaly_job` | interval | 异常评分、状态机、推送 | 总是启用 |
-| `multi_tf_sync_job` | interval | 1h/4h 同步与指标 | 总是启用 |
-| `funding_rate_job` | interval | Funding/OI 快照同步 | 总是启用 |
-| `account_monitor_job` | interval | 合约/杠杆账户快照与风险告警 | `account_monitor_enabled` |
-| `intel_news_job` | interval | Intel RSS 新闻采集 | `intel_enabled` |
-| `intel_digest_job` | interval | Intel 摘要与风险温度生成 | `intel_enabled` |
-| `ai_analysis_job` | interval | 定时 AI 市场分析 | LLM 启用 |
-| `strategy_eval_job` | interval | 策略回放评估 | 总是启用 |
-| `strategy_scores_job` | interval | 策略评分与统计 | 总是启用 |
-| `strategy_research_job` | interval | 策略研究窗口刷新 | 总是启用 |
-| `youtube_sync_job` | interval | 视频发现/字幕抓取 | `youtube_enabled` |
-| `youtube_analyze_job` | interval | 视频 AI 分析/共识 | `youtube_enabled` |
-| `youtube_asr_backfill_job` | interval | 本地 ASR 补录 | `youtube_enabled && asr_enabled` |
+| Job ID | 类型 | 说明 | Worker 角色 | 开关条件 |
+|---|---|---|---|---|
+| `heartbeat_job` | interval | Worker 心跳 + 热更新检查 | core/ai/all | 总是启用 |
+| `gap_fill_job` | interval | 1m K 线补缺与聚合修复 | core | 总是启用 |
+| `feature_job` | interval | 指标计算（1m） | core | 总是启用 |
+| `anomaly_job` | interval | 异常评分、状态机、推送 | core | 总是启用 |
+| `multi_tf_sync_job` | interval | 1h/4h 同步与指标 | core | 总是启用 |
+| `funding_rate_job` | interval | Funding/OI 快照同步 | core | 总是启用 |
+| `account_monitor_job` | interval | 合约/杠杆账户快照与风险告警 | core | `account_monitor_enabled` |
+| `account_daily_stats_rollup_job` | cron | 账户日统计汇总 | core | `account_monitor_enabled && account_daily_stats_enabled` |
+| `intel_news_job` | interval | Intel RSS 新闻采集 | core | `intel_enabled` |
+| `intel_digest_job` | interval | Intel 摘要与风险温度生成 | core | `intel_enabled` |
+| `ai_analysis_job` | interval | 定时 AI 市场分析 | ai | LLM 启用且 Analyst 可用 |
+| `decision_eval_job` | interval | 策略回放评估 | ai | LLM 启用且 Analyst 可用 |
+| `strategy_scores_job` | interval | 策略评分与统计 | ai | LLM 启用且 Analyst 可用 |
+| `strategy_research_job` | interval | 策略研究窗口刷新 | ai | LLM 启用且 Analyst 可用 |
+| `youtube_sync_job` | interval | 视频发现/字幕抓取 | core | `youtube_enabled` |
+| `youtube_analyze_job` | interval | 视频 AI 分析/共识 | core | `youtube_enabled` |
+| `youtube_asr_backfill_job` | interval | 本地 ASR 补录 | core | `youtube_enabled && asr_enabled` |
 
 ### 风险与边界
 

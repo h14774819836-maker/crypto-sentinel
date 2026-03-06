@@ -39,5 +39,6 @@ class WorkerRuntime:
     sem_youtube: asyncio.Semaphore | None = None
     sem_binance: asyncio.Semaphore | None = None
     job_metrics: list[dict[str, Any]] = field(default_factory=list)
+    registered_job_ids: list[str] = field(default_factory=list)
     account_monitor_failed: bool = False
     account_user_stream_failed: bool = False

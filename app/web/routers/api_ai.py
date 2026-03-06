@@ -311,8 +311,102 @@ def _is_db_locked_error(exc: BaseException) -> bool:
     return "database is locked" in msg or "database_locked" in msg or "sqlite_busy" in msg
 
 
-async def _refresh_market_data_before_ai_analysis() -> dict[str, Any]:
-    """Run one on-demand ingest round before manual AI analysis."""
+def _assess_market_data_freshness(db: Session, stale_seconds: int) -> dict[str, Any]:
+    now = datetime.now(timezone.utc)
+    cutoff = now.timestamp() - max(1, int(stale_seconds))
+    stale_symbols: list[str] = []
+    missing_symbols: list[str] = []
+    latest_ts: datetime | None = None
+
+    for symbol in settings.watchlist_symbols:
+        latest_ohlcv = get_latest_ohlcv(db, symbol=symbol, timeframe="1m")
+        latest_metric = get_latest_market_metric(db, symbol=symbol, timeframe="1m")
+
+        ts_candidates = [
+            ts
+            for ts in (
+                getattr(latest_ohlcv, "ts", None),
+                getattr(latest_metric, "ts", None),
+            )
+            if ts is not None
+        ]
+        if not ts_candidates:
+            missing_symbols.append(symbol)
+            continue
+
+        symbol_latest = max(ts_candidates)
+        if latest_ts is None or symbol_latest > latest_ts:
+            latest_ts = symbol_latest
+        if symbol_latest.timestamp() < cutoff:
+            stale_symbols.append(symbol)
+
+    return {
+        "fresh": not missing_symbols and not stale_symbols,
+        "missing_symbols": missing_symbols,
+        "stale_symbols": stale_symbols,
+        "latest_data_ts": latest_ts,
+        "stale_seconds": int(stale_seconds),
+    }
+
+
+def _build_manual_preflight_lock_key() -> str:
+    symbols_key = ",".join(sorted(settings.watchlist_symbols))
+    return f"ai:manual-preflight:{symbols_key}"
+
+
+async def _try_acquire_manual_preflight_lock(
+    redis_url: str,
+    *,
+    lock_key: str,
+    lock_seconds: int,
+) -> tuple[bool, str | None, str | None]:
+    from redis.asyncio import Redis
+    from uuid import uuid4
+
+    token = uuid4().hex
+    client = Redis.from_url(redis_url)
+    try:
+        acquired = await client.set(lock_key, token, nx=True, ex=max(1, int(lock_seconds)))
+        return bool(acquired), (token if acquired else None), None
+    except Exception as exc:
+        return False, None, str(exc)
+    finally:
+        await client.aclose()
+
+
+async def _release_manual_preflight_lock(redis_url: str, *, lock_key: str, token: str | None) -> None:
+    if not token:
+        return
+    from redis.asyncio import Redis
+
+    client = Redis.from_url(redis_url)
+    try:
+        current = await client.get(lock_key)
+        if isinstance(current, bytes):
+            current = current.decode("utf-8")
+        if current == token:
+            await client.delete(lock_key)
+    except Exception:
+        return
+    finally:
+        await client.aclose()
+
+
+def _refresh_report_to_http_exception(refresh_report: dict[str, Any]) -> HTTPException | None:
+    code = str(refresh_report.get("code") or "").strip().lower()
+    if code in {"core_data_not_ready", "preflight_redis_unavailable"}:
+        return HTTPException(
+            status_code=503,
+            detail={
+                "code": code,
+                "message": refresh_report.get("error") or code,
+                "refresh": refresh_report,
+            },
+        )
+    return None
+
+
+async def _run_refresh_steps(*, include_backfill: bool, mode: str) -> dict[str, Any]:
     from app.alerts.telegram import TelegramClient
     from app.providers.binance_provider import BinanceProvider
     from app.scheduler.jobs import (
@@ -342,19 +436,22 @@ async def _refresh_market_data_before_ai_analysis() -> dict[str, Any]:
     for attempt in range(max_retries):
         try:
             need_backfill = False
-            with SessionLocal() as check_db:
-                for symbol in settings.watchlist_symbols:
-                    if get_latest_ohlcv(check_db, symbol=symbol, timeframe="1m") is None:
-                        need_backfill = True
-                        break
+            if include_backfill:
+                with SessionLocal() as check_db:
+                    for symbol in settings.watchlist_symbols:
+                        if get_latest_ohlcv(check_db, symbol=symbol, timeframe="1m") is None:
+                            need_backfill = True
+                            break
 
-            if need_backfill:
+            if include_backfill and need_backfill:
                 step_start = time.perf_counter()
                 await startup_backfill_job(runtime)
-                steps.append({
-                    "step": "startup_backfill",
-                    "duration_ms": int((time.perf_counter() - step_start) * 1000),
-                })
+                steps.append(
+                    {
+                        "step": "startup_backfill",
+                        "duration_ms": int((time.perf_counter() - step_start) * 1000),
+                    }
+                )
 
             for step_name, step_coro in (
                 ("gap_fill", gap_fill_job),
@@ -373,29 +470,100 @@ async def _refresh_market_data_before_ai_analysis() -> dict[str, Any]:
                 steps.append(step_payload)
 
             total_duration_ms = int((time.perf_counter() - total_start) * 1000)
-            logger.info("[AI_ANALYZE] pre-refresh completed in %d ms steps=%s", total_duration_ms, steps)
+            logger.info("[AI_ANALYZE] pre-refresh completed in %d ms mode=%s steps=%s", total_duration_ms, mode, steps)
             return {
                 "ok": True,
                 "duration_ms": total_duration_ms,
                 "steps": steps,
+                "preflight": "executed",
+                "mode": mode,
             }
         except Exception as exc:
             total_duration_ms = int((time.perf_counter() - total_start) * 1000)
             if _is_db_locked_error(exc) and attempt < max_retries - 1:
                 logger.warning(
                     "[AI_ANALYZE] pre-refresh db locked (attempt %d/%d), retrying in %.1fs: %s",
-                    attempt + 1, max_retries, retry_delay, exc,
+                    attempt + 1,
+                    max_retries,
+                    retry_delay,
+                    exc,
                 )
                 await asyncio.sleep(retry_delay)
                 steps = []
                 continue
-            logger.exception("[AI_ANALYZE] pre-refresh failed after %d ms: %s", total_duration_ms, exc)
+            logger.exception("[AI_ANALYZE] pre-refresh failed after %d ms mode=%s: %s", total_duration_ms, mode, exc)
             return {
                 "ok": False,
                 "duration_ms": total_duration_ms,
                 "steps": steps,
                 "error": str(exc),
+                "code": "pre_refresh_failed",
+                "mode": mode,
             }
+
+
+async def _refresh_market_data_before_ai_analysis() -> dict[str, Any]:
+    """Run one on-demand ingest round before manual AI analysis."""
+    mode = str(getattr(settings, "ai_manual_preflight_mode", "legacy") or "legacy").strip().lower()
+    if mode != "stale_guarded":
+        return await _run_refresh_steps(include_backfill=True, mode="legacy")
+
+    stale_seconds = max(30, int(getattr(settings, "ai_manual_preflight_stale_seconds", 300) or 300))
+    lock_seconds = max(10, int(getattr(settings, "ai_manual_preflight_lock_seconds", 120) or 120))
+
+    with SessionLocal() as check_db:
+        freshness = _assess_market_data_freshness(check_db, stale_seconds=stale_seconds)
+    if freshness.get("fresh"):
+        return {
+            "ok": True,
+            "preflight": "skipped_fresh",
+            "mode": "stale_guarded",
+            **freshness,
+        }
+
+    lock_key = _build_manual_preflight_lock_key()
+    lock_acquired, lock_token, lock_error = await _try_acquire_manual_preflight_lock(
+        settings.redis_url,
+        lock_key=lock_key,
+        lock_seconds=lock_seconds,
+    )
+    if lock_error:
+        return {
+            "ok": False,
+            "code": "preflight_redis_unavailable",
+            "error": f"Redis lock unavailable: {lock_error}",
+            "mode": "stale_guarded",
+            "preflight": "failed_redis",
+        }
+    if not lock_acquired:
+        return {
+            "ok": True,
+            "preflight": "skipped_lock_held",
+            "mode": "stale_guarded",
+            **freshness,
+        }
+
+    try:
+        ready_window = max(60, min(stale_seconds, 300))
+        with SessionLocal() as ready_db:
+            readiness = _assess_market_data_freshness(ready_db, stale_seconds=ready_window)
+        if readiness.get("missing_symbols"):
+            return {
+                "ok": False,
+                "code": "core_data_not_ready",
+                "error": "core_data_not_ready",
+                "mode": "stale_guarded",
+                "preflight": "core_data_not_ready",
+                "missing_symbols": readiness.get("missing_symbols"),
+                "stale_symbols": readiness.get("stale_symbols"),
+                "latest_data_ts": readiness.get("latest_data_ts"),
+            }
+
+        refresh_result = await _run_refresh_steps(include_backfill=False, mode="stale_guarded")
+        refresh_result.setdefault("freshness_before", freshness)
+        return refresh_result
+    finally:
+        await _release_manual_preflight_lock(settings.redis_url, lock_key=lock_key, token=lock_token)
 
 
 router = APIRouter()
@@ -423,6 +591,9 @@ async def ai_analyze_now(
 
     refresh_report = await _refresh_market_data_before_ai_analysis()
     if not refresh_report.get("ok"):
+        http_exc = _refresh_report_to_http_exception(refresh_report)
+        if http_exc is not None:
+            raise http_exc
         return {
             "ok": False,
             "error": f"Pre-analysis data refresh failed: {refresh_report.get('error') or 'unknown error'}",
@@ -573,10 +744,14 @@ async def _ai_analyze_stream_impl(
 
     refresh_report = await _refresh_market_data_before_ai_analysis()
     if not refresh_report.get("ok"):
+        http_exc = _refresh_report_to_http_exception(refresh_report)
+        if http_exc is not None:
+            raise http_exc
         refresh_error = json.dumps(
             {
                 "type": "error",
                 "error": f"Pre-analysis data refresh failed: {refresh_report.get('error') or 'unknown error'}",
+                "code": refresh_report.get("code"),
                 "refresh": refresh_report,
             },
             ensure_ascii=False

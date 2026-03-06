@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 import json
@@ -13,6 +13,7 @@ from app.ai.llm_runtime_reload import (
 )
 from app.config import get_settings
 from app.logging import logger
+from app.worker.runtime_guard import is_split_worker_role, resolve_worker_role
 
 
 def _summarize_llm_task(settings, task: str) -> dict[str, Any]:
@@ -38,7 +39,7 @@ def _build_market_analyst_from_settings(settings):
     profile_name = settings.resolve_llm_profile_name("market")
     if not config.enabled or not config.api_key:
         logger.warning(
-            "[LLM热更新][worker] market 未启用或缺少 API Key profile=%s enabled=%s api_key_present=%s",
+            "[LLM hot reload][worker] market disabled or missing API key profile=%s enabled=%s api_key_present=%s",
             profile_name,
             config.enabled,
             bool(config.api_key),
@@ -51,7 +52,7 @@ def _build_market_analyst_from_settings(settings):
     provider = OpenAICompatibleProvider(config)
     analyst = MarketAnalyst(settings, provider, config)
     logger.warning(
-        "[LLM热更新][worker] market 已重建 profile=%s provider=%s model=%s base_url=%s",
+        "[LLM hot reload][worker] market rebuilt profile=%s provider=%s model=%s base_url=%s",
         profile_name,
         config.provider,
         config.model,
@@ -62,14 +63,14 @@ def _build_market_analyst_from_settings(settings):
 
 def _build_youtube_provider_from_settings(settings):
     if not settings.youtube_enabled:
-        logger.warning("[LLM热更新][worker] youtube_enabled=false，跳过 YouTube LLM 重建")
+        logger.warning("[LLM hot reload][worker] youtube_enabled=false, skip YouTube LLM rebuild")
         return None
 
     config = settings.resolve_llm_config("youtube")
     profile_name = settings.resolve_llm_profile_name("youtube")
     if not config.enabled or not config.api_key:
         logger.warning(
-            "[LLM热更新][worker] youtube LLM 未启用或缺少 API Key profile=%s enabled=%s api_key_present=%s",
+            "[LLM hot reload][worker] youtube disabled or missing API key profile=%s enabled=%s api_key_present=%s",
             profile_name,
             config.enabled,
             bool(config.api_key),
@@ -80,7 +81,7 @@ def _build_youtube_provider_from_settings(settings):
 
     provider = OpenAICompatibleProvider(config)
     logger.warning(
-        "[LLM热更新][worker] youtube LLM 已重建 profile=%s provider=%s model=%s base_url=%s",
+        "[LLM hot reload][worker] youtube rebuilt profile=%s provider=%s model=%s base_url=%s",
         profile_name,
         config.provider,
         config.model,
@@ -114,7 +115,7 @@ def apply_llm_config_to_worker_runtime(runtime) -> dict[str, Any]:
         },
     }
     logger.warning(
-        "[LLM热更新][worker] 已应用新配置 routing=%s market=%s youtube=%s",
+        "[LLM hot reload][worker] applied new settings routing=%s market=%s youtube=%s",
         details["task_routing"],
         details["market"],
         details["youtube"],
@@ -125,6 +126,14 @@ def apply_llm_config_to_worker_runtime(runtime) -> dict[str, Any]:
 async def maybe_reload_llm_runtime_from_signal(runtime) -> None:
     runtime.llm_reload_last_check_ts = datetime.now(timezone.utc)
     settings = runtime.settings
+    worker_role = resolve_worker_role(settings)
+    if is_split_worker_role(worker_role):
+        logger.warning(
+            "[LLM hot reload][worker] split role=%s forbids file-signal polling; skip file backend reload",
+            worker_role,
+        )
+        return
+
     signal = read_llm_reload_signal(settings.llm_hot_reload_signal_file)
     if not signal:
         return
@@ -135,12 +144,12 @@ async def maybe_reload_llm_runtime_from_signal(runtime) -> None:
     if revision == runtime.llm_reload_revision_applied:
         return
 
-    logger.warning("[LLM热更新][worker] 检测到新 signal revision=%s，开始应用", revision)
+    logger.warning("[LLM hot reload][worker] detected new file signal revision=%s", revision)
     ack_file = settings.llm_hot_reload_ack_file
     try:
         details = apply_llm_config_to_worker_runtime(runtime)
     except Exception as exc:
-        logger.exception("[LLM热更新][worker] 应用失败 revision=%s error=%s", revision, exc)
+        logger.exception("[LLM hot reload][worker] apply failed revision=%s error=%s", revision, exc)
         write_llm_reload_ack(
             ack_file,
             revision=revision,
@@ -164,6 +173,7 @@ def _redis_available(redis_url: str) -> bool:
     """Quick check if Redis is reachable. Returns False on any connection error."""
     try:
         import redis
+
         r = redis.from_url(redis_url, socket_connect_timeout=2)
         r.ping()
         r.close()
@@ -175,18 +185,32 @@ def _redis_available(redis_url: str) -> bool:
 async def run_llm_reload_subscriber(runtime) -> None:
     """Subscribe to llm:reload Redis channel and apply config on message. Runs until cancelled."""
     settings = runtime.settings
+    worker_role = resolve_worker_role(settings)
+    split_mode = is_split_worker_role(worker_role)
     poll_seconds = float(getattr(settings, "llm_hot_reload_poll_seconds", 5) or 5)
+
     if not getattr(settings, "llm_hot_reload_use_redis", True):
-        logger.info("[LLM热更新][worker] 使用文件轮询模式 (LLM_HOT_RELOAD_USE_REDIS=false)")
+        if split_mode:
+            raise RuntimeError(
+                f"WORKER_ROLE={worker_role} requires Redis hot-reload. "
+                "File fallback is disabled for split workers."
+            )
+        logger.info("[LLM hot reload][worker] using file polling fallback (LLM_HOT_RELOAD_USE_REDIS=false)")
         await _run_llm_reload_poll_loop(runtime, poll_seconds)
         return
+
     if not _redis_available(settings.redis_url):
+        if split_mode:
+            raise RuntimeError(
+                f"WORKER_ROLE={worker_role} Redis unavailable at startup (url={settings.redis_url})."
+            )
         logger.warning(
-            "[LLM热更新][worker] Redis 不可用 (url=%s)，回退到文件轮询模式",
+            "[LLM hot reload][worker] Redis unavailable (url=%s), fallback to file polling mode",
             settings.redis_url,
         )
         await _run_llm_reload_poll_loop(runtime, poll_seconds)
         return
+
     client = None
     pubsub = None
     try:
@@ -195,7 +219,11 @@ async def run_llm_reload_subscriber(runtime) -> None:
         client = Redis.from_url(settings.redis_url)
         pubsub = client.pubsub()
         await pubsub.subscribe("llm:reload")
-        logger.warning("[LLM热更新][worker] 已订阅 Redis channel=llm:reload worker_id=%s", settings.worker_id)
+        logger.warning(
+            "[LLM hot reload][worker] subscribed channel=llm:reload worker_id=%s role=%s",
+            settings.worker_id,
+            worker_role,
+        )
         async for message in pubsub.listen():
             if message is None or message.get("type") != "message":
                 continue
@@ -205,12 +233,12 @@ async def run_llm_reload_subscriber(runtime) -> None:
             try:
                 payload = json.loads(data.decode("utf-8") if isinstance(data, bytes) else data)
             except (json.JSONDecodeError, TypeError):
-                logger.warning("[LLM热更新][worker] 无效 message data")
+                logger.warning("[LLM hot reload][worker] invalid redis message payload")
                 continue
             revision = str(payload.get("revision") or "").strip()
             if not revision or revision == runtime.llm_reload_revision_applied:
                 continue
-            logger.warning("[LLM热更新][worker] 收到 Redis signal revision=%s，开始应用", revision)
+            logger.warning("[LLM hot reload][worker] received redis signal revision=%s", revision)
             try:
                 details = apply_llm_config_to_worker_runtime(runtime)
                 runtime.llm_reload_revision_applied = revision
@@ -222,7 +250,7 @@ async def run_llm_reload_subscriber(runtime) -> None:
                     details=details,
                 )
             except Exception as exc:
-                logger.exception("[LLM热更新][worker] 应用失败 revision=%s error=%s", revision, exc)
+                logger.exception("[LLM hot reload][worker] apply failed revision=%s error=%s", revision, exc)
                 write_llm_reload_ack_redis(
                     settings.redis_url,
                     settings.worker_id,
@@ -233,7 +261,9 @@ async def run_llm_reload_subscriber(runtime) -> None:
     except asyncio.CancelledError:
         raise
     except Exception as exc:
-        logger.exception("[LLM热更新][worker] Redis 订阅异常 error=%s", exc)
+        logger.exception("[LLM hot reload][worker] redis subscriber error=%s", exc)
+        if split_mode:
+            raise
         await _run_llm_reload_poll_loop(runtime, poll_seconds)
     finally:
         try:

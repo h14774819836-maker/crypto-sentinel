@@ -1826,6 +1826,27 @@ def llm_status_api(db: Session = Depends(get_db)):
     }
 
 
+@router.get("/api/llm/status.hot_reload.workers")
+def llm_hot_reload_workers_api(_admin: str = Depends(require_admin)):
+    refresh_llm_env_vars_from_dotenv()
+    get_settings.cache_clear()
+    s = get_settings()
+    mode = "redis" if getattr(s, "llm_hot_reload_use_redis", True) else "file"
+    workers: dict[str, Any] = {}
+    if mode == "redis":
+        workers = read_llm_reload_acks_redis(s.redis_url)
+    else:
+        ack_state = read_llm_reload_ack(s.llm_hot_reload_ack_file)
+        if isinstance(ack_state, dict) and ack_state:
+            workers[s.worker_id] = ack_state
+    return {
+        "ok": True,
+        "mode": mode,
+        "workers": workers,
+        "count": len(workers),
+    }
+
+
 @router.get("/api/llm/calls")
 def llm_calls_api(
     task: str | None = Query(default=None),

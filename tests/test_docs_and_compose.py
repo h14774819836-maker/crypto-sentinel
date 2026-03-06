@@ -13,10 +13,15 @@ def test_root_compose_exists():
     assert "services:" in content
     assert "api:" in content
     assert "worker:" in content
+    assert "worker_ai:" in content
     assert "db:" in content
+    assert "redis:" in content
     assert "migrate:" in content
     assert "service_completed_successfully" in content
     assert "python -m alembic upgrade head" in content
+    assert "LLM_HOT_RELOAD_USE_REDIS" in content
+    assert "HTTP_PROXY: ${HTTP_PROXY:-}" in content
+    assert "HTTPS_PROXY: ${HTTPS_PROXY:-}" in content
     assert "scripts/init_db.py" not in content
 
 
@@ -51,3 +56,66 @@ def test_start_scripts_force_backfill_one_day():
     assert "--backfill-days 1" in ps1_content
     assert "--backfill-days 1" in sh_content
     assert "--backfill-days 1" in bat_content
+
+
+def test_root_run_bat_bootstraps_redis_for_multi_worker():
+    content = (PROJECT_ROOT / "run.bat").read_text(encoding="utf-8")
+    assert "setlocal EnableExtensions" in content
+    assert ":detect_compose_command" in content
+    assert ":docker_prepare_multi_worker" in content
+    assert "docker compose version" in content
+    assert "docker-compose version" in content
+    assert "up -d redis" in content
+    assert "up -d redis db" in content
+    assert "redis-cli DEL worker:heartbeat:worker-core-1 worker:heartbeat:worker-ai-1" in content
+    assert "up --build" in content
+    assert "redis-server --appendonly yes" in content
+    assert "--multi-worker" in content
+    assert ":ensure_redis" in content
+
+
+def test_root_run_ps1_bootstraps_docker_and_browser_flow():
+    content = (PROJECT_ROOT / "run.ps1").read_text(encoding="utf-8")
+    assert "function Get-ComposeCommand" in content
+    assert "function Prepare-DockerMultiWorker" in content
+    assert 'Invoke-Compose -ComposeCommand $composeCommand -Args @("up", "--build", "-d")' in content
+    assert 'Wait-HttpReady -Url "http://127.0.0.1:8000/" -Attempts 90' in content
+    assert 'Start-Process "http://127.0.0.1:8000/"' in content
+    assert "Prompt-AttachLogs" in content
+    assert '--multi-worker' in content
+
+
+def test_postgres_migration_uses_boolean_false_default():
+    content = (
+        PROJECT_ROOT
+        / "app"
+        / "db"
+        / "migrations"
+        / "versions"
+        / "09280b48e726_add_sent_to_telegram_to_aisignal.py"
+    ).read_text(encoding="utf-8")
+    assert "server_default=sa.false()" in content
+    assert "server_default=sa.text('0')" not in content
+
+
+def test_youtube_status_migration_backfills_runtime_columns():
+    content = (
+        PROJECT_ROOT
+        / "app"
+        / "db"
+        / "migrations"
+        / "versions"
+        / "20260304_0013_add_youtube_explicit_status.py"
+    ).read_text(encoding="utf-8")
+    assert 'sa.inspect(conn).get_columns("youtube_videos")' in content
+    assert '"analysis_runtime_status"' in content
+    assert '"analysis_updated_at"' in content
+    assert '"analysis_retry_count"' in content
+
+
+def test_env_example_mentions_optional_proxy_settings():
+    content = (PROJECT_ROOT / ".env.example").read_text(encoding="utf-8")
+    assert "HTTP_PROXY=" in content
+    assert "HTTPS_PROXY=" in content
+    assert "ALL_PROXY=" in content
+    assert "NO_PROXY=localhost,127.0.0.1,db,redis" in content
