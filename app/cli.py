@@ -12,6 +12,7 @@ import sys
 import threading
 import time
 import webbrowser
+from datetime import datetime, timezone
 from pathlib import Path
 from types import FrameType
 from typing import Callable
@@ -24,6 +25,17 @@ from sqlalchemy.engine import make_url
 
 from app.db.guards import enforce_migration_strict_mode, ensure_db_backend_allowed
 from app.logging import logger, setup_logging
+from app.runtime_control import (
+    RUNTIME_STATE_PATH,
+    clear_runtime_state,
+    clear_runtime_stop_request,
+    extract_runtime_pids,
+    read_runtime_state,
+    read_runtime_stop_request,
+    request_runtime_stop,
+    should_honor_runtime_stop_request,
+    write_runtime_state,
+)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 ENV_PATH = REPO_ROOT / ".env"
@@ -334,6 +346,129 @@ def stop_process(process: subprocess.Popen[str], name: str, timeout: int = 10) -
         pass
 
 
+def _pid_exists(pid: int | None) -> bool:
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _build_local_runtime_state(
+    settings,
+    args: argparse.Namespace,
+    *,
+    multi_worker: bool,
+    api_process: subprocess.Popen[str],
+    worker_process: subprocess.Popen[str] | None,
+    worker_core_process: subprocess.Popen[str] | None,
+    worker_ai_process: subprocess.Popen[str] | None,
+) -> dict[str, object]:
+    children: dict[str, dict[str, object]] = {
+        "api": {"pid": api_process.pid, "label": "API"},
+    }
+    if multi_worker:
+        if worker_core_process is not None:
+            children["worker_core"] = {"pid": worker_core_process.pid, "label": "Worker(core)"}
+        if worker_ai_process is not None:
+            children["worker_ai"] = {"pid": worker_ai_process.pid, "label": "Worker(ai)"}
+    elif worker_process is not None:
+        children["worker"] = {"pid": worker_process.pid, "label": "Worker"}
+
+    return {
+        "version": 1,
+        "kind": "local",
+        "mode": "multi_worker" if multi_worker else "single_worker",
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "repo_root": str(REPO_ROOT),
+        "supervisor_pid": os.getpid(),
+        "host": args.host,
+        "port": int(args.port),
+        "database_url": mask_database_url(settings.database_url),
+        "children": children,
+    }
+
+
+def _wait_for_runtime_shutdown(pids: list[int], *, timeout: float) -> bool:
+    deadline = time.time() + max(0.0, float(timeout))
+    while time.time() < deadline:
+        state = read_runtime_state()
+        if state is None and not any(_pid_exists(pid) for pid in pids):
+            return True
+        time.sleep(0.25)
+    state = read_runtime_state()
+    return state is None and not any(_pid_exists(pid) for pid in pids)
+
+
+def _force_stop_pid(pid: int, name: str, *, timeout: float = 5.0) -> None:
+    if not _pid_exists(pid):
+        return
+
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill", "/PID", str(pid), "/T"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    else:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except Exception:
+            return
+
+    deadline = time.time() + max(0.0, float(timeout))
+    while time.time() < deadline:
+        if not _pid_exists(pid):
+            return
+        time.sleep(0.2)
+
+    logger.warning("%s pid=%s did not stop after soft request, forcing kill", name, pid)
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill", "/F", "/PID", str(pid), "/T"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    else:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except Exception:
+            pass
+
+
+def _force_stop_local_runtime(runtime_state: dict[str, object] | None) -> None:
+    if not isinstance(runtime_state, dict):
+        return
+
+    ordered_targets: list[tuple[str, int]] = []
+    supervisor_pid = runtime_state.get("supervisor_pid")
+    if isinstance(supervisor_pid, int) and supervisor_pid > 0:
+        ordered_targets.append(("Supervisor", supervisor_pid))
+
+    children = runtime_state.get("children")
+    if isinstance(children, dict):
+        for key, item in children.items():
+            if not isinstance(item, dict):
+                continue
+            pid = item.get("pid")
+            if not isinstance(pid, int) or pid <= 0:
+                continue
+            label = str(item.get("label") or key)
+            if pid not in {target_pid for _, target_pid in ordered_targets}:
+                ordered_targets.append((label, pid))
+
+    for label, pid in ordered_targets:
+        _force_stop_pid(pid, label)
+
+
 def probe_http_ready(host: str, port: int, timeout_per_request: float = 1.0) -> bool:
     import urllib.request
     import urllib.error
@@ -445,6 +580,21 @@ def command_up(args: argparse.Namespace) -> int:
     else:
         api_process = start_process(api_command, runtime_env, "API")
         worker_process = start_process(worker_command, runtime_env, "Worker")
+        worker_core_process = None
+        worker_ai_process = None
+
+    clear_runtime_stop_request()
+    write_runtime_state(
+        _build_local_runtime_state(
+            settings,
+            args,
+            multi_worker=multi_worker,
+            api_process=api_process,
+            worker_process=worker_process,
+            worker_core_process=worker_core_process,
+            worker_ai_process=worker_ai_process,
+        )
+    )
 
     logger.info("Dashboard: http://%s:%d", args.host, args.port)
     logger.info("Health: http://%s:%d/api/health", args.host, args.port)
@@ -467,9 +617,21 @@ def command_up(args: argparse.Namespace) -> int:
             continue
 
     exit_code = 0
+    stop_request_logged = False
     try:
         if multi_worker:
             while not stop_event.is_set():
+                stop_request = read_runtime_stop_request()
+                if should_honor_runtime_stop_request(stop_request):
+                    if not stop_request_logged:
+                        logger.warning(
+                            "Shutdown requested via runtime control requested_by=%s reason=%s",
+                            stop_request.get("requested_by"),
+                            stop_request.get("reason"),
+                        )
+                        stop_request_logged = True
+                    stop_event.set()
+                    break
                 api_exit = api_process.poll()
                 core_exit = worker_core_process.poll()
                 ai_exit = worker_ai_process.poll()
@@ -491,6 +653,17 @@ def command_up(args: argparse.Namespace) -> int:
                 time.sleep(0.5)
         else:
             while not stop_event.is_set():
+                stop_request = read_runtime_stop_request()
+                if should_honor_runtime_stop_request(stop_request):
+                    if not stop_request_logged:
+                        logger.warning(
+                            "Shutdown requested via runtime control requested_by=%s reason=%s",
+                            stop_request.get("requested_by"),
+                            stop_request.get("reason"),
+                        )
+                        stop_request_logged = True
+                    stop_event.set()
+                    break
                 api_exit = api_process.poll()
                 worker_exit = worker_process.poll()
                 if api_exit is not None:
@@ -511,12 +684,61 @@ def command_up(args: argparse.Namespace) -> int:
             stop_process(worker_ai_process, "Worker(ai)")
         else:
             stop_process(worker_process, "Worker")
+        clear_runtime_state()
         for sig, handler in previous_handlers.items():
             try:
                 signal.signal(sig, handler)
             except Exception:
                 pass
     return 0 if exit_code == 0 else 1
+
+
+def command_down(args: argparse.Namespace) -> int:
+    setup_logging()
+
+    runtime_state = read_runtime_state()
+    if runtime_state is None:
+        clear_runtime_stop_request()
+        logger.info("No local runtime state found at %s", RUNTIME_STATE_PATH)
+        return 0
+
+    tracked_pids = extract_runtime_pids(runtime_state)
+    request = request_runtime_stop(
+        reason=args.reason,
+        requested_by=args.requested_by,
+        delay_seconds=args.delay_seconds,
+    )
+    logger.warning(
+        "Runtime stop requested requested_by=%s reason=%s delay=%.2fs",
+        request.get("requested_by"),
+        request.get("reason"),
+        float(request.get("delay_seconds") or 0.0),
+    )
+
+    graceful_stopped = False
+    try:
+        graceful_stopped = _wait_for_runtime_shutdown(tracked_pids, timeout=args.wait_seconds)
+    except KeyboardInterrupt:
+        logger.warning("Shutdown wait interrupted; continuing with fallback cleanup logic")
+
+    if graceful_stopped:
+        clear_runtime_state()
+        logger.info("Local runtime stopped gracefully")
+        return 0
+
+    if not args.force:
+        logger.warning(
+            "Shutdown request timed out after %.1fs; rerun with --force to terminate remaining processes",
+            float(args.wait_seconds),
+        )
+        return 1
+
+    logger.warning("Graceful shutdown timed out; forcing stop of remaining local runtime processes")
+    _force_stop_local_runtime(runtime_state)
+    _wait_for_runtime_shutdown(tracked_pids, timeout=3.0)
+    clear_runtime_state()
+    logger.info("Forced shutdown sequence completed")
+    return 0
 
 
 def command_backfill(args: argparse.Namespace) -> int:
@@ -637,17 +859,27 @@ def build_parser() -> argparse.ArgumentParser:
 
     up_parser = subparsers.add_parser("up", help="Start API + Worker(s)")
     up_parser.add_argument("--open-browser", action="store_true", help="Open dashboard after API becomes healthy")
-    up_parser.add_argument("--multi-worker", dest="multi_worker", action="store_true", help="Start API + Core Worker + AI Worker (requires Redis)")
+    up_parser.set_defaults(db_init=True, multi_worker=True)
+    up_parser.add_argument("--multi-worker", dest="multi_worker", action="store_true", help="Start API + Core Worker + AI Worker (default, requires Redis)")
+    up_parser.add_argument("--single-worker", dest="multi_worker", action="store_false", help="Start API + one combined Worker")
     up_parser.add_argument("--host", type=str, default="127.0.0.1", help="API host (default: 127.0.0.1)")
     up_parser.add_argument("--port", type=int, default=8000, help="API port (default: 8000)")
     up_parser.add_argument("--backfill-days", type=int, default=0, help="Worker startup backfill days (default: 0)")
-    up_parser.set_defaults(db_init=True)
     up_parser.add_argument("--db-init", dest="db_init", action="store_true", help="Run database initialization before start")
     up_parser.add_argument("--no-db-init", dest="db_init", action="store_false", help="Skip database initialization")
 
     backfill_parser = subparsers.add_parser("backfill", help="Backfill 1m data and rebuild 10m")
     backfill_parser.add_argument("--days", type=int, required=True, help="Number of days to backfill")
     backfill_parser.add_argument("--symbols", type=str, default="", help="CSV symbols (default from WATCHLIST)")
+
+    down_parser = subparsers.add_parser("down", help="Stop the local API + Worker runtime")
+    down_parser.add_argument("--reason", type=str, default="manual_stop", help="Reason recorded in runtime stop signal")
+    down_parser.add_argument("--requested-by", type=str, default="cli", help="Who requested the stop")
+    down_parser.add_argument("--delay-seconds", type=float, default=0.0, help="Delay stop so API responses can flush")
+    down_parser.add_argument("--wait-seconds", type=float, default=15.0, help="How long to wait for graceful shutdown")
+    down_parser.set_defaults(force=True)
+    down_parser.add_argument("--force", dest="force", action="store_true", help="Force kill remaining processes after timeout")
+    down_parser.add_argument("--no-force", dest="force", action="store_false", help="Do not force kill after timeout")
 
     doctor_parser = subparsers.add_parser("doctor", help="Run local health diagnostics")
     doctor_parser.add_argument("--host", type=str, default="127.0.0.1", help="API host for checks")
@@ -667,6 +899,8 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit(command_up(args))
     if args.command == "backfill":
         raise SystemExit(command_backfill(args))
+    if args.command == "down":
+        raise SystemExit(command_down(args))
     if args.command == "doctor":
         raise SystemExit(command_doctor(args))
     if args.command == "test-telegram":

@@ -2,6 +2,25 @@
 setlocal EnableExtensions
 goto :main
 
+:use_docker_stack
+if /I "%~1"=="docker" exit /b 0
+if /I "%~1"=="--docker" exit /b 0
+if /I "%~1"=="compose" exit /b 0
+exit /b 1
+
+:use_stop_action
+if /I "%~1"=="stop" exit /b 0
+if /I "%~1"=="down" exit /b 0
+if /I "%~1"=="exit" exit /b 0
+exit /b 1
+
+:use_single_worker_action
+if /I "%~1"=="single" exit /b 0
+if /I "%~1"=="--single" exit /b 0
+if /I "%~1"=="single-worker" exit /b 0
+if /I "%~1"=="--single-worker" exit /b 0
+exit /b 1
+
 :detect_compose_command
 set "COMPOSE_CMD="
 docker compose version >nul 2>nul
@@ -39,22 +58,28 @@ if not errorlevel 1 (
 
 echo [CHECK] Redis is not reachable at %REDIS_URL%
 
+set "REDIS_COMPOSE_OK=0"
 if defined COMPOSE_CMD (
     echo [SETUP] Trying to start Redis via %COMPOSE_CMD% up -d redis...
     call %COMPOSE_CMD% up -d redis
+    if not errorlevel 1 set "REDIS_COMPOSE_OK=1"
+)
+if "%REDIS_COMPOSE_OK%"=="1" (
+    call :wait_for_redis 20
     if not errorlevel 1 (
-        call :wait_for_redis 20
-        if not errorlevel 1 (
-            echo [INFO] Redis started via compose.
-            exit /b 0
-        )
+        echo [INFO] Redis started via docker compose.
+        exit /b 0
     )
 )
 
+set "REDIS_LOCAL_OK=0"
 where /q redis-server
 if not errorlevel 1 (
     echo [SETUP] Trying to start local redis-server...
     start "Crypto Sentinel Redis" /min redis-server --appendonly yes
+    set "REDIS_LOCAL_OK=1"
+)
+if "%REDIS_LOCAL_OK%"=="1" (
     call :wait_for_redis 20
     if not errorlevel 1 (
         echo [INFO] Redis started via local redis-server.
@@ -62,13 +87,9 @@ if not errorlevel 1 (
     )
 )
 
-echo [ERROR] Could not start Redis automatically.
-if defined COMPOSE_CMD (
-    echo         Try: %COMPOSE_CMD% up -d redis
-) else (
-    echo         Neither 'docker compose' nor 'docker-compose' was found in PATH.
-)
-echo         Or install/start a local redis-server and retry.
+echo [WARN] Could not start Redis automatically.
+if defined COMPOSE_CMD echo         Docker mode is available via: run.bat docker
+echo         Or install/start a local redis-server for local multi-worker mode.
 exit /b 1
 
 :docker_prepare_multi_worker
@@ -161,6 +182,19 @@ set "NEED_INSTALL=1"
 :venv_ready
 call ".venv\Scripts\activate.bat"
 
+call :use_stop_action "%~1"
+if not errorlevel 1 (
+    echo [STOP] Requesting local runtime shutdown...
+    call python -m app.cli down --reason script_stop --requested-by run.bat
+    set "STOP_EXIT=%errorlevel%"
+    call :detect_compose_command
+    if defined COMPOSE_CMD (
+        echo [STOP] Bringing down Docker stack if running...
+        call %COMPOSE_CMD% down >nul 2>nul
+    )
+    exit /b %STOP_EXIT%
+)
+
 REM --- Check for update flag ---
 if "%1"=="update" set "NEED_INSTALL=1"
 if "%1"=="--update" set "NEED_INSTALL=1"
@@ -193,10 +227,13 @@ for /f "usebackq tokens=1,* delims==" %%A in (`findstr /R /B /I "REDIS_URL=" ".e
 )
 
 call :detect_compose_command
-call :redis_ping
-if errorlevel 1 (
+call :use_single_worker_action "%~1"
+set "USE_SINGLE_MODE=0"
+if not errorlevel 1 set "USE_SINGLE_MODE=1"
+call :use_docker_stack "%~1"
+if not errorlevel 1 (
     if defined COMPOSE_CMD (
-        echo [INFO] Local Redis is unavailable. Switching to Docker multi-worker stack...
+        echo [INFO] Docker mode selected. Launching Docker multi-worker stack...
         call :docker_prepare_multi_worker
         if errorlevel 1 (
             echo [ERROR] Failed to prepare Docker dependencies.
@@ -223,19 +260,41 @@ if errorlevel 1 (
         call :prompt_attach_logs
         exit /b 0
     )
-)
-
-call :ensure_redis
-if errorlevel 1 (
-    echo [ERROR] Redis is required for multi-worker startup.
+    echo [ERROR] Docker mode requested, but docker compose is unavailable.
     pause
     exit /b 1
 )
 
+if "%USE_SINGLE_MODE%"=="1" (
+    set "START_MODE=single"
+    set "START_MULTI_ARG=--single-worker"
+) else (
+    call :ensure_redis
+    if errorlevel 1 (
+        echo [ERROR] Default startup now requires Redis for multi-worker mode.
+        echo         Use run.bat single for explicit single-worker mode.
+        pause
+        exit /b 1
+    )
+    set "START_MODE=multi"
+    set "START_MULTI_ARG=--multi-worker"
+)
+
 echo.
-echo [START] Launching Crypto Sentinel (API + Core Worker + AI Worker)...
+if /I "%START_MODE%"=="multi" (
+    echo [START] Launching Crypto Sentinel ^(API + Core Worker + AI Worker^)...
+) else (
+    echo [WARN] Explicit single-worker mode selected.
+    echo [START] Launching Crypto Sentinel ^(API + Worker^)...
+)
 echo         Dashboard: http://127.0.0.1:8000
-echo         Redis: %REDIS_URL%
+echo         Database: local .env DATABASE_URL (preserves existing SQLite data)
+if /I "%START_MODE%"=="multi" (
+    echo         Redis: %REDIS_URL%
+) else (
+    echo         Redis: disabled for this run
+)
+if defined COMPOSE_CMD echo         Docker stack: run.bat docker
 echo         Run 'run.bat update' to update dependencies
 echo         Press Ctrl+C to stop
 echo.
@@ -247,7 +306,7 @@ if errorlevel 1 (
     exit /b 1
 )
 
-call python -m app.cli up --open-browser --no-db-init --backfill-days 1 --multi-worker
+call python -m app.cli up --open-browser --no-db-init --backfill-days 1 %START_MULTI_ARG%
 if errorlevel 1 (
     echo [ERROR] Crypto Sentinel failed to start.
     pause

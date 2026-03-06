@@ -111,15 +111,16 @@
 
 ### 数据/控制流
 
-- `CLI` 启动 API 与 Worker 两个子进程（`app/cli.py`）。
+- 默认启动路径支持单 Worker 与多 Worker 两种模式（`app/cli.py`）。
+- 多 Worker 模式下，`CLI` 启动 API + Core Worker + AI Worker 三个子进程，并注入 `WORKER_ROLE` / `WORKER_ID` / `REDIS_URL`。
 - API 负责页面渲染、管理接口、手动触发、SSE 流。
 - Worker 负责行情订阅、周期任务、外部轮询、告警推送。
 - Intel RSS 采集与摘要生成在 Worker 内以定时任务运行，结果提供给 API 展示与 AI 上下文。
-- 两进程通过共享数据库和 LLM 热更新（Redis Pub/Sub 或文件信号）协作。
+- 各进程通过共享数据库和 LLM 热更新（Redis Pub/Sub 或文件信号）协作。
 
 ### 风险与边界
 
-- 单体代码库易部署，但核心文件（`app/scheduler/jobs.py`）职责聚合严重。
+- 单体代码库易部署，但调度任务实现主体（`app/scheduler/_jobs_impl.py`）体量较大、职责聚合严重。
 - DB 初始化路径存在 `Alembic` 与 `create_all` 混用，存在 schema 演进不一致风险。
 - `app/web/views.py` 虽有拆分但仍承载大量逻辑。
 
@@ -651,6 +652,9 @@ tests/              # pytest 测试
 #### 现状实现
 - `/api/llm/config` 修改 `.env` 中 LLM 配置。
 - Redis 模式：API 发布 `llm:reload` 事件；Worker 订阅后实时应用并写 ACK。
+- 提供 `/api/llm/status.hot_reload.workers` 聚合查看各 Worker 的 ACK 状态。
+- split-worker（core/ai）模式禁止文件轮询回退，要求 `LLM_HOT_RELOAD_USE_REDIS=true` 与可用 `REDIS_URL`。
+- LLM provider `base_url` 由配置直接透传，运维侧需避免尾随逗号或空白导致鉴权失败。
 
 ### 9. 策略回放与研究
 
@@ -699,7 +703,7 @@ stateDiagram-v2
 #### 配置与启动
 - 配置集中在 `.env` 与 `app/config.py`
 - 默认 DB：`SQLite`，可选 `PostgreSQL`。
-- 本地启动：`start.bat`/`start.sh` 或 CLI。
+- 本地启动：`run.bat` / `run.ps1` / `scripts/start.sh` 或 CLI。
 
 #### 环境能力现状
 - `dev/local`：可用
@@ -729,7 +733,7 @@ stateDiagram-v2
 - **模块解耦**：将 AI 分析、YouTube 处理拆分为独立微服务。
 
 ### 安全机制（现状）
-- **API 鉴权**：目前缺失，管理接口（如 `/api/llm/config`）存在风险。需引入 JWT 或 API Key 中间件。
+- **API 鉴权**：管理接口已接入 `ADMIN_TOKEN` 鉴权（`require_admin`，支持 Bearer Header 与 SSE query token）。
 - **Agent 安全**：Telegram Agent 限制为只读工具，防止恶意指令执行。
 - **敏感信息**：`.env` 包含 API Key，需避免提交到仓库。
 
@@ -766,11 +770,11 @@ stateDiagram-v2
 ## 安全机制实现与风险分析
 
 ### 1. 认证与授权
-- **现状**：API 几乎全裸奔，仅依赖网络隔离。
-- **风险**：高。任意内网用户可修改 LLM 配置或触发高成本分析。
+- **现状**：管理接口已要求 `ADMIN_TOKEN`，未配置 token 时接口保持锁定状态（403）。
+- **风险**：中。当前鉴权为单 token 方案，缺少细粒度角色权限与审计策略。
 - **计划**：
-  - 集成 OAuth2 / API Key。
-  - 为管理接口添加 `Depends(admin_required)`。
+  - 引入多角色权限（只读/运维/管理员）与 token 轮换机制。
+  - 为关键操作补充结构化审计日志。
 
 ### 2. 数据安全
 - **现状**：API Key 存储在环境变量或 `.env`。
@@ -819,9 +823,9 @@ stateDiagram-v2
 
 ## 程序可改进的地方（全面问题清单）
 
-1.  **代码结构**：`app/scheduler/jobs.py` 需要按领域拆分。
+1.  **代码结构**：`app/scheduler/_jobs_impl.py` 需要按领域继续拆分。
 2.  **Web 路由**：`app/web/views.py` 仍有遗留路由，需完全迁移到 `routers/`。
-3.  **鉴权**：API 缺乏鉴权机制。
+3.  **鉴权**：已具备 `ADMIN_TOKEN` 基础能力，需升级为 RBAC + 审计。
 4.  **前端**：Jinja2 模板中 JS 代码过多，需分离到 `static/js` 并模块化。
 5.  **依赖**：`requirements.txt` / `pyproject.toml` 需清理未使用的依赖，明确 ML 依赖。
 6.  **配置**：生产环境配置需与代码分离，支持 Docker Secret。

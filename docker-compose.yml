@@ -21,6 +21,8 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+    ports:
+      - "6379:6379"
     volumes:
       - redis_data:/data
 

@@ -4,9 +4,11 @@ import json
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
 
 from app.config import get_settings
+from app.runtime_control import read_runtime_state, read_runtime_stop_request, request_runtime_stop
+from app.web.auth import require_admin
 
 router = APIRouter()
 
@@ -91,4 +93,50 @@ def ops_jobs_api(
         "count": len(items),
         "items": items,
         "warnings": warnings,
+    }
+
+
+@router.get("/api/ops/runtime")
+def ops_runtime_api(_admin: str = Depends(require_admin)):
+    runtime = read_runtime_state()
+    stop_request = read_runtime_stop_request()
+    return {
+        "ok": True,
+        "runtime": runtime,
+        "stop_request": stop_request,
+        "registered": runtime is not None,
+    }
+
+
+@router.post("/api/ops/runtime/shutdown")
+def ops_runtime_shutdown_api(
+    body: dict[str, Any] | None = Body(default=None),
+    _admin: str = Depends(require_admin),
+):
+    runtime = read_runtime_state()
+    if runtime is None:
+        raise HTTPException(status_code=409, detail="No supervised local runtime is registered")
+
+    payload = body or {}
+    raw_delay = payload.get("delay_seconds", 1.0)
+    try:
+        delay_seconds = max(0.0, min(10.0, float(raw_delay)))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="delay_seconds must be a number") from None
+
+    reason = str(payload.get("reason") or "ui_shutdown").strip()[:200] or "ui_shutdown"
+    stop_request = request_runtime_stop(
+        reason=reason,
+        requested_by="api",
+        delay_seconds=delay_seconds,
+    )
+    return {
+        "ok": True,
+        "message": "Shutdown requested",
+        "runtime": {
+            "mode": runtime.get("mode"),
+            "host": runtime.get("host"),
+            "port": runtime.get("port"),
+        },
+        "stop_request": stop_request,
     }

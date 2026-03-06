@@ -19,6 +19,23 @@ def test_up_defaults():
     assert args.port == 8000
     assert args.db_init is True
     assert args.backfill_days == 0
+    assert args.multi_worker is True
+
+
+def test_up_single_worker_flag_overrides_default():
+    parser = cli.build_parser()
+    args = parser.parse_args(["up", "--single-worker"])
+    assert args.multi_worker is False
+
+
+def test_down_defaults():
+    parser = cli.build_parser()
+    args = parser.parse_args(["down"])
+    assert args.reason == "manual_stop"
+    assert args.requested_by == "cli"
+    assert args.delay_seconds == 0.0
+    assert args.wait_seconds == 15.0
+    assert args.force is True
 
 
 def test_commands_use_sys_executable():
@@ -199,6 +216,9 @@ def test_up_handles_interrupt_and_stops_both_processes(monkeypatch):
     monkeypatch.setattr(cli, "start_process", fake_start_process)
     monkeypatch.setattr(cli, "stop_process", fake_stop_process)
     monkeypatch.setattr(cli, "log_latest_ingest_status", lambda _: None)
+    monkeypatch.setattr(cli, "clear_runtime_stop_request", lambda: None)
+    monkeypatch.setattr(cli, "write_runtime_state", lambda payload: None)
+    monkeypatch.setattr(cli, "clear_runtime_state", lambda: None)
     monkeypatch.setattr(cli.signal, "signal", fake_signal)
     monkeypatch.setattr(cli.signal, "getsignal", lambda _: None)
     monkeypatch.setattr(cli.time, "sleep", fake_sleep)
@@ -210,6 +230,7 @@ def test_up_handles_interrupt_and_stops_both_processes(monkeypatch):
         port=8000,
         backfill_days=0,
         db_init=True,
+        multi_worker=False,
     )
 
     exit_code = cli.command_up(args)
@@ -246,3 +267,89 @@ def test_build_api_env_for_multi_worker_sets_core_identity_and_metrics_map():
         "core": "data/job_metrics_core.json",
         "ai": "data/job_metrics_ai.json",
     }
+
+
+def test_down_requests_graceful_shutdown(monkeypatch):
+    runtime_state = {
+        "supervisor_pid": 999,
+        "children": {
+            "api": {"pid": 1001, "label": "API"},
+            "worker": {"pid": 1002, "label": "Worker"},
+        },
+    }
+    requests: list[dict[str, object]] = []
+    cleared: list[bool] = []
+
+    monkeypatch.setattr(cli, "setup_logging", lambda: None)
+    monkeypatch.setattr(cli, "read_runtime_state", lambda: runtime_state)
+    monkeypatch.setattr(cli, "extract_runtime_pids", lambda payload: [999, 1001, 1002])
+    monkeypatch.setattr(
+        cli,
+        "request_runtime_stop",
+        lambda **kwargs: requests.append(kwargs) or {
+            "requested_by": kwargs["requested_by"],
+            "reason": kwargs["reason"],
+            "delay_seconds": kwargs["delay_seconds"],
+        },
+    )
+    monkeypatch.setattr(cli, "_wait_for_runtime_shutdown", lambda pids, timeout: True)
+    monkeypatch.setattr(cli, "clear_runtime_state", lambda: cleared.append(True))
+
+    args = argparse.Namespace(
+        reason="script_stop",
+        requested_by="test",
+        delay_seconds=0.75,
+        wait_seconds=5.0,
+        force=True,
+    )
+    exit_code = cli.command_down(args)
+
+    assert exit_code == 0
+    assert requests == [{
+        "reason": "script_stop",
+        "requested_by": "test",
+        "delay_seconds": 0.75,
+    }]
+    assert cleared == [True]
+
+
+def test_down_forces_remaining_processes_after_timeout(monkeypatch):
+    runtime_state = {
+        "supervisor_pid": 999,
+        "children": {
+            "api": {"pid": 1001, "label": "API"},
+            "worker": {"pid": 1002, "label": "Worker"},
+        },
+    }
+    waits = iter([False, True])
+    forced: list[dict[str, object]] = []
+    cleared: list[bool] = []
+
+    monkeypatch.setattr(cli, "setup_logging", lambda: None)
+    monkeypatch.setattr(cli, "read_runtime_state", lambda: runtime_state)
+    monkeypatch.setattr(cli, "extract_runtime_pids", lambda payload: [999, 1001, 1002])
+    monkeypatch.setattr(
+        cli,
+        "request_runtime_stop",
+        lambda **kwargs: {
+            "requested_by": kwargs["requested_by"],
+            "reason": kwargs["reason"],
+            "delay_seconds": kwargs["delay_seconds"],
+        },
+    )
+    monkeypatch.setattr(cli, "_wait_for_runtime_shutdown", lambda pids, timeout: next(waits))
+    monkeypatch.setattr(cli, "_force_stop_local_runtime", lambda payload: forced.append(payload))
+    monkeypatch.setattr(cli, "clear_runtime_state", lambda: cleared.append(True))
+
+    args = argparse.Namespace(
+        reason="manual_stop",
+        requested_by="test",
+        delay_seconds=0.0,
+        wait_seconds=0.1,
+        force=True,
+    )
+    exit_code = cli.command_down(args)
+
+    assert exit_code == 0
+    assert forced == [runtime_state]
+    assert cleared == [True]

@@ -20,6 +20,7 @@ def test_root_compose_exists():
     assert "service_completed_successfully" in content
     assert "python -m alembic upgrade head" in content
     assert "LLM_HOT_RELOAD_USE_REDIS" in content
+    assert '"6379:6379"' in content
     assert "HTTP_PROXY: ${HTTP_PROXY:-}" in content
     assert "HTTPS_PROXY: ${HTTPS_PROXY:-}" in content
     assert "scripts/init_db.py" not in content
@@ -58,31 +59,44 @@ def test_start_scripts_force_backfill_one_day():
     assert "--backfill-days 1" in bat_content
 
 
-def test_root_run_bat_bootstraps_redis_for_multi_worker():
+def test_root_run_bat_supports_local_and_docker_modes():
     content = (PROJECT_ROOT / "run.bat").read_text(encoding="utf-8")
     assert "setlocal EnableExtensions" in content
     assert ":detect_compose_command" in content
+    assert ":use_stop_action" in content
+    assert ":use_single_worker_action" in content
     assert ":docker_prepare_multi_worker" in content
     assert "docker compose version" in content
     assert "docker-compose version" in content
+    assert "python -m app.cli down --reason script_stop --requested-by run.bat" in content
     assert "up -d redis" in content
     assert "up -d redis db" in content
     assert "redis-cli DEL worker:heartbeat:worker-core-1 worker:heartbeat:worker-ai-1" in content
     assert "up --build" in content
     assert "redis-server --appendonly yes" in content
     assert "--multi-worker" in content
+    assert "--single-worker" in content
     assert ":ensure_redis" in content
+    assert "Docker mode is available via: run.bat docker" in content
+    assert "Use run.bat single for explicit single-worker mode." in content
 
 
-def test_root_run_ps1_bootstraps_docker_and_browser_flow():
+def test_root_run_ps1_supports_local_and_docker_modes():
     content = (PROJECT_ROOT / "run.ps1").read_text(encoding="utf-8")
     assert "function Get-ComposeCommand" in content
+    assert "function Use-StopAction" in content
+    assert "function Use-SingleWorkerAction" in content
     assert "function Prepare-DockerMultiWorker" in content
+    assert "python -m app.cli down --reason script_stop --requested-by run.ps1" in content
+    assert 'Invoke-Compose -ComposeCommand $ComposeCommand -Args @("up", "-d", "redis")' in content or 'Invoke-Compose -ComposeCommand $composeCommand -Args @("up", "-d", "redis")' in content
     assert 'Invoke-Compose -ComposeCommand $composeCommand -Args @("up", "--build", "-d")' in content
     assert 'Wait-HttpReady -Url "http://127.0.0.1:8000/" -Attempts 90' in content
     assert 'Start-Process "http://127.0.0.1:8000/"' in content
     assert "Prompt-AttachLogs" in content
     assert '--multi-worker' in content
+    assert '--single-worker' in content
+    assert 'Docker mode is available via: run.ps1 docker' in content
+    assert 'Use run.ps1 single for explicit single-worker mode.' in content
 
 
 def test_postgres_migration_uses_boolean_false_default():

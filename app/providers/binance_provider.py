@@ -74,7 +74,7 @@ class BinanceProvider(ExchangeProvider):
             resp.raise_for_status()
             data = resp.json()
         else:
-            async with httpx.AsyncClient(timeout=self._http_timeout) as own_client:
+            async with httpx.AsyncClient(timeout=self._http_timeout, trust_env=False) as own_client:
                 resp = await own_client.get(url)
                 resp.raise_for_status()
                 data = resp.json()
@@ -134,7 +134,7 @@ class BinanceProvider(ExchangeProvider):
                 if client is not None:
                     resp = await client.request(method.upper(), url, params=request_params, headers=headers)
                 else:
-                    async with httpx.AsyncClient(timeout=self._http_timeout) as own_client:
+                    async with httpx.AsyncClient(timeout=self._http_timeout, trust_env=False) as own_client:
                         resp = await own_client.request(method.upper(), url, params=request_params, headers=headers)
                 resp.raise_for_status()
                 return resp.json() if resp.text else {}
@@ -273,7 +273,7 @@ class BinanceProvider(ExchangeProvider):
         current = start_ms
         candles: list[Candle] = []
 
-        async with httpx.AsyncClient(timeout=self._http_timeout) as client:
+        async with httpx.AsyncClient(timeout=self._http_timeout, trust_env=False) as client:
             while current <= end_ms:
                 params = {
                     "symbol": symbol.upper(),
@@ -346,7 +346,7 @@ class BinanceProvider(ExchangeProvider):
         """GET /fapi/v1/premiumIndex — returns mark price, last funding rate, etc."""
         url = f"{self.futures_base}/fapi/v1/premiumIndex"
         try:
-            async with httpx.AsyncClient(timeout=self._http_timeout) as client:
+            async with httpx.AsyncClient(timeout=self._http_timeout, trust_env=False) as client:
                 resp = await client.get(url, params={"symbol": symbol.upper()})
                 resp.raise_for_status()
                 data = resp.json()
@@ -372,7 +372,7 @@ class BinanceProvider(ExchangeProvider):
         """GET /fapi/v1/openInterest — returns current open interest."""
         url = f"{self.futures_base}/fapi/v1/openInterest"
         try:
-            async with httpx.AsyncClient(timeout=self._http_timeout) as client:
+            async with httpx.AsyncClient(timeout=self._http_timeout, trust_env=False) as client:
                 resp = await client.get(url, params={"symbol": symbol.upper()})
                 resp.raise_for_status()
                 data = resp.json()
@@ -437,7 +437,7 @@ class BinanceProvider(ExchangeProvider):
                 if client is not None:
                     resp = await client.post(url, headers=headers)
                 else:
-                    async with httpx.AsyncClient(timeout=self._http_timeout) as own_client:
+                    async with httpx.AsyncClient(timeout=self._http_timeout, trust_env=False) as own_client:
                         resp = await own_client.post(url, headers=headers)
                 resp.raise_for_status()
                 response = resp.json()
@@ -461,7 +461,7 @@ class BinanceProvider(ExchangeProvider):
                 if client is not None:
                     resp = await client.put(url, params={"listenKey": listen_key}, headers=headers)
                 else:
-                    async with httpx.AsyncClient(timeout=self._http_timeout) as own_client:
+                    async with httpx.AsyncClient(timeout=self._http_timeout, trust_env=False) as own_client:
                         resp = await own_client.put(url, params={"listenKey": listen_key}, headers=headers)
                 resp.raise_for_status()
                 return

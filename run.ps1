@@ -103,7 +103,7 @@ function Ensure-Redis {
         if ((Invoke-Compose -ComposeCommand $ComposeCommand -Args @("up", "-d", "redis")) -eq 0) {
             for ($i = 0; $i -lt 20; $i++) {
                 if (Test-RedisTcp -RedisUrl $RedisUrl) {
-                    Write-Host "[INFO] Redis started via compose." -ForegroundColor Green
+                    Write-Host "[INFO] Redis started via docker compose." -ForegroundColor Green
                     return $true
                 }
                 Start-Sleep -Seconds 1
@@ -123,13 +123,13 @@ function Ensure-Redis {
         }
     }
 
-    Write-Host "[ERROR] Could not start Redis automatically." -ForegroundColor Red
+    Write-Host "[WARN] Could not start Redis automatically." -ForegroundColor Yellow
     if ($ComposeCommand) {
-        Write-Host "        Try: $($ComposeCommand -join ' ') up -d redis" -ForegroundColor Yellow
+        Write-Host "        Docker mode is available via: run.ps1 docker" -ForegroundColor Yellow
     } else {
         Write-Host "        Neither 'docker compose' nor 'docker-compose' was found in PATH." -ForegroundColor Yellow
     }
-    Write-Host "        Or install/start a local redis-server and retry." -ForegroundColor Yellow
+    Write-Host "        Or install/start a local redis-server for local multi-worker mode." -ForegroundColor Yellow
     return $false
 }
 
@@ -159,6 +159,21 @@ function Prompt-AttachLogs {
     }
 }
 
+function Use-DockerStack {
+    param([string]$SelectedAction)
+    return $SelectedAction -in @("docker", "--docker", "compose")
+}
+
+function Use-SingleWorkerAction {
+    param([string]$SelectedAction)
+    return $SelectedAction -in @("single", "--single", "single-worker", "--single-worker")
+}
+
+function Use-StopAction {
+    param([string]$SelectedAction)
+    return $SelectedAction -in @("stop", "down", "exit")
+}
+
 Write-Host ""
 Write-Host "[Crypto Sentinel V0.2] AI Crypto Analysis System" -ForegroundColor Cyan
 Write-Host ""
@@ -181,6 +196,18 @@ if (-not (Test-Path ".venv\Scripts\python.exe")) {
     python -m venv .venv
 }
 & ".\.venv\Scripts\Activate.ps1"
+
+if (Use-StopAction -SelectedAction $Action) {
+    $composeCommand = Get-ComposeCommand
+    Write-Host "[STOP] Requesting local runtime shutdown..." -ForegroundColor Yellow
+    python -m app.cli down --reason script_stop --requested-by run.ps1
+    $localExit = $LASTEXITCODE
+    if ($composeCommand) {
+        Write-Host "[STOP] Bringing down Docker stack if running..." -ForegroundColor Yellow
+        Invoke-Compose -ComposeCommand $composeCommand -Args @("down") | Out-Null
+    }
+    exit $localExit
+}
 
 $marker = ".venv\.deps_installed"
 $needsInstall = -not (Test-Path $marker)
@@ -213,10 +240,11 @@ if (-not (Test-Path ".env")) {
 
 $redisUrl = Get-RedisUrlFromEnvFile
 $composeCommand = Get-ComposeCommand
+$singleWorker = Use-SingleWorkerAction -SelectedAction $Action
 
-if (-not (Test-RedisTcp -RedisUrl $redisUrl)) {
+if (Use-DockerStack -SelectedAction $Action) {
     if ($composeCommand) {
-        Write-Host "[INFO] Local Redis is unavailable. Switching to Docker multi-worker stack..." -ForegroundColor Yellow
+        Write-Host "[INFO] Docker mode selected. Launching Docker multi-worker stack..." -ForegroundColor Yellow
         if (-not (Prepare-DockerMultiWorker -ComposeCommand $composeCommand)) {
             Write-Host "[ERROR] Failed to prepare Docker dependencies." -ForegroundColor Red
             Read-Host "Press Enter to exit"
@@ -240,17 +268,40 @@ if (-not (Test-RedisTcp -RedisUrl $redisUrl)) {
         Prompt-AttachLogs -ComposeCommand $composeCommand
         exit 0
     }
-}
-
-if (-not (Ensure-Redis -RedisUrl $redisUrl -ComposeCommand $composeCommand)) {
+    Write-Host "[ERROR] Docker mode requested, but docker compose is unavailable." -ForegroundColor Red
     Read-Host "Press Enter to exit"
     exit 1
 }
 
+if ($singleWorker) {
+    $multiWorker = $false
+} else {
+    $multiWorker = Ensure-Redis -RedisUrl $redisUrl -ComposeCommand $composeCommand
+    if (-not $multiWorker) {
+        Write-Host "[ERROR] Default startup now requires Redis for multi-worker mode." -ForegroundColor Red
+        Write-Host "        Use run.ps1 single for explicit single-worker mode." -ForegroundColor Yellow
+        Read-Host "Press Enter to exit"
+        exit 1
+    }
+}
+
 Write-Host ""
-Write-Host "[START] Launching Crypto Sentinel (API + Core Worker + AI Worker)..." -ForegroundColor Green
+if ($multiWorker) {
+    Write-Host "[START] Launching Crypto Sentinel (API + Core Worker + AI Worker)..." -ForegroundColor Green
+} else {
+    Write-Host "[WARN] Explicit single-worker mode selected." -ForegroundColor Yellow
+    Write-Host "[START] Launching Crypto Sentinel (API + Worker)..." -ForegroundColor Green
+}
 Write-Host "        Dashboard: http://127.0.0.1:8000" -ForegroundColor Cyan
-Write-Host "        Redis: $redisUrl" -ForegroundColor Cyan
+Write-Host "        Database: local .env DATABASE_URL (preserves existing SQLite data)" -ForegroundColor Cyan
+if ($multiWorker) {
+    Write-Host "        Redis: $redisUrl" -ForegroundColor Cyan
+} else {
+    Write-Host "        Redis: disabled for this run" -ForegroundColor DarkGray
+}
+if ($composeCommand) {
+    Write-Host "        Docker stack: run.ps1 docker" -ForegroundColor DarkGray
+}
 Write-Host "        Press Ctrl+C to stop" -ForegroundColor DarkGray
 Write-Host ""
 
@@ -261,5 +312,7 @@ if ($LASTEXITCODE -ne 0) {
     exit 1
 }
 
-python -m app.cli up --open-browser --no-db-init --backfill-days 1 --multi-worker
+$cliArgs = @("-m", "app.cli", "up", "--open-browser", "--no-db-init", "--backfill-days", "1")
+if ($multiWorker) { $cliArgs += "--multi-worker" } else { $cliArgs += "--single-worker" }
+python @cliArgs
 exit $LASTEXITCODE

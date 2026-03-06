@@ -89,12 +89,66 @@
     </a>
   </nav>
   <div class="p-4 border-t border-white/5">
-    <div class="flex items-center gap-3 px-3 py-2 rounded-lg bg-white/5 border border-white/5 justify-between">
-      <div class="flex items-center gap-3">
-        <span class="status-dot active" aria-hidden="true"></span>
-        <span class="text-sm font-medium text-muted-foreground" data-i18n="status.online">System Online</span>
+    <div class="space-y-3">
+      <div class="flex items-center gap-3 px-3 py-2 rounded-lg bg-white/5 border border-white/5 justify-between">
+        <div class="flex items-center gap-3">
+          <span class="status-dot active" aria-hidden="true"></span>
+          <span class="text-sm font-medium text-muted-foreground" data-i18n="status.online">System Online</span>
+        </div>
+        <button type="button" data-lang-toggle onclick="toggleLanguage()" class="icon-btn h-7 w-7 text-xs font-bold" aria-label="Toggle language">EN</button>
       </div>
-      <button type="button" data-lang-toggle onclick="toggleLanguage()" class="icon-btn h-7 w-7 text-xs font-bold" aria-label="Toggle language">EN</button>
+      <button
+        type="button"
+        data-runtime-stop-btn
+        onclick="window.SentinelRuntimeActions && window.SentinelRuntimeActions.requestShutdown()"
+        class="w-full inline-flex items-center justify-center gap-2 rounded-lg border border-red-400/20 bg-red-500/10 px-3 py-2 text-sm font-medium text-red-100 transition hover:bg-red-500/15 hover:border-red-300/30"
+      >
+        <i data-lucide="power" class="w-4 h-4"></i>
+        <span>Stop Runtime</span>
+      </button>
     </div>
   </div>
 </aside>
+<script>
+  if (!window.SentinelRuntimeActions) {
+    window.SentinelRuntimeActions = {
+      busy: false,
+      setBusy(nextBusy) {
+        this.busy = !!nextBusy;
+        document.querySelectorAll('[data-runtime-stop-btn]').forEach((button) => {
+          button.disabled = this.busy;
+          button.classList.toggle('opacity-60', this.busy);
+          button.classList.toggle('cursor-not-allowed', this.busy);
+        });
+      },
+      async requestShutdown() {
+        if (this.busy) return;
+        if (!window.confirm('确认停止 Crypto Sentinel 吗？这会关闭 API 和 Worker。')) {
+          return;
+        }
+        this.setBusy(true);
+        try {
+          const doFetch = window.adminFetch || window.fetch.bind(window);
+          const response = await doFetch('/api/ops/runtime/shutdown', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              reason: 'ui_stop_button',
+              delay_seconds: 1.0,
+            }),
+          });
+          const payload = await response.json().catch(() => ({}));
+          if (!response.ok || payload.ok === false) {
+            throw new Error(payload.detail || payload.error || `HTTP ${response.status}`);
+          }
+          window.alert('已发送停止请求，服务将在几秒内退出。');
+          window.setTimeout(() => window.location.reload(), 2000);
+        } catch (error) {
+          const message = (error && error.message) ? error.message : String(error || 'unknown error');
+          window.alert(`停止失败: ${message}`);
+          this.setBusy(false);
+        }
+      },
+    };
+  }
+</script>
