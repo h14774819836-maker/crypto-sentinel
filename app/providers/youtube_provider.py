@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -111,12 +112,16 @@ def download_audio(
     video_id: str,
     cache_dir: str = "data/audio",
     progress_hook: Callable | None = None,
+    cookies_from_browser: str | None = None,
+    cookies_file: str | None = None,
 ) -> str | None:
     """Download audio-only with yt-dlp. Returns path or None.
 
     Args:
         progress_hook: optional callable(dict) receiving yt-dlp progress events
                        with keys like status, downloaded_bytes, total_bytes, speed, eta, filename.
+        cookies_from_browser: optional browser name to extract cookies from (e.g. 'chrome')
+        cookies_file: optional path to a cookies.txt file
     """
     try:
         import yt_dlp
@@ -133,33 +138,75 @@ def download_audio(
             logger.info("Audio already cached: %s", existing)
             return str(existing)
 
-    ydl_opts = {
-        "format": "bestaudio/best",
+    # yt-dlp#11295: -f 严格易失败，改用 -S (format_sort) 按偏好排序自动降级
+    base_opts: dict[str, Any] = {
         "outtmpl": output_template,
         "quiet": True,
         "no_warnings": True,
         "extract_flat": False,
-        # Skip post-processing to avoid ffmpeg requirement
         "postprocessors": [],
+        "extractor_args": {"youtube": {"player_client": ["android", "ios", "tv", "web"]}},
     }
-
+    if cookies_file and os.path.exists(cookies_file):
+        base_opts["cookiefile"] = cookies_file
+    elif cookies_from_browser:
+        base_opts["cookiesfrombrowser"] = (cookies_from_browser.strip(), None, None, None)
     if progress_hook:
-        ydl_opts["progress_hooks"] = [progress_hook]
+        base_opts["progress_hooks"] = [progress_hook]
+
+    # yt-dlp#11295: -f 严格易失败，format_sort 按偏好排序可自动降级
+    _FORMAT_SORT_AUDIO = ["res:0", "acodec:aac", "ext:m4a"]
+    _OPTS_VARIANTS: list[dict[str, Any]] = [
+        {"format": "bestaudio/best", "format_sort": _FORMAT_SORT_AUDIO},
+        {"format": "m4a/bestaudio/best"},
+        {"format_sort": _FORMAT_SORT_AUDIO},
+        {"format": "best", "format_sort": _FORMAT_SORT_AUDIO},
+        {"format": "best"},
+        {"format": "worst"},
+    ]
+    if shutil.which("ffmpeg"):
+        _OPTS_VARIANTS.append({
+            "format": "best",
+            "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "m4a"}],
+        })
+
+    for opts_extra in _OPTS_VARIANTS:
+        ydl_opts = {**base_opts, **opts_extra}
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(f"https://www.youtube.com/watch?v={video_id}", download=True)
+                if info:
+                    ext = info.get("ext", "webm")
+                    filepath = os.path.join(cache_dir, f"{video_id}.{ext}")
+                    if os.path.exists(filepath) and os.path.getsize(filepath) > 0:
+                        return filepath
+                    for f in Path(cache_dir).glob(f"{video_id}.*"):
+                        if f.stat().st_size > 0:
+                            return str(f)
+        except Exception as exc:
+            if "Requested format is not available" in str(exc) and opts_extra != _OPTS_VARIANTS[-1]:
+                logger.info("yt-dlp format %s failed for %s, trying next fallback", opts_extra, video_id)
+                continue
+            logger.error("yt-dlp download failed for %s: %s", video_id, exc)
+            break
 
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(f"https://www.youtube.com/watch?v={video_id}", download=True)
-            if info:
-                ext = info.get("ext", "webm")
-                filepath = os.path.join(cache_dir, f"{video_id}.{ext}")
-                if os.path.exists(filepath) and os.path.getsize(filepath) > 0:
-                    return filepath
-                # Try to find the file by glob
-                for f in Path(cache_dir).glob(f"{video_id}.*"):
-                    if f.stat().st_size > 0:
-                        return str(f)
-    except Exception as exc:
-        logger.error("yt-dlp download failed for %s: %s", video_id, exc)
+        import pytubefix
+        from pytubefix import YouTube
+        logger.info("Falling back to pytubefix for %s", video_id)
+        
+        # Fallback using standard clients (WEB_CREATOR or ANDROID frequently work better for audio)
+        yt = YouTube(f"https://www.youtube.com/watch?v={video_id}", client='WEB_CREATOR')
+        ys = yt.streams.get_audio_only()
+        if ys:
+            out_file = ys.download(output_path=cache_dir, filename=f"{video_id}.m4a")
+            if out_file and os.path.exists(out_file) and os.path.getsize(out_file) > 0:
+                logger.info("Successfully downloaded audio via pytubefix: %s", out_file)
+                return out_file
+    except ImportError:
+        pass
+    except Exception as pf_exc:
+        logger.error("pytubefix fallback also failed for %s: %s", video_id, pf_exc)
 
     return None
 

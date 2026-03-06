@@ -265,6 +265,8 @@ async def youtube_manual_asr(video_id: str, db: Session = Depends(get_db), _admi
                 video_id,
                 cache_dir=settings.asr_audio_cache_dir,
                 progress_hook=_yt_dlp_hook,
+                cookies_from_browser=settings.youtube_cookies_from_browser,
+                cookies_file=settings.youtube_cookies_file,
             )
             if not audio_path:
                 with SessionLocal() as thread_db:

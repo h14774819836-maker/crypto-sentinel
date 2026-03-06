@@ -195,9 +195,9 @@
 <script>
   window.STRATEGY_BOOTSTRAP = {
     defaultSymbol: {{ default_symbol | tojson }},
-    maxLines: 20,
-    binanceWsUrl: {{ binance_ws_url | tojson }},
+  maxLines: 20,
+    binanceWsUrl: { { binance_ws_url | tojson } },
   };
 </script>
-<script src="/static/strategy.js?v=20260304-1"></script>
+<script src="/static/strategy.js?v=20260305-1"></script>
 {% endblock %}

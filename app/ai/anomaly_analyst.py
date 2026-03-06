@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -207,6 +208,23 @@ def _build_batched_prompt(
     )
 
 
+def _extract_diagnostic_text(response: Any) -> tuple[str, str]:
+    if not isinstance(response, dict):
+        return "", ""
+    raw_content = str(response.get("content") or "").strip()
+    
+    # Clean up <think> tags if present in content (common in some reasoning models)
+    if raw_content:
+        raw_content = re.sub(r"<think>.*?</think>", "", raw_content, flags=re.DOTALL).strip()
+
+    if raw_content:
+        return raw_content, "content"
+        
+    # User explicitly requested NO reasoning content fallback
+    # So if content is empty, we return empty string rather than fallback to reasoning_content
+    return "", ""
+
+
 def _schedule_batch_task(runtime, symbol: str) -> None:
     existing = runtime.anomaly_diag_tasks.get(symbol)
     if existing is not None and not existing.done():
@@ -346,23 +364,37 @@ async def _run_batched_diagnostic(runtime, *, symbol: str, delay_seconds: int) -
         status_message_id = status_res.message_id if status_res.ok else None
 
         provider = runtime.market_analyst.provider
+        
+        # Resolve use_reasoning safely (handling "auto", "true", "false" strings)
+        ma_config = getattr(runtime.market_analyst, "config", None)
+        use_reasoning_raw = getattr(ma_config, "use_reasoning", "false") if ma_config else "false"
+        config_val = str(use_reasoning_raw).lower()
+        
+        caps = getattr(provider, "capabilities", None)
+        supports_reasoning = bool(getattr(caps, "supports_reasoning", False)) if caps else False
+        
+        use_reasoning = config_val == "true" or (config_val == "auto" and supports_reasoning)
+
         response = await asyncio.wait_for(
             provider.generate_response(
                 messages=messages,
-                max_tokens=1200,
+                max_tokens=4096,  # Increased from 1200 to prevent content truncation after long thinking
                 temperature=0.1,
+                use_reasoning=use_reasoning,
             ),
             timeout=timeout_sec,
         )
-        raw_content = str(response.get("content") or "").strip()
-        diagnosis_text = raw_content or "模型未返回有效内容。"
-        if not raw_content:
+        extracted_text, source = _extract_diagnostic_text(response)
+        diagnosis_text = extracted_text or "模型未返回有效内容。"
+        if not extracted_text:
             logger.warning(
                 "Anomaly AI diagnostic empty content symbol=%s keys=%s reasoning_len=%d",
                 symbol,
                 list(response.keys()) if isinstance(response, dict) else type(response).__name__,
                 len(str(response.get("reasoning_content") or "")),
             )
+        elif source == "reasoning_content":
+            logger.info("Anomaly AI diagnostic fallback to reasoning_content symbol=%s", symbol)
         msg = build_ai_diagnostic_alert(
             symbol=symbol,
             alert_ref=anchor_ref,

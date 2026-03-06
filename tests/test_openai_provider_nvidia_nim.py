@@ -85,6 +85,36 @@ def test_nvidia_nim_maps_kimi_alias_model_to_upstream_model():
     assert called.get("model") == "moonshotai/kimi-k2.5"
 
 
+def test_nvidia_nim_kimi_with_reasoning_adds_chat_template_kwargs_and_temp():
+    """Kimi K2.5 + use_reasoning 时需显式 chat_template_kwargs.thinking、temperature=1.0、top_p=0.95。"""
+    provider = OpenAICompatibleProvider(_cfg(model="nvidia_nim/kimi-k2.5"))
+    called: dict = {}
+
+    async def _fake_create(**kwargs):
+        called.update(kwargs)
+        msg = SimpleNamespace(content="ok", reasoning_content="thought", tool_calls=None)
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=msg, error=None)],
+            usage=None,
+            model=kwargs.get("model"),
+        )
+
+    provider.client.chat.completions.create = _fake_create
+
+    async def _run():
+        await provider.generate_response(
+            messages=[{"role": "user", "content": "ping"}],
+            use_reasoning=True,
+        )
+
+    asyncio.run(_run())
+    extra = called.get("extra_body") or {}
+    assert extra.get("chat_template_kwargs") == {"thinking": True}, "NVIDIA Kimi 需显式开启 thinking"
+    assert called.get("temperature") == 1.0, "Kimi modelcard 要求 temperature=1.0"
+    assert called.get("top_p") == 0.95, "Kimi modelcard 要求 top_p=0.95"
+    assert called.get("max_tokens") >= 16384, "思考过程耗 token，需 16384+"
+
+
 def test_nvidia_nim_maps_nemotron_ultra_deepseek_nano_to_upstream():
     """Verify Llama Nemotron Ultra, DeepSeek V3.2, Nemotron Nano alias mapping."""
     mappings = [

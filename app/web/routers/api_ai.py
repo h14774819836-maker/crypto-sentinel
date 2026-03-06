@@ -34,7 +34,8 @@ from app.web.auth import require_admin
 from app.web.shared import settings
 from app.web.utils import _json_datetime, _liquidation_distance_pct, _to_float
 
-_ANALYZE_TIMEOUT_SECONDS = 180.0
+# 与 run_ai.py 一致：大模型如 Kimi K2.5 / 豆包 首 token 较慢
+_ANALYZE_TIMEOUT_SECONDS = 420.0
 
 
 @dataclass(slots=True)
@@ -480,7 +481,10 @@ async def ai_analyze_now(
             min_context_on_poor_data=bool(getattr(settings, "ai_min_context_on_poor_data", True)),
             min_context_on_non_tradeable=bool(getattr(settings, "ai_min_context_on_non_tradeable", True)),
         )
-        timeout_s = float(getattr(settings, "market_ai_stream_symbol_timeout_seconds", _ANALYZE_TIMEOUT_SECONDS))
+        timeout_s = float(getattr(settings, "market_ai_stream_symbol_timeout_seconds", _ANALYZE_TIMEOUT_SECONDS) or _ANALYZE_TIMEOUT_SECONDS)
+        model_l = (market_config.model or "").lower()
+        if "kimi" in model_l or "k2.5" in model_l or "k2-" in model_l:
+            timeout_s = max(timeout_s, 420.0)
         try:
             signals, _metadata = await asyncio.wait_for(
                 analyst.analyze(sym, symbol_snapshots, context=symbol_context),
@@ -574,7 +578,8 @@ async def _ai_analyze_stream_impl(
                 "type": "error",
                 "error": f"Pre-analysis data refresh failed: {refresh_report.get('error') or 'unknown error'}",
                 "refresh": refresh_report,
-            }
+            },
+            ensure_ascii=False
         )
 
         async def err_gen():
@@ -584,9 +589,42 @@ async def _ai_analyze_stream_impl(
 
     from app.ai.openai_provider import OpenAICompatibleProvider
     from app.ai.analyst import MarketAnalyst, attach_context_digest_to_analysis_json
+    from app.ai.thinking_summarizer import ThinkingSummarizer
+    from app.ai.prompts import THINKING_SUMMARY_PROMPT
+    from app.ai.thinking_summary_utils import (
+        extract_content_text,
+        infer_stage_summary,
+        refine_summary,
+    )
 
     provider = OpenAICompatibleProvider(market_config)
     analyst = MarketAnalyst(settings, provider, market_config)
+    thinking_summary_enabled = bool(getattr(settings, "ai_thinking_summary_enabled", True))
+    fast_provider = None
+    if thinking_summary_enabled:
+        try:
+            fast_config = settings.resolve_llm_config(
+                str(getattr(settings, "ai_thinking_summary_profile", "thinking_summary"))
+            )
+            if fast_config.enabled and fast_config.api_key:
+                fast_provider = OpenAICompatibleProvider(fast_config)
+            else:
+                logger.info(
+                    "Thinking summary disabled: profile=%s enabled=%s has_api_key=%s",
+                    getattr(settings, "ai_thinking_summary_profile", "thinking_summary"),
+                    fast_config.enabled if fast_config else None,
+                    bool(fast_config.api_key) if fast_config else False,
+                )
+        except Exception as e:
+            logger.warning("Thinking summary provider not available: %s", e)
+            thinking_summary_enabled = False
+
+    if thinking_summary_enabled and fast_provider is not None:
+        logger.info(
+            "Thinking summary enabled: profile=%s, model=%s",
+            getattr(settings, "ai_thinking_summary_profile", "thinking_summary"),
+            getattr(fast_provider, "model", "?"),
+        )
 
     with SessionLocal() as preload_db:
         recent_alerts_by_symbol = _build_recent_alerts_by_symbol(preload_db, limit=60)
@@ -615,6 +653,61 @@ async def _ai_analyze_stream_impl(
     queue: asyncio.Queue = asyncio.Queue()
     cancel_event = asyncio.Event()
 
+    async def _summarize_and_push(
+        symbol: str,
+        summarizer: ThinkingSummarizer,
+        buffer_content: str,
+        q: asyncio.Queue,
+        fast_prov: OpenAICompatibleProvider,
+        cancel: asyncio.Event,
+        summaries_pushed_ref: list,
+    ) -> None:
+        if cancel.is_set():
+            return
+        try:
+            is_first = summaries_pushed_ref[0] == 0
+            max_chars = 50 if is_first else 300
+            buf = buffer_content[-max_chars:] if len(buffer_content) > max_chars else buffer_content
+            if len(buf.strip()) < 15:
+                return
+            content = THINKING_SUMMARY_PROMPT.format(buffer_content=buf)
+            resp = await fast_prov.generate_response(
+                messages=[{"role": "user", "content": content}],
+                max_tokens=128,
+                temperature=0.3,
+                use_reasoning=False,
+            )
+            summary = extract_content_text(resp)
+            if not summary:
+                summary = infer_stage_summary(buffer_content)
+            else:
+                summary = refine_summary(summary, buffer_content) or summary
+            if not summary:
+                buf = (buffer_content or "").strip()
+                for sep in ("。", "？", "！"):
+                    parts = buf.split(sep)
+                    if len(parts) >= 2:
+                        last_sent = parts[-2].strip()
+                        if len(last_sent) >= 10:
+                            summary = (last_sent[:47] + "…") if len(last_sent) > 50 else last_sent
+                            break
+                if not summary:
+                    summary = (buf[-60:].strip()[:47] + "…") if len(buf) > 50 else (buf[:47] or "思考中")
+                if not summary or len(summary) < 8:
+                    return
+            if len(summary) < 8:
+                return
+            if summarizer.is_duplicate(summary):
+                return
+            summarizer.set_last_summary(summary)
+            if cancel.is_set():
+                return
+            summaries_pushed_ref[0] += 1
+            await q.put({"type": "thinking_state", "symbol": symbol, "content": summary})
+            logger.info("Thinking summary pushed: symbol=%s content=%r", symbol, summary[:50] if summary else "")
+        except Exception as e:
+            logger.warning("Thinking summary failed (symbol=%s): %s", symbol, e)
+
     async def analyze_symbol_stream(sym: str):
         symbol_snapshots, symbol_context = symbol_inputs.get(sym, ({}, {}))
         if not symbol_snapshots:
@@ -642,19 +735,62 @@ async def _ai_analyze_stream_impl(
         )
 
         await queue.put({"type": "data_sent", "symbol": sym, "message": "市场数据和提示词已发送，等待 AI 响应..."})
+        use_typed = thinking_summary_enabled and fast_provider is not None
+        summarizer = ThinkingSummarizer(
+            min_chars=int(getattr(settings, "ai_thinking_summary_min_chars", 100) or 100),
+            min_chars_first=int(getattr(settings, "ai_thinking_summary_min_chars_first", 30) or 30),
+            min_interval_sec=float(getattr(settings, "ai_thinking_summary_interval_sec", 6.0) or 6.0),
+        ) if use_typed else None
+        max_streaming_summaries = int(getattr(settings, "ai_thinking_summary_max_streaming", 15) or 15)
+        _summaries_pushed = [0]
+        _reasoning_chunk_count = [0]
+        _summary_task: list[asyncio.Task | None] = [None]
 
-        async def cb(text: str):
+        async def cb_typed(chunk_type: str, text: str):
+            if cancel_event.is_set():
+                return
+            if chunk_type == "reasoning" and summarizer is not None and fast_provider is not None:
+                if _summaries_pushed[0] >= max_streaming_summaries:
+                    return
+                _reasoning_chunk_count[0] += 1
+                triggered = summarizer.add_reasoning(text)
+                if triggered:
+                    if _reasoning_chunk_count[0] == 1:
+                        await queue.put({"type": "thinking_state", "symbol": sym, "content": "思考中..."})
+                    buf = summarizer.get_buffer_for_summary()
+                    running = _summary_task[0]
+                    if buf and (running is None or running.done()):
+                        _summary_task[0] = asyncio.create_task(
+                            _summarize_and_push(sym, summarizer, buf, queue, fast_provider, cancel_event, _summaries_pushed)
+                        )
+                return
+            if chunk_type == "content":
+                await queue.put({"type": "chunk", "symbol": sym, "text": text})
 
+        async def cb_legacy(text: str):
             if cancel_event.is_set():
                 return
             await queue.put({"type": "chunk", "symbol": sym, "text": text})
 
-        timeout_s = float(getattr(settings, "market_ai_stream_symbol_timeout_seconds", _ANALYZE_TIMEOUT_SECONDS))
+        cb = cb_typed if use_typed else cb_legacy
+
+        timeout_s = float(getattr(settings, "market_ai_stream_symbol_timeout_seconds", _ANALYZE_TIMEOUT_SECONDS) or _ANALYZE_TIMEOUT_SECONDS)
+        model_l = (market_config.model or "").lower()
+        if "kimi" in model_l or "k2.5" in model_l or "k2-" in model_l:
+            timeout_s = max(timeout_s, 420.0)
         try:
             signals, _metadata = await asyncio.wait_for(
-                analyst.analyze(sym, symbol_snapshots, context=symbol_context, stream_callback=cb),
+                analyst.analyze(
+                    sym,
+                    symbol_snapshots,
+                    context=symbol_context,
+                    stream_callback=cb,
+                    stream_callback_typed=use_typed,
+                ),
                 timeout=timeout_s,
             )
+            if _summary_task[0] and not _summary_task[0].done():
+                await _summary_task[0]
         except asyncio.TimeoutError as exc:
             raise RuntimeError(f"AI analysis timeout after {int(timeout_s)}s for symbol={sym}") from exc
         return signals
@@ -751,7 +887,7 @@ async def _ai_analyze_stream_impl(
                         last_heartbeat = now_mono
                     continue
 
-                yield f"data: {json.dumps(msg)}\n\n"
+                yield f"data: {json.dumps(msg, ensure_ascii=False)}\n\n"
                 if msg["type"] in ("done", "error"):
                     break
         finally:

@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 from app.ai.anomaly_analyst import (
     _build_anomaly_diagnostic_prompt,
     _build_batched_prompt,
+    _extract_diagnostic_text,
     _merge_batch_alerts,
     _normalize_alert_for_batch,
     _pick_intel_items,
@@ -100,3 +101,23 @@ def test_normalize_alert_for_batch_keeps_source():
         }
     )
     assert row["source"] == "tick_prealert"
+
+
+def test_extract_diagnostic_text_prefers_content():
+    text, source = _extract_diagnostic_text({"content": "结论A", "reasoning_content": "推理"})
+    assert text == "结论A"
+    assert source == "content"
+
+
+def test_extract_diagnostic_text_ignores_reasoning_fallback():
+    # User requested no thinking content, so empty content should remain empty
+    text, source = _extract_diagnostic_text({"content": "", "reasoning_content": "思考过程"})
+    assert text == ""
+    assert source == ""
+
+def test_extract_diagnostic_text_cleans_think_tags():
+    # Simulate a model returning thinking process inside content
+    raw = "<think>I am thinking...</think>结论是A"
+    text, source = _extract_diagnostic_text({"content": raw})
+    assert text == "结论是A"
+    assert source == "content"

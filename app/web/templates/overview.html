@@ -93,12 +93,33 @@
     color: rgba(125, 211, 252, 0.95);
   }
 
+  .ai-thinking-skeleton .ai-thinking-dot {
+    width: 0.5rem;
+    height: 0.5rem;
+    border-radius: 50%;
+    background: rgba(56, 189, 248, 0.7);
+    box-shadow: 0 0 8px rgba(56, 189, 248, 0.4);
+  }
+
+  .ai-thinking-skeleton .ai-thinking-dot.animate-pulse {
+    animation: ai-thinking-breathe 1.8s ease-in-out infinite;
+  }
+
+  @keyframes ai-thinking-breathe {
+    0%, 100% { opacity: 0.6; transform: scale(0.95); }
+    50% { opacity: 1; transform: scale(1.1); }
+  }
+
   @media (prefers-reduced-motion: reduce) {
     .ai-console-live-dot .animate-ping {
       animation: none !important;
     }
 
     .stream-text.is-streaming::after {
+      animation: none !important;
+    }
+
+    .ai-thinking-skeleton .ai-thinking-dot.animate-pulse {
       animation: none !important;
     }
 
@@ -1732,6 +1753,38 @@
           announceAnalyzeStatus('已发送请求数据，等待 AI 分析。');
           appendConsoleSystemMessage(consoleOutput, data.message || '已发送请求数据，等待 AI 分析...', 'success');
           pushStoredSystemMessage(currentCoin, data.message || '已发送请求数据，等待 AI 分析...', 'success');
+        } else if (data.type === 'thinking_state') {
+          if (!runState.firstChunkSeen) {
+            runState.firstChunkSeen = true;
+            runState.progress = Math.max(runState.progress, 36);
+            setAnalyzeProgress('streaming', { progress: runState.progress });
+            setAnalyzeStatus('loading', `AI thinking: ${data.content || ''}`, { pulse: true });
+            announceAnalyzeStatus('AI 思考中');
+            appendConsoleSystemMessage(consoleOutput, 'AI 思考中，正在提炼进度...', 'success');
+            pushStoredSystemMessage(currentCoin, 'AI 思考中', 'success');
+          }
+          setAnalyzeProgress('streaming', {
+            progress: runState.progress,
+            label: `🤖 AI 思考中：${data.content || '分析进行中'}`
+          });
+          let symbolDiv = document.getElementById(`ai-console-${data.symbol}`);
+          if (!symbolDiv) {
+            symbolDiv = document.createElement('div');
+            symbolDiv.id = `ai-console-${data.symbol}`;
+            symbolDiv.className = 'ai-console-stream mb-3 rounded-r-lg bg-white/[0.02] py-2 pr-2';
+            symbolDiv.innerHTML = `<div class="text-[10px] text-cyan-300 font-semibold uppercase mb-1 tracking-wider">[ ${data.symbol} ]</div><div class="ai-thinking-skeleton flex items-center gap-2 py-2"><span class="ai-thinking-dot animate-pulse"></span><span class="ai-thinking-status text-slate-300/90 text-sm">${(data.content || '分析进行中').replace(/</g, '&lt;')}</span></div>`;
+            symbolDiv.style.display = data.symbol === currentCoin ? '' : 'none';
+            consoleOutput.appendChild(symbolDiv);
+          } else {
+            const statusEl = symbolDiv.querySelector('.ai-thinking-status');
+            if (statusEl) statusEl.textContent = data.content || '分析进行中';
+          }
+          if (aiConsoleState.autoFollow && !scrollTimeout) {
+            scrollTimeout = setTimeout(() => {
+              consoleContainer.scrollTop = consoleContainer.scrollHeight;
+              scrollTimeout = null;
+            }, 100);
+          }
         } else if (data.type === 'chunk') {
           if (!runState.firstChunkSeen) {
             runState.firstChunkSeen = true;
@@ -1782,6 +1835,8 @@
 
           let symbolDiv = document.getElementById(`ai-console-${data.symbol}`);
           if (symbolDiv) {
+            const thinkingSkeleton = symbolDiv.querySelector('.ai-thinking-skeleton');
+            if (thinkingSkeleton) thinkingSkeleton.remove();
             const div = document.createElement('div');
             div.className = 'text-emerald-300/80 text-[10px] mt-2 font-semibold';
             div.textContent = '--- Analysis Completed ---';

@@ -127,3 +127,29 @@ async def test_telegram_agent_tool_loop(db_session, dummy_provider):
     
     # 移除测试中的临时 Tool 防止污染全局
     del agent_tools._tools["test_echo_tool"]
+
+
+@pytest.mark.anyio
+async def test_telegram_agent_hides_thinking_blocks_in_final_reply(db_session, dummy_provider):
+    agent = TelegramAgent(provider=dummy_provider, max_history=5)
+    dummy_provider.mock_responses = [
+        {
+            "content": "<thinking>internal chain of thought</thinking>\n\nBTC 现在约 10 万美元。",
+            "reasoning_content": "internal chain of thought",
+            "prompt_tokens": 12,
+            "completion_tokens": 6,
+            "cost": 0.0002,
+            "model": "nvidia/llama-3.1-nemotron-ultra-253b-v1",
+        }
+    ]
+
+    import app.alerts.telegram_agent as agent_module
+
+    class MockSessionLocal:
+        def __enter__(self): return db_session
+        def __exit__(self, *args): pass
+
+    agent_module.SessionLocal = MockSessionLocal
+
+    res = await agent.chat(chat_id=321, user_message="btc 价格")
+    assert res["text"] == "BTC 现在约 10 万美元。"

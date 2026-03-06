@@ -206,14 +206,26 @@ async def _handle_message(client: TelegramClient, message: dict[str, Any], setti
         })
         status_msg_id = _extract_message_id(status_resp)
 
+        typing_task: asyncio.Task | None = None
+
+        async def _keep_typing():
+            """Repeat typing every 5s (Telegram shows ~5s per call) until cancelled."""
+            while True:
+                await asyncio.sleep(5)
+                await client.send_chat_action(chat_id, "typing")
+
         try:
+            await client.send_chat_action(chat_id, "typing")
+            typing_task = asyncio.create_task(_keep_typing())
+
             from app.ai.openai_provider import OpenAICompatibleProvider
             from app.alerts.telegram_agent import TelegramAgent
             provider = OpenAICompatibleProvider(llm_config)
             agent = TelegramAgent(provider=provider, max_history=10)
-            
+
             _tg_trace("准备调用 TelegramAgent.chat chat_id=%s", chat_id)
-            response = await agent.chat(chat_id, text)
+            stream_status = (client, chat_id, status_msg_id) if status_msg_id is not None else None
+            response = await agent.chat(chat_id, text, stream_status_context=stream_status)
             _tg_trace(
                 "TelegramAgent.chat返回 chat_id=%s 回复长度=%d model=%s",
                 chat_id,
@@ -227,9 +239,15 @@ async def _handle_message(client: TelegramClient, message: dict[str, Any], setti
             logger.exception("[telegram_dispatcher] Error handling interactive chat message: %s", e)
             await client._post("sendMessage", {"chat_id": chat_id, "text": f"❌ Agent 运行时故障: {e}"})
         finally:
+            if typing_task is not None:
+                typing_task.cancel()
+                try:
+                    await typing_task
+                except asyncio.CancelledError:
+                    pass
             if status_msg_id is not None:
                 await client.delete_message(status_msg_id, chat_id=chat_id)
-        
+
         return
 
         

@@ -2,6 +2,7 @@ import asyncio
 import json
 import random
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
 from openai import AsyncOpenAI
@@ -51,6 +52,77 @@ def _s(v: Any) -> str:
     return str(v)
 
 
+def _parse_nemotron_content_chunk(
+    content_chunk: str,
+    reasoning_chunk: str,
+    state: dict,
+) -> tuple[str, str]:
+    """Parse Nemotron stream: <thinking>...</thinking> in content -> reasoning, rest -> content."""
+    buf = state.get("buf", "") + content_chunk
+    reasoning_out = reasoning_chunk
+    content_out = ""
+    in_thinking = state.get("in_thinking", False)
+    while True:
+        if in_thinking:
+            i = buf.find("</thinking>")
+            if i >= 0:
+                reasoning_out += buf[:i]
+                buf = buf[i + len("</thinking>"):]
+                in_thinking = False
+            else:
+                reasoning_out += buf
+                buf = ""
+                break
+        else:
+            i = buf.find("<thinking>")
+            if i >= 0:
+                content_out += buf[:i]
+                buf = buf[i + len("<thinking>"):]
+                in_thinking = True
+            else:
+                for suf in ("<thinking>", "<thinkin", "<thinki", "<think", "<thin", "<thi", "<th", "<t", "<"):
+                    if buf.endswith(suf):
+                        content_out += buf[: -len(suf)]
+                        buf = suf
+                        state["buf"] = buf
+                        state["in_thinking"] = in_thinking
+                        return reasoning_out, content_out
+                content_out += buf
+                buf = ""
+                break
+    state["buf"] = buf
+    state["in_thinking"] = in_thinking
+    return reasoning_out, content_out
+
+
+def _normalize_message_content(raw: Any) -> str:
+    """将 message.content 规范为字符串，兼容 str 或 list[dict] 格式。"""
+    if raw is None:
+        return ""
+    if isinstance(raw, str):
+        return raw
+    if isinstance(raw, dict):
+        text = raw.get("text")
+        if isinstance(text, str):
+            return text
+        content = raw.get("content")
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            return _normalize_message_content(content)
+    if isinstance(raw, list):
+        parts = []
+        for block in raw:
+            if isinstance(block, dict):
+                text = block.get("text") or block.get("content")
+                if isinstance(text, str):
+                    parts.append(text)
+            elif hasattr(block, "text"):
+                parts.append(str(getattr(block, "text", "")))
+        return " ".join(parts) if parts else ""
+    return str(raw)
+
+
 class OpenAICompatibleProvider(LLMProvider):
     def __init__(self, config: LLMConfig):
         self.config = config
@@ -60,10 +132,13 @@ class OpenAICompatibleProvider(LLMProvider):
             headers["HTTP-Referer"] = config.http_referer
         if config.x_title:
             headers["X-Title"] = config.x_title
+        # 大模型如 Kimi K2.5 首 token 慢，需较长 timeout（默认 10 分钟）
+        client_timeout = float(getattr(config, "timeout", 600) or 600)
         self.client = AsyncOpenAI(
             api_key=config.api_key,
             base_url=config.base_url,
             default_headers=headers or None,
+            timeout=client_timeout,
         )
         self.semaphore = asyncio.Semaphore(max(1, config.max_concurrency))
         self.max_retries = max(0, config.max_retries)
@@ -89,12 +164,35 @@ class OpenAICompatibleProvider(LLMProvider):
             supports_stream=True,
         )
 
-    def _uses_responses_api(self) -> bool:
-        return (self.config.provider or "").strip().lower() == "ark"
+    def _uses_responses_api(self, *, stream_requested: bool = False) -> bool:
+        if (self.config.provider or "").strip().lower() != "ark":
+            return False
+        # Use Chat Completions for Ark when streaming to get reasoning_content in delta
+        if stream_requested:
+            return False
+        return True
 
     def _is_reasoner_model(self, model: str | None = None) -> bool:
         model_l = (model or self.model or "").lower()
         return "reasoner" in model_l or "r1" in model_l
+
+    def _is_kimi_thinking_model(self, model: str | None = None) -> bool:
+        """Kimi K2.5 / K2-Thinking 等支持 thinking 的模型（NVIDIA NIM 需 chat_template_kwargs）。"""
+        model_l = (model or self.model or "").lower()
+        return "kimi" in model_l or "k2.5" in model_l or "k2-thinking" in model_l
+
+    def _is_nemotron_cot_model(self, model: str | None = None) -> bool:
+        """NVIDIA Llama-3.1-Nemotron-Ultra 等显式 CoT 模型，思考输出在 content 的 <thinking> 中。"""
+        model_l = (model or self.model or "").lower()
+        return "nemotron" in model_l
+
+    def _supports_json_response_format(self, model: str | None = None) -> bool:
+        """Ark/Doubao 不支持 response_format.json_object，需跳过；下游通过 _extract_first_balanced_json_object 解析。"""
+        model_l = (model or self.model or "").lower()
+        provider_l = (self.config.provider or "").strip().lower()
+        if provider_l == "ark" or model_l.startswith("doubao-"):
+            return False
+        return True
 
     def _resolve_upstream_model(self, model: str | None) -> str:
         model_norm = (model or self.model or "").strip()
@@ -117,9 +215,11 @@ class OpenAICompatibleProvider(LLMProvider):
             value = 4096
         value = max(1, value)
         is_reasoner = self._is_reasoner_model(model)
+        is_kimi_thinking = self._is_kimi_thinking_model(model)
+        is_nemotron = self._is_nemotron_cot_model(model)
         model_l = (model or self.model or "").lower()
-        if is_reasoner and use_reasoning:
-            value = max(value, 16384)
+        if (is_reasoner or is_kimi_thinking or is_nemotron) and use_reasoning:
+            value = max(value, 16384)  # 思考过程耗 token，Kimi/modelcard 要求 16384+
         if ("deepseek-chat" in model_l or model_l.endswith("/deepseek-chat")) and not is_reasoner:
             value = min(value, 8192)
         return value
@@ -300,6 +400,7 @@ class OpenAICompatibleProvider(LLMProvider):
         response_format: Optional[Dict[str, str]],
         use_reasoning: bool,
         stream_callback: Optional[callable],
+        stream_callback_typed: bool = False,
         tools: Optional[List[Dict[str, Any]]],
         tool_choice: Optional[str],
         effective_model: str,
@@ -311,12 +412,14 @@ class OpenAICompatibleProvider(LLMProvider):
         }
         if not self._is_reasoner_model(effective_model):
             kwargs["temperature"] = temperature
-        thinking_type = "enabled" if use_reasoning else "disabled"
-        kwargs["thinking"] = {"type": thinking_type}
         effort = self.config.reasoning_effort or "medium"
         if use_reasoning or self.config.reasoning_effort:
             kwargs["reasoning"] = {"effort": effort}
-        if isinstance(response_format, dict) and _s(response_format.get("type")).lower() == "json_object":
+        if (
+            isinstance(response_format, dict)
+            and _s(response_format.get("type")).lower() == "json_object"
+            and self._supports_json_response_format(effective_model)
+        ):
             kwargs["text"] = {"format": {"type": "json_object"}}
 
         rs_tools = self._to_responses_tools(tools)
@@ -341,13 +444,19 @@ class OpenAICompatibleProvider(LLMProvider):
                 delta = _s(getattr(event, "delta", None))
                 if delta:
                     content_parts.append(delta)
-                    await stream_callback(delta)
+                    if stream_callback_typed:
+                        await stream_callback("content", delta)
+                    else:
+                        await stream_callback(delta)
                 continue
             if et == "response.reasoning_text.delta":
                 delta = _s(getattr(event, "delta", None))
                 if delta:
                     reasoning_parts.append(delta)
-                    await stream_callback(delta)
+                    if stream_callback_typed:
+                        await stream_callback("reasoning", delta)
+                    else:
+                        await stream_callback(delta)
                 continue
             if et == "response.error":
                 err = getattr(event, "error", None)
@@ -355,13 +464,23 @@ class OpenAICompatibleProvider(LLMProvider):
             if et == "response.completed":
                 final_resp = getattr(event, "response", None)
 
+        content = "".join(content_parts)
+        reasoning = "".join(reasoning_parts)
         if final_resp is None:
-            raise LLMError("responses stream completed without final response object")
+            if content or reasoning:
+                final_resp = SimpleNamespace(
+                    output_text=content,
+                    output=[],
+                    usage=None,
+                    model=effective_model,
+                )
+            else:
+                raise LLMError("responses stream completed without final response object")
         return self._normalize_responses_result(
             final_resp,
             effective_model,
-            content="".join(content_parts),
-            reasoning="".join(reasoning_parts),
+            content=content,
+            reasoning=reasoning,
         )
 
     async def _call_chat_completions(
@@ -373,6 +492,7 @@ class OpenAICompatibleProvider(LLMProvider):
         response_format: Optional[Dict[str, str]],
         use_reasoning: bool,
         stream_callback: Optional[callable],
+        stream_callback_typed: bool = False,
         tools: Optional[List[Dict[str, Any]]],
         tool_choice: Optional[str],
         effective_model: str,
@@ -383,15 +503,41 @@ class OpenAICompatibleProvider(LLMProvider):
             "max_tokens": max_tokens_norm,
         }
 
-        if self.config.reasoning_effort:
-            api_kwargs["reasoning_effort"] = self.config.reasoning_effort
+        # Ark/Doubao 深度推理：thinking 为 Ark 专有参数，需通过 extra_body 透传
+        # NVIDIA NIM + Kimi K2.5：必须显式 chat_template_kwargs.thinking，否则客户端会丢失思考过程
+        # NVIDIA Nemotron：显式 CoT，思考在 content 的 <thinking> 中，需 system prompt 加 "detailed thinking on"
+        is_kimi = self._is_kimi_thinking_model(effective_model)
+        is_reasoner = self._is_reasoner_model(effective_model)
+        is_nemotron = self._is_nemotron_cot_model(effective_model)
+        use_thinking = use_reasoning or is_reasoner or is_kimi or is_nemotron
 
-        if use_reasoning or self._is_reasoner_model(effective_model):
-            if self._is_reasoner_model(effective_model):
-                api_kwargs["max_tokens"] = self._normalize_max_tokens(api_kwargs["max_tokens"], use_reasoning, model=effective_model)
+        if use_thinking:
+            provider_l = (self.config.provider or "").strip().lower()
+            if provider_l == "ark":
+                extra = dict(api_kwargs.get("extra_body") or {})
+                extra["thinking"] = {"type": "enabled"}
+                api_kwargs["extra_body"] = extra
+            elif provider_l == "nvidia_nim" and is_kimi:
+                # Kimi modelcard 要求：temperature=1.0, top_p=0.95，否则思考过程很弱
+                api_kwargs["temperature"] = 1.0
+                api_kwargs["top_p"] = 0.95
+            elif self.config.reasoning_effort:
+                api_kwargs["reasoning_effort"] = self.config.reasoning_effort or "medium"
+
+        if use_thinking:
+            api_kwargs["max_tokens"] = self._normalize_max_tokens(
+                api_kwargs["max_tokens"], use_reasoning, model=effective_model
+            )
+            # Kimi 等支持 JSON，需保留 response_format；Ark/Doubao 不支持 json_object，跳过
+            if response_format and (is_kimi or not is_reasoner) and self._supports_json_response_format(effective_model):
+                api_kwargs["response_format"] = response_format
+            if tools and (is_kimi or not is_reasoner):
+                api_kwargs["tools"] = tools
+                if tool_choice:
+                    api_kwargs["tool_choice"] = tool_choice
         else:
             api_kwargs["temperature"] = temperature
-            if response_format:
+            if response_format and self._supports_json_response_format(effective_model):
                 api_kwargs["response_format"] = response_format
             if tools:
                 api_kwargs["tools"] = tools
@@ -400,7 +546,9 @@ class OpenAICompatibleProvider(LLMProvider):
 
         if stream_callback is not None and self.capabilities.supports_stream:
             api_kwargs["stream"] = True
-            api_kwargs["stream_options"] = {"include_usage": True}
+            provider_l = (self.config.provider or "").strip().lower()
+            if provider_l != "nvidia_nim":
+                api_kwargs["stream_options"] = {"include_usage": True}
             response = await self.client.chat.completions.create(**api_kwargs)
             final_content = ""
             final_reasoning = ""
@@ -409,7 +557,25 @@ class OpenAICompatibleProvider(LLMProvider):
             total_tokens = 0
             cost = None
             actual_model = effective_model
+            chunk_count = 0
+            _nemotron_state = {"buf": "", "in_thinking": False} if is_nemotron else None
+            _accumulated_tool_calls: Dict[int, Dict[str, Any]] = {}
             async for chunk in response:
+                chunk_count += 1
+                if chunk_count == 1:
+                    delta = getattr(chunk.choices[0], "delta", None) if chunk.choices else None
+                    delta_info = {}
+                    if delta is not None:
+                        for k in ("content", "reasoning_content", "reasoning", "thinking", "role", "tool_calls"):
+                            v = getattr(delta, k, None)
+                            if v is not None:
+                                delta_info[k] = ("..." if isinstance(v, str) and len(v) > 20 else v)
+                    logger.info(
+                        "LLM stream first chunk: model=%s, has_choices=%s, delta=%s",
+                        getattr(chunk, "model", None),
+                        bool(chunk.choices),
+                        delta_info,
+                    )
                 cm = getattr(chunk, "model", None)
                 if cm:
                     actual_model = cm
@@ -426,19 +592,88 @@ class OpenAICompatibleProvider(LLMProvider):
                     err = choice.error
                     raise LLMError(getattr(err, "message", str(err)))
                 delta = choice.delta
-                d_reasoning = getattr(delta, "reasoning_content", None) or ""
-                d_content = getattr(delta, "content", None) or ""
-                stream_text = d_reasoning if d_reasoning else d_content
-                if stream_text:
-                    await stream_callback(stream_text)
+                raw_reasoning = getattr(delta, "reasoning_content", None)
+                if raw_reasoning is None:
+                    raw_reasoning = getattr(delta, "reasoning", None)
+                if raw_reasoning is None:
+                    raw_reasoning = getattr(delta, "thinking", None)
+                d_reasoning = _normalize_message_content(raw_reasoning) if raw_reasoning is not None else ""
+                raw_content = getattr(delta, "content", None)
+                if raw_content is None:
+                    raw_content = getattr(delta, "text", None)
+                if raw_content is None:
+                    raw_content = getattr(delta, "output_text", None)
+                d_content = _normalize_message_content(raw_content) if raw_content is not None else ""
+                if is_nemotron and stream_callback_typed and (d_content or d_reasoning):
+                    r_out, c_out = _parse_nemotron_content_chunk(
+                        d_content or "",
+                        d_reasoning or "",
+                        _nemotron_state,
+                    )
+                    d_reasoning = r_out
+                    d_content = c_out
+                if stream_callback_typed:
+                    if d_reasoning:
+                        await stream_callback("reasoning", d_reasoning)
+                    if d_content:
+                        await stream_callback("content", d_content)
+                else:
+                    stream_text = d_reasoning if d_reasoning else d_content
+                    if stream_text:
+                        await stream_callback(stream_text)
                 final_reasoning += d_reasoning
                 final_content += d_content
+                raw_tool_calls = getattr(delta, "tool_calls", None)
+                if raw_tool_calls:
+                    for tc in raw_tool_calls:
+                        idx = getattr(tc, "index", None)
+                        if idx is None:
+                            continue
+                        if idx not in _accumulated_tool_calls:
+                            _accumulated_tool_calls[idx] = {"id": "", "type": "function", "function": {"name": "", "arguments": ""}}
+                        acc = _accumulated_tool_calls[idx]
+                        tid = getattr(tc, "id", None)
+                        if tid:
+                            acc["id"] = (acc["id"] or "") + _s(tid)
+                        ttype = getattr(tc, "type", None)
+                        if ttype:
+                            acc["type"] = _s(ttype) or acc["type"]
+                        fn = getattr(tc, "function", None)
+                        if fn:
+                            n = getattr(fn, "name", None)
+                            if n:
+                                acc["function"]["name"] = (acc["function"]["name"] or "") + _s(n)
+                            a = getattr(fn, "arguments", None)
+                            if a:
+                                acc["function"]["arguments"] = (acc["function"]["arguments"] or "") + _s(a)
                 u = _usage_dict(getattr(chunk, "usage", None))
                 if u:
                     prompt_tokens = u.get("prompt_tokens", prompt_tokens)
                     completion_tokens = u.get("completion_tokens", completion_tokens)
                     total_tokens = u.get("total_tokens", total_tokens)
                     cost = u.get("cost", cost)
+            tool_calls_list: List[Dict[str, Any]] = []
+            for idx in sorted(_accumulated_tool_calls.keys()):
+                acc = _accumulated_tool_calls[idx]
+                call_id = (acc.get("id") or "").strip()
+                fn_name = (acc.get("function", {}).get("name") or "").strip()
+                fn_args = (acc.get("function", {}).get("arguments") or "").strip()
+                if call_id and fn_name:
+                    tool_calls_list.append({
+                        "id": call_id,
+                        "type": acc.get("type") or "function",
+                        "function": {"name": fn_name, "arguments": fn_args},
+                    })
+            if is_nemotron and _nemotron_state and _nemotron_state.get("buf"):
+                rem = _nemotron_state["buf"]
+                if _nemotron_state.get("in_thinking"):
+                    final_reasoning += rem
+                    if stream_callback_typed:
+                        await stream_callback("reasoning", rem)
+                else:
+                    final_content += rem
+                    if stream_callback_typed:
+                        await stream_callback("content", rem)
             return {
                 "content": final_content,
                 "reasoning_content": final_reasoning,
@@ -447,7 +682,7 @@ class OpenAICompatibleProvider(LLMProvider):
                 "total_tokens": total_tokens,
                 "cost": cost,
                 "model": actual_model,
-                "tool_calls": [],
+                "tool_calls": tool_calls_list,
             }
 
         response = await self.client.chat.completions.create(**api_kwargs)
@@ -458,8 +693,15 @@ class OpenAICompatibleProvider(LLMProvider):
             err = choice.error
             raise LLMError(getattr(err, "message", str(err)))
 
-        content = getattr(choice.message, "content", "") or ""
-        reasoning_content = getattr(choice.message, "reasoning_content", "") or ""
+        raw_content = getattr(choice.message, "content", "") or ""
+        content = _normalize_message_content(raw_content)
+        raw_reasoning = getattr(choice.message, "reasoning_content", None)
+        if raw_reasoning is None:
+            raw_reasoning = getattr(choice.message, "reasoning", None)
+        if raw_reasoning is None:
+            raw_reasoning = getattr(choice.message, "thinking", None)
+        raw_reasoning = raw_reasoning or ""
+        reasoning_content = _normalize_message_content(raw_reasoning) if not isinstance(raw_reasoning, str) else raw_reasoning
         tool_calls = []
         raw_tool_calls = getattr(choice.message, "tool_calls", None)
         if raw_tool_calls:
@@ -487,6 +729,7 @@ class OpenAICompatibleProvider(LLMProvider):
         response_format: Optional[Dict[str, str]] = None,
         use_reasoning: bool = False,
         stream_callback: Optional[callable] = None,
+        stream_callback_typed: bool = False,
         tools: Optional[List[Dict[str, Any]]] = None,
         tool_choice: Optional[str] = None,
         model_override: Optional[str] = None,
@@ -512,7 +755,7 @@ class OpenAICompatibleProvider(LLMProvider):
         while True:
             try:
                 async with self.semaphore:
-                    if self._uses_responses_api():
+                    if self._uses_responses_api(stream_requested=stream_callback is not None):
                         return await self._call_responses_api(
                             messages=messages,
                             max_tokens_norm=max_tokens_norm,
@@ -520,6 +763,7 @@ class OpenAICompatibleProvider(LLMProvider):
                             response_format=response_format,
                             use_reasoning=use_reasoning,
                             stream_callback=stream_callback,
+                            stream_callback_typed=stream_callback_typed,
                             tools=tools,
                             tool_choice=tool_choice,
                             effective_model=upstream_model,
@@ -531,6 +775,7 @@ class OpenAICompatibleProvider(LLMProvider):
                         response_format=response_format,
                         use_reasoning=use_reasoning,
                         stream_callback=stream_callback,
+                        stream_callback_typed=stream_callback_typed,
                         tools=tools,
                         tool_choice=tool_choice,
                         effective_model=upstream_model,

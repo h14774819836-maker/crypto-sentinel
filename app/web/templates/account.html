@@ -33,7 +33,7 @@
           data-i18n="account.total_margin_balance">保证金总额</span><span id="fut-total">{{ futures_row.total_margin_balance
           if futures_row else "-" }}</span></div>
       <div class="text-xs text-muted-foreground pt-2"><span data-i18n="account.updated">更新时间</span>: <span
-          id="fut-updated">{{ futures_row.ts|bj_time if futures_row else "-" }}</span></div>
+          id="fut-updated">-</span></div>
     </div>
   </section>
 
@@ -67,7 +67,7 @@
             class="text-xs text-muted-foreground">USDT</span></div>
       </div>
       <div class="text-xs text-muted-foreground pt-2"><span data-i18n="account.updated">更新时间</span>: <span
-          id="pos-updated">{{ futures_row.ts|bj_time if futures_row else "-" }}</span></div>
+          id="pos-updated">-</span></div>
     </div>
   </section>
 
@@ -79,17 +79,22 @@
       </h3>
     </div>
     <div class="p-5 space-y-3 text-sm">
-      <div class="flex justify-between"><span class="text-muted-foreground"
-          data-i18n="account.margin_level">保证金率</span><span id="mar-level">{{ margin_row.margin_level if margin_row else
+      <div class="flex justify-between" title="当前全仓账户的总资产除以总负债的比例。当这个比例下降到接近【强平线】时，将会触发强制平仓。"><span
+          class="text-muted-foreground border-b border-dashed border-muted-foreground/50 cursor-help"
+          data-i18n="account.margin_level">当前保证金率</span><span id="mar-level">{{ margin_row.margin_level if margin_row
+          else
           "-" }}</span></div>
-      <div class="flex justify-between"><span class="text-muted-foreground"
-          data-i18n="account.margin_call_bar">补仓线</span><span id="mar-call">{{ margin_row.margin_call_bar if margin_row
+      <div class="flex justify-between" title="当【当前保证金率】下跌到这个数值时，系统会向您发送追加保证金的通知。"><span
+          class="text-muted-foreground border-b border-dashed border-muted-foreground/50 cursor-help"
+          data-i18n="account.margin_call_bar">预警(补仓)线</span><span id="mar-call">{{ margin_row.margin_call_bar if
+          margin_row
           else "-" }}</span></div>
-      <div class="flex justify-between"><span class="text-muted-foreground"
-          data-i18n="account.force_liquidation_bar">强平线</span><span id="mar-force">{{ margin_row.force_liquidation_bar
+      <div class="flex justify-between" title="危险！当【当前保证金率】等于或低于这个数值时，系统将强制卖出您账户内的资产以偿还借款（爆仓）。"><span
+          class="text-muted-foreground border-b border-dashed border-muted-foreground/50 cursor-help"
+          data-i18n="account.force_liquidation_bar">强制平仓线</span><span id="mar-force">{{ margin_row.force_liquidation_bar
           if margin_row else "-" }}</span></div>
       <div class="text-xs text-muted-foreground pt-2"><span data-i18n="account.updated">更新时间</span>: <span
-          id="mar-updated">{{ margin_row.ts|bj_time if margin_row else "-" }}</span></div>
+          id="mar-updated">-</span></div>
     </div>
   </section>
 </div>
@@ -123,10 +128,21 @@
 
   let equityChart = null;
   let equitySeries = null;
+  let accountEventSource = null;
+  let reconnectTimer = null;
+  let currentBackoff = 1000;
+  const MAX_BACKOFF = 30000;
 
   function _toNum(v) {
     const n = Number(v);
     return Number.isFinite(n) ? n : null;
+  }
+
+  function formatTimeHHMMSS(tsStr) {
+    if (!tsStr || tsStr === "-") return "-";
+    const d = new Date(tsStr);
+    if (isNaN(d.getTime())) return tsStr;
+    return d.toLocaleTimeString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false });
   }
 
   function _initEquityChart() {
@@ -174,11 +190,67 @@
       equitySeries.setData(seriesData);
       if (seriesData.length) {
         document.getElementById("equity-updated").textContent = new Date(seriesData[seriesData.length - 1].time * 1000).toISOString();
+        equityChart.timeScale().fitContent();
       }
     } catch (_) { }
   }
 
-  async function refreshAccount() {
+  function processAccountData(futItem, marItem) {
+    if (futItem) {
+      document.getElementById("fut-available").textContent = _fmt(futItem.available_balance);
+      document.getElementById("fut-maint").textContent = _fmt(futItem.total_maint_margin);
+      document.getElementById("fut-total").textContent = _fmt(futItem.total_margin_balance);
+      document.getElementById("pos-amt").textContent = _fmt(futItem.btc_position_amt);
+      document.getElementById("pos-mark").textContent = _fmt(futItem.btc_mark_price);
+      document.getElementById("pos-liq").textContent = _fmt(futItem.btc_liquidation_price);
+      const pnlEl = document.getElementById("pos-pnl");
+      const pnl = _toNum(futItem.btc_unrealized_pnl);
+      pnlEl.textContent = _fmt(futItem.btc_unrealized_pnl);
+      pnlEl.className = pnl > 0 ? "text-emerald-500 font-medium" : (pnl < 0 ? "text-red-500 font-medium" : "");
+      const ts = formatTimeHHMMSS(futItem.ts);
+      document.getElementById("fut-updated").textContent = ts;
+      document.getElementById("pos-updated").textContent = ts;
+    }
+    if (marItem) {
+      document.getElementById("mar-level").textContent = _fmt(marItem.margin_level);
+      document.getElementById("mar-call").textContent = _fmt(marItem.margin_call_bar);
+      document.getElementById("mar-force").textContent = _fmt(marItem.force_liquidation_bar);
+      document.getElementById("mar-updated").textContent = formatTimeHHMMSS(marItem.ts);
+    }
+  }
+
+  function connectAccountStream() {
+    if (accountEventSource) {
+      accountEventSource.close();
+    }
+
+    accountEventSource = new EventSource("/api/account/stream");
+
+    accountEventSource.onopen = () => {
+      console.log("Account SSE connected");
+      currentBackoff = 1000; // reset backoff on successful connection
+    };
+
+    accountEventSource.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        processAccountData(data.futures, data.margin);
+      } catch (err) {
+        console.error("Error parsing account stream data", err);
+      }
+    };
+
+    accountEventSource.onerror = (err) => {
+      console.error("Account SSE error, reconnecting in " + currentBackoff + "ms", err);
+      accountEventSource.close();
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      reconnectTimer = setTimeout(connectAccountStream, currentBackoff);
+      currentBackoff = Math.min(currentBackoff * 2, MAX_BACKOFF);
+    };
+  }
+
+  // Initial load to avoid waiting for the first SSE tick
+  async function initialAccountLoad() {
     try {
       const [futResp, marResp] = await Promise.all([
         fetch("/api/account/futures"),
@@ -186,34 +258,15 @@
       ]);
       const fut = await futResp.json();
       const mar = await marResp.json();
-      if (fut && fut.item) {
-        document.getElementById("fut-available").textContent = _fmt(fut.item.available_balance);
-        document.getElementById("fut-maint").textContent = _fmt(fut.item.total_maint_margin);
-        document.getElementById("fut-total").textContent = _fmt(fut.item.total_margin_balance);
-        document.getElementById("pos-amt").textContent = _fmt(fut.item.btc_position_amt);
-        document.getElementById("pos-mark").textContent = _fmt(fut.item.btc_mark_price);
-        document.getElementById("pos-liq").textContent = _fmt(fut.item.btc_liquidation_price);
-        const pnlEl = document.getElementById("pos-pnl");
-        const pnl = _toNum(fut.item.btc_unrealized_pnl);
-        pnlEl.textContent = _fmt(fut.item.btc_unrealized_pnl);
-        pnlEl.className = pnl > 0 ? "text-emerald-500 font-medium" : (pnl < 0 ? "text-red-500 font-medium" : "");
-        const ts = fut.item.ts || "-";
-        document.getElementById("fut-updated").textContent = ts;
-        document.getElementById("pos-updated").textContent = ts;
-      }
-      if (mar && mar.item) {
-        document.getElementById("mar-level").textContent = _fmt(mar.item.margin_level);
-        document.getElementById("mar-call").textContent = _fmt(mar.item.margin_call_bar);
-        document.getElementById("mar-force").textContent = _fmt(mar.item.force_liquidation_bar);
-        document.getElementById("mar-updated").textContent = mar.item.ts || "-";
-      }
+      processAccountData(fut.item, mar.item);
     } catch (_) { }
   }
 
   _initEquityChart();
   refreshEquityCurve();
-  refreshAccount();
+  initialAccountLoad().then(() => {
+    connectAccountStream();
+  });
   setInterval(refreshEquityCurve, 60000);
-  setInterval(refreshAccount, 10000);
 </script>
 {% endblock %}

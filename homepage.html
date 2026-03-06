@@ -58,6 +58,20 @@
     box-shadow: inset 0 0 0 1px rgba(59, 130, 246, 0.08), 0 16px 32px rgba(2, 6, 23, 0.35);
   }
 
+  .ai-thinking-skeleton .ai-thinking-dot {
+    width: 0.5rem;
+    height: 0.5rem;
+    border-radius: 50%;
+    background: rgba(56, 189, 248, 0.7);
+    box-shadow: 0 0 8px rgba(56, 189, 248, 0.4);
+  }
+  .ai-thinking-skeleton .ai-thinking-dot.animate-pulse {
+    animation: ai-thinking-breathe 1.8s ease-in-out infinite;
+  }
+  @keyframes ai-thinking-breathe {
+    0%, 100% { opacity: 0.6; transform: scale(0.95); }
+    50% { opacity: 1; transform: scale(1.1); }
+  }
   .ai-console-stream {
     border-left: 2px solid rgba(56, 189, 248, 0.55);
     padding-left: 0.7rem;
@@ -1937,6 +1951,48 @@
 
         }
 
+        else if (data.type === 'thinking_state') {
+
+          setAnalyzeStatus('loading', `🤖 AI 思考中：${data.content || '分析进行中'}`, { pulse: true });
+
+          let symbolDiv = document.getElementById(`ai-console-${data.symbol}`);
+
+          if (!symbolDiv) {
+
+            symbolDiv = document.createElement('div');
+
+            symbolDiv.id = `ai-console-${data.symbol}`;
+
+            symbolDiv.className = 'ai-console-stream mb-3 rounded-r-lg bg-white/[0.02] py-2 pr-2';
+
+            symbolDiv.innerHTML = `<div class="text-[10px] text-cyan-300 font-semibold uppercase mb-1 tracking-wider">[ ${data.symbol} ]</div><div class="ai-thinking-skeleton flex items-center gap-2 py-2"><span class="ai-thinking-dot animate-pulse"></span><span class="ai-thinking-status text-slate-300/90 text-sm">${(data.content || '分析进行中').replace(/</g, '&lt;')}</span></div>`;
+
+            symbolDiv.style.display = data.symbol === currentCoin ? '' : 'none';
+
+            consoleOutput.appendChild(symbolDiv);
+
+          } else {
+
+            const statusEl = symbolDiv.querySelector('.ai-thinking-status');
+
+            if (statusEl) statusEl.textContent = data.content || '分析进行中';
+
+          }
+
+          if (aiConsoleState.autoFollow && !scrollTimeout) {
+
+            scrollTimeout = setTimeout(() => {
+
+              consoleContainer.scrollTop = consoleContainer.scrollHeight;
+
+              scrollTimeout = null;
+
+            }, 100);
+
+          }
+
+        }
+
         else if (data.type === 'chunk') {
 
           let symbolDiv = document.getElementById(`ai-console-${data.symbol}`);
@@ -1990,6 +2046,10 @@
           let symbolDiv = document.getElementById(`ai-console-${data.symbol}`);
 
           if (symbolDiv) {
+
+            const thinkingSkeleton = symbolDiv.querySelector('.ai-thinking-skeleton');
+
+            if (thinkingSkeleton) thinkingSkeleton.remove();
 
             const div = document.createElement('div');
 

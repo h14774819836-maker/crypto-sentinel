@@ -3065,7 +3065,12 @@ async def youtube_asr_backfill_job(runtime: WorkerRuntime) -> None:
             transcript_text = None
             transcript_lang = None
             # Step 1: Download audio
-            audio_path = download_audio(video.video_id, cache_dir=settings.asr_audio_cache_dir)
+            audio_path = download_audio(
+                video.video_id,
+                cache_dir=settings.asr_audio_cache_dir,
+                cookies_from_browser=settings.youtube_cookies_from_browser,
+                cookies_file=settings.youtube_cookies_file,
+            )
             if not audio_path:
                 last_error = "Audio download failed"
                 logger.warning("ASR: download failed for %s", video.video_id)

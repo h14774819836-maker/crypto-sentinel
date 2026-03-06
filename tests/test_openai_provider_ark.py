@@ -50,8 +50,9 @@ def test_ark_non_stream_response_maps_usage_and_json_format():
     assert result["completion_tokens"] == 7
     assert result["total_tokens"] == 18
     assert called.get("max_output_tokens") == 1024
-    assert (called.get("thinking") or {}).get("type") == "disabled"
-    assert (called.get("text") or {}).get("format", {}).get("type") == "json_object"
+    assert "thinking" not in called
+    # Doubao/Ark 不支持 response_format.json_object，provider 会跳过；下游通过 _extract_first_balanced_json_object 解析
+    assert (called.get("text") or {}).get("format") is None
     assert isinstance(called.get("input"), list) and called["input"][0]["type"] == "message"
 
 
@@ -136,7 +137,7 @@ def test_ark_reasoning_true_enables_thinking():
         )
 
     asyncio.run(_run())
-    assert (called.get("thinking") or {}).get("type") == "enabled"
+    assert "thinking" not in called
     assert (called.get("reasoning") or {}).get("effort") == "medium"
 
 
@@ -157,24 +158,23 @@ def test_ark_streaming_maps_text_reasoning_and_usage():
             except StopIteration:
                 raise StopAsyncIteration
 
-    async def _fake_create(**kwargs):
+    # Ark uses Chat Completions when streaming (for reasoning_content in delta)
+    def _make_chunk(content: str = "", reasoning: str = ""):
+        delta = SimpleNamespace(content=content or None, reasoning_content=reasoning or None)
+        return SimpleNamespace(choices=[SimpleNamespace(delta=delta, error=None)], model="doubao-seed-2-0-pro-260215")
+
+    async def _fake_chat_create(**kwargs):
         assert kwargs.get("stream") is True
-        final_resp = SimpleNamespace(
-            output_text="",
-            output=[],
-            usage=SimpleNamespace(input_tokens=5, output_tokens=3, total_tokens=8),
-            model="doubao-seed-2-0-pro-260215",
-        )
         return _Stream(
             [
-                SimpleNamespace(type="response.output_text.delta", delta="Hel"),
-                SimpleNamespace(type="response.reasoning_text.delta", delta="R"),
-                SimpleNamespace(type="response.output_text.delta", delta="lo"),
-                SimpleNamespace(type="response.completed", response=final_resp),
+                _make_chunk(content="Hel"),
+                _make_chunk(reasoning="R"),
+                _make_chunk(content="lo"),
+                SimpleNamespace(choices=[], model=None, usage=SimpleNamespace(prompt_tokens=5, completion_tokens=3, total_tokens=8)),
             ]
         )
 
-    provider.client.responses.create = _fake_create
+    provider.client.chat.completions.create = _fake_chat_create
 
     chunks: list[str] = []
 

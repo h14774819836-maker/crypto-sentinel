@@ -56,7 +56,8 @@ class MarketAnalyst:
         snapshots: dict[str, Any],
         *,
         context: dict[str, Any] | None = None,
-        stream_callback: Callable[[str], Awaitable[None]] | None = None,
+        stream_callback: Callable[..., Awaitable[None]] | None = None,
+        stream_callback_typed: bool = False,
     ) -> tuple[list[AiTradeSignal], dict[str, Any] | None]:
         """Run a full analysis cycle for one symbol and return parsed trade signals + tracking metadata."""
         if not snapshots:
@@ -114,6 +115,7 @@ class MarketAnalyst:
         completion_tokens: int | None = None
         actual_model = self.model
         final_signals: list[AiTradeSignal] = []
+        reasoning_content_final: str = ""
 
         failure_events: list[dict[str, Any]] = []
         model_attempts: list[dict[str, Any]] = []
@@ -146,11 +148,12 @@ class MarketAnalyst:
             try:
                 response = await self.provider.generate_response(
                     messages=messages,
-                    max_tokens=4096,
+                    max_tokens=16384,
                     temperature=market_temperature,
                     response_format={"type": "json_object"},
                     use_reasoning=attempt_reasoning,
                     stream_callback=stream_callback,
+                    stream_callback_typed=stream_callback_typed,
                     model_override=req_model,
                 )
             except LLMRateLimitError as exc:
@@ -234,6 +237,8 @@ class MarketAnalyst:
 
             content = response.get("content", "")
             reasoning_content = response.get("reasoning_content", "")
+            if str(reasoning_content or "").strip():
+                reasoning_content_final = str(reasoning_content or "")
             prompt_tokens = response.get("prompt_tokens")
             completion_tokens = response.get("completion_tokens")
             actual_model = response.get("model", req_model)
@@ -349,11 +354,12 @@ class MarketAnalyst:
                     try:
                         pass2_resp = await self.provider.generate_response(
                             messages=pass2_messages,
-                            max_tokens=4096,
+                            max_tokens=16384,
                             temperature=market_temperature,
                             response_format={"type": "json_object"},
                             use_reasoning=use_reasoning,
                             stream_callback=stream_callback,
+                            stream_callback_typed=stream_callback_typed,
                         )
                         pass2_content = pass2_resp.get("content", "")
                         pass2_parsed, _ = self._parse_response_strict(
@@ -426,6 +432,7 @@ class MarketAnalyst:
             "completion_tokens": completion_tokens,
             "error_summary": error_summary,
             "failure_events": failure_events,
+            "reasoning_content": reasoning_content_final if reasoning_content_final.strip() else None,
         }
 
     @staticmethod
@@ -1019,21 +1026,23 @@ class MarketAnalyst:
         context: dict[str, Any] | None,
     ) -> dict[str, Any]:
         from app.ai.prompts import _sanitize_snapshots_for_prompt
-        return {
-            "facts": {
-                "symbol": symbol,
-                "multi_tf_snapshots": _sanitize_snapshots_for_prompt(snapshots),
-                "brief": (context or {}).get("brief") if isinstance(context, dict) else {},
-                "funding_deltas": (context or {}).get("funding_deltas") if isinstance(context, dict) else {},
-                "alerts_digest": (context or {}).get("alerts_digest") if isinstance(context, dict) else {},
-                # Keep this for anchor compatibility: model occasionally emits facts.youtube_radar.* anchors.
-                "youtube_radar": (context or {}).get("youtube_radar") if isinstance(context, dict) else {},
-                "intel_digest": (context or {}).get("intel_digest") if isinstance(context, dict) else {},
-                "account_snapshot": (context or {}).get("account_snapshot") if isinstance(context, dict) else {},
-                "data_quality": (context or {}).get("data_quality") if isinstance(context, dict) else {},
-                "input_budget_meta": (context or {}).get("input_budget_meta") if isinstance(context, dict) else {},
-            }
+        brief = (context or {}).get("brief") if isinstance(context, dict) else {}
+        facts = {
+            "symbol": symbol,
+            "multi_tf_snapshots": _sanitize_snapshots_for_prompt(snapshots),
+            "brief": brief,
+            "funding_deltas": (context or {}).get("funding_deltas") if isinstance(context, dict) else {},
+            "alerts_digest": (context or {}).get("alerts_digest") if isinstance(context, dict) else {},
+            "youtube_radar": (context or {}).get("youtube_radar") if isinstance(context, dict) else {},
+            "intel_digest": (context or {}).get("intel_digest") if isinstance(context, dict) else {},
+            "account_snapshot": (context or {}).get("account_snapshot") if isinstance(context, dict) else {},
+            "data_quality": (context or {}).get("data_quality") if isinstance(context, dict) else {},
+            "input_budget_meta": (context or {}).get("input_budget_meta") if isinstance(context, dict) else {},
         }
+        cross_tf = brief.get("cross_tf_summary") if isinstance(brief, dict) else {}
+        if cross_tf:
+            facts["cross_tf_summary"] = cross_tf
+        return {"facts": facts}
 
     def _build_analysis_json(self, data: dict[str, Any], market_regime: str, *, symbol: str) -> dict[str, Any]:
         payload = {
@@ -1312,6 +1321,7 @@ def _extract_first_balanced_json_object(text: str, start_index: int = 0) -> str 
     obj_start = -1
     in_string = False
     escape = False
+    stack: list[str] = []  # track both { and [ for truncation repair
 
     for i in range(max(0, start_index), len(text)):
         ch = text[i]
@@ -1332,11 +1342,32 @@ def _extract_first_balanced_json_object(text: str, start_index: int = 0) -> str 
             if depth == 0:
                 obj_start = i
             depth += 1
+            stack.append('}')
+        elif ch == '[':
+            stack.append(']')
         elif ch == '}':
             if depth > 0:
                 depth -= 1
                 if depth == 0 and obj_start >= 0:
                     return text[obj_start : i + 1]
+            if stack and stack[-1] == '}':
+                stack.pop()
+        elif ch == ']':
+            if stack and stack[-1] == ']':
+                stack.pop()
+
+    # Fallback: truncated JSON - try to repair by closing open brackets
+    if obj_start >= 0 and stack:
+        suffix = ''
+        if in_string:
+            suffix += '"'
+        suffix += ''.join(reversed(stack))
+        repaired = text[obj_start:] + suffix
+        try:
+            json.loads(repaired)
+            return repaired
+        except json.JSONDecodeError:
+            pass
     return None
 
 

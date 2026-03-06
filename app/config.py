@@ -233,6 +233,14 @@ DEFAULT_PROFILE_TEMPLATES: dict[str, dict[str, Any]] = {
         "max_concurrency": 2,
         "max_retries": 3,
     },
+    "thinking_summary": {
+        "provider": "nvidia_nim",
+        "model": "nvidia_nim/nemotron-3-nano-30b-a3b",
+        "use_reasoning": "false",
+        "enabled": True,
+        "max_concurrency": 4,
+        "max_retries": 2,
+    },
 }
 
 
@@ -332,6 +340,7 @@ class Settings(BaseSettings):
     market_ai_log_backup_count: int = Field(default=7, alias="MARKET_AI_LOG_BACKUP_COUNT")
     market_ai_prompt_log_max_chars: int = Field(default=2000, alias="MARKET_AI_PROMPT_LOG_MAX_CHARS")
     market_ai_response_log_max_chars: int = Field(default=1500, alias="MARKET_AI_RESPONSE_LOG_MAX_CHARS")
+    market_ai_stream_symbol_timeout_seconds: float = Field(default=420.0, alias="MARKET_AI_STREAM_SYMBOL_TIMEOUT_SECONDS", description="AI 流式分析单 symbol 超时(秒)，大模型如 Kimi K2.5 建议 420+")
     timezone: str = Field(default="UTC", alias="TIMEZONE")
 
     database_url: str = Field(default="sqlite:///./data/crypto_sentinel.db", alias="DATABASE_URL")
@@ -416,6 +425,14 @@ class Settings(BaseSettings):
     ai_min_context_on_poor_data: bool = Field(default=True, alias="AI_MIN_CONTEXT_ON_POOR_DATA")
     ai_min_context_on_non_tradeable: bool = Field(default=True, alias="AI_MIN_CONTEXT_ON_NON_TRADEABLE")
     ai_external_views_on_low_conf_only: bool = Field(default=True, alias="AI_EXTERNAL_VIEWS_ON_LOW_CONF_ONLY")
+    ai_thinking_summary_enabled: bool = Field(default=True, alias="AI_THINKING_SUMMARY_ENABLED")
+    ai_thinking_summary_min_chars: int = Field(default=100, alias="AI_THINKING_SUMMARY_MIN_CHARS")
+    ai_thinking_summary_min_chars_first: int = Field(default=30, alias="AI_THINKING_SUMMARY_MIN_CHARS_FIRST")
+    ai_thinking_summary_interval_sec: float = Field(default=6.0, alias="AI_THINKING_SUMMARY_INTERVAL_SEC")
+    ai_thinking_summary_max_streaming: int = Field(default=15, alias="AI_THINKING_SUMMARY_MAX_STREAMING", description="副模型在思考阶段最多总结次数")
+    ai_thinking_summary_profile: str = Field(default="thinking_summary", alias="AI_THINKING_SUMMARY_PROFILE")
+    ai_telegram_thinking_summary_enabled: bool = Field(default=True, alias="AI_TELEGRAM_THINKING_SUMMARY_ENABLED", description="Telegram 对话是否启用副模型阶段反馈")
+    ai_telegram_thinking_summary_max_streaming: int = Field(default=10, alias="AI_TELEGRAM_THINKING_SUMMARY_MAX_STREAMING", description="Telegram 副模型最多总结次数")
     llm_market_temperature: float = Field(default=0.1, alias="LLM_MARKET_TEMPERATURE")
     grounding_mode: str = Field(default="balanced", alias="GROUNDING_MODE")
     grounding_severe_multiplier: float = Field(default=3.0, alias="GROUNDING_SEVERE_MULTIPLIER")
@@ -497,6 +514,8 @@ class Settings(BaseSettings):
     youtube_auth_auto_recover_enabled: bool = Field(default=True, alias="YOUTUBE_AUTH_AUTO_RECOVER_ENABLED")
     youtube_auth_auto_recover_batch: int = Field(default=20, alias="YOUTUBE_AUTH_AUTO_RECOVER_BATCH")
     youtube_auth_auto_recover_max_attempts: int = Field(default=2, alias="YOUTUBE_AUTH_AUTO_RECOVER_MAX_ATTEMPTS")
+    youtube_cookies_from_browser: str | None = Field(default=None, alias="YOUTUBE_COOKIES_FROM_BROWSER")
+    youtube_cookies_file: str | None = Field(default=None, alias="YOUTUBE_COOKIES_FILE")
 
     # Intel / News
     intel_enabled: bool = Field(default=False, alias="INTEL_ENABLED")

@@ -76,6 +76,16 @@ class TelegramClient:
 
         return TelegramSendResult(ok=False, message_id=None, raw=None)
 
+    async def send_chat_action(self, chat_id: int | str, action: str = "typing") -> bool:
+        """Send chat action (e.g. typing). Action lasts ~5s on client; repeat every 5s for long ops."""
+        if not self.enabled or not self.bot_token:
+            return False
+        cid = chat_id if chat_id is not None else self.chat_id
+        if not cid:
+            return False
+        resp = await self._post("sendChatAction", {"chat_id": cid, "action": action})
+        return bool(resp.get("ok"))
+
     async def delete_message(self, message_id: int, chat_id: str | int | None = None) -> bool:
         """Delete a message. chat_id: target chat (defaults to self.chat_id)."""
         cid = chat_id if chat_id is not None else self.chat_id
@@ -92,6 +102,25 @@ class TelegramClient:
         except Exception as exc:
             logger.warning("Telegram delete_message failed message_id=%s: %s", message_id, exc)
             return False
+
+    async def edit_message_text(
+        self, chat_id: int | str, message_id: int, text: str, parse_mode: str | None = None
+    ) -> bool:
+        """Edit a message's text. Used for dynamic status updates (e.g. thinking summary)."""
+        if not self.enabled or not self.bot_token:
+            return False
+        safe_text = text
+        if isinstance(safe_text, str) and len(safe_text) > 4096:
+            logger.warning(
+                "Telegram edit_message_text length %d exceeds 4096 char limit, truncating",
+                len(safe_text),
+            )
+            safe_text = safe_text[:4090] + "..."
+        payload = {"chat_id": chat_id, "message_id": int(message_id), "text": safe_text}
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
+        resp = await self._post("editMessageText", payload)
+        return bool(resp.get("ok"))
 
     async def send_text(self, text: str) -> bool:
         if not self.enabled or not self.bot_token or not self.chat_id:

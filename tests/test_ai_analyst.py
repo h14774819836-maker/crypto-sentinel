@@ -178,10 +178,8 @@ def test_analyze_retries_once_on_schema_failure_then_succeeds():
                     "reasoning": "第一次缺 anchors",
                 },
                 "trade_plan": {"expiration_ts_utc": 9999999999},
-                "evidence": [
-                    {"timeframe": "1m", "point": "close=100", "metrics": {"close": 100.0}},
-                    {"timeframe": "1m", "point": "atr=1", "metrics": {"atr_14": 1.0}},
-                ],
+                "evidence": ["bad_evidence", "bad_evidence"],
+                "anchors": ["bad_anchor", "bad_anchor"],
             },
             ensure_ascii=False,
         ),

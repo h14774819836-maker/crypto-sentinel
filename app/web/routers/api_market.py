@@ -1,12 +1,15 @@
 """Market, strategy, account, intel, alerts API routes."""
 from __future__ import annotations
 
+import asyncio
+import json
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
-from fastapi import APIRouter, Body, Depends, HTTPException, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.db.repository import (
@@ -121,6 +124,86 @@ def margin_account_api(
         item["account"] = row.account_json or {}
         item["trade_coeff"] = row.trade_coeff_json or {}
     return {"item": item}
+
+
+@router.get("/api/account/stream")
+async def account_stream_api(
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Streaming endpoint for Account updates using Server-Sent Events (SSE)."""
+    async def event_generator():
+        last_futures_ts = None
+        last_margin_ts = None
+        
+        # Initial comment to keep connection alive
+        yield ": connected\n\n"
+        
+        while True:
+            if await request.is_disconnected():
+                break
+
+            changed = False
+            try:
+                # Query db latest within loop since this runs indefinitely
+                futures_row = get_latest_futures_account_snapshot(db)
+                margin_row = get_latest_margin_account_snapshot(db)
+
+                current_futures_ts = futures_row.ts if futures_row else None
+                current_margin_ts = margin_row.ts if margin_row else None
+
+                if current_futures_ts != last_futures_ts or current_margin_ts != last_margin_ts:
+                    changed = True
+                    last_futures_ts = current_futures_ts
+                    last_margin_ts = current_margin_ts
+
+                if changed:
+                    # Construct payload
+                    payload = {"futures": None, "margin": None}
+                    
+                    if futures_row:
+                        payload["futures"] = {
+                            "ts": _json_datetime(futures_row.ts),
+                            "total_margin_balance": futures_row.total_margin_balance,
+                            "available_balance": futures_row.available_balance,
+                            "total_maint_margin": futures_row.total_maint_margin,
+                            "btc_position_amt": futures_row.btc_position_amt,
+                            "btc_mark_price": futures_row.btc_mark_price,
+                            "btc_liquidation_price": futures_row.btc_liquidation_price,
+                            "btc_unrealized_pnl": futures_row.btc_unrealized_pnl,
+                        }
+                    
+                    if margin_row:
+                        payload["margin"] = {
+                            "ts": _json_datetime(margin_row.ts),
+                            "margin_level": margin_row.margin_level,
+                            "margin_call_bar": margin_row.margin_call_bar,
+                            "force_liquidation_bar": margin_row.force_liquidation_bar,
+                        }
+                    
+                    # Yield SSE Data block
+                    yield f"data: {json.dumps(payload)}\n\n"
+            
+            except Exception as e:
+                # Need to yield heartbeat if exception just to keep alive
+                pass
+
+            # Polling delay
+            # Keep it tight enough for real-time feel, SQLite is fast
+            await asyncio.sleep(1.0)
+            
+            # Send periodic heartbeat regardless of changes to avoid proxy timeouts
+            yield ": heartbeat\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive"
+        },
+    )
 
 
 @router.get("/api/account/equity-curve")

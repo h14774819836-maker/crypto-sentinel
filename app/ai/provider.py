@@ -50,6 +50,7 @@ class LLMProvider(abc.ABC):
         response_format: Optional[Dict[str, str]] = None,
         use_reasoning: bool = False,
         stream_callback: Optional[callable] = None,
+        stream_callback_typed: bool = False,
         tools: Optional[List[Dict[str, Any]]] = None,
         tool_choice: Optional[str] = None,
         model_override: Optional[str] = None,
@@ -63,5 +64,10 @@ class LLMProvider(abc.ABC):
             - "completion_tokens": int
             - "model": str (the actual model used)
             - "tool_calls": List[Dict] (if tools were called)
+
+        stream_callback: When provided, receives streamed chunks. If stream_callback_typed
+            is False (default), called as callback(text: str). If stream_callback_typed
+            is True, called as callback(chunk_type: str, text: str) where chunk_type
+            is "reasoning" or "content".
         """
         pass

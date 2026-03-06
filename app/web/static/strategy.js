@@ -18,7 +18,7 @@
     outcome: "",
     regime: "",
     manifestId: "",
-    fromTs: Math.floor(Date.now() / 1000) - 24 * 3600,
+    fromTs: Math.floor(Date.now() / 1000) - 3600 * 500,
     toTs: Math.floor(Date.now() / 1000),
     cursor: null,
     rawItems: [],
@@ -172,19 +172,25 @@
       close: Number(kline.c),
     };
     if (!Number.isFinite(next.open)) return;
-    const last = state.ohlcv[state.ohlcv.length - 1];
     if (!last || t > last.time) {
       state.ohlcv.push(next);
+      state.ohlcv = trimOhlcv(state.ohlcv);
+      skipRangeEvent = true;
+      candleSeries.update(next);
+      requestAnimationFrame(() => { skipRangeEvent = false; });
     } else if (t === last.time) {
       state.ohlcv[state.ohlcv.length - 1] = next;
+      state.ohlcv = trimOhlcv(state.ohlcv);
+      skipRangeEvent = true;
+      candleSeries.update(next);
+      requestAnimationFrame(() => { skipRangeEvent = false; });
     } else {
-      state.ohlcv = mergeOhlcv(state.ohlcv, [next]);
+      state.ohlcv = trimOhlcv(mergeOhlcv(state.ohlcv, [next]));
+      skipRangeEvent = true;
+      candleSeries.setData(state.ohlcv);
+      requestAnimationFrame(() => { skipRangeEvent = false; });
     }
-    state.ohlcv = trimOhlcv(state.ohlcv);
     loadedOhlcvTo = Math.max(loadedOhlcvTo, t);
-    skipRangeEvent = true;
-    candleSeries.update(next);
-    requestAnimationFrame(() => { skipRangeEvent = false; });
   }
 
   function startKlineWs() {
@@ -235,8 +241,8 @@
     chart = LightweightCharts.createChart(els.chart, {
       autoSize: true,
       layout: {
-        background: { type: 'solid', color: "rgba(2,6,23,0)" },
-        textColor: "rgba(226,232,240,0.9)",
+        background: { type: 'solid', color: "transparent" },
+        textColor: "rgba(148,163,184,0.9)",
       },
       localization: {
         timeFormatter: (time) => {
@@ -252,10 +258,14 @@
         },
       },
       grid: {
-        vertLines: { color: "rgba(148,163,184,0.1)" },
-        horzLines: { color: "rgba(148,163,184,0.1)" },
+        vertLines: { color: "rgba(255,255,255,0.04)" },
+        horzLines: { color: "rgba(255,255,255,0.04)" },
       },
-      crosshair: { mode: 0 },
+      crosshair: {
+        mode: 0,
+        vertLine: { width: 1, color: "rgba(148,163,184,0.4)", style: 3 },
+        horzLine: { width: 1, color: "rgba(148,163,184,0.4)", style: 3 },
+      },
       rightPriceScale: { borderColor: "rgba(148,163,184,0.2)" },
       timeScale: {
         borderColor: "rgba(148,163,184,0.2)",
@@ -276,11 +286,11 @@
       },
     });
     candleSeries = chart.addCandlestickSeries({
-      upColor: "#22c55e",
-      downColor: "#ef4444",
+      upColor: "#2ebd85",
+      downColor: "#f6465d",
       borderVisible: false,
-      wickUpColor: "#22c55e",
-      wickDownColor: "#ef4444",
+      wickUpColor: "#2ebd85",
+      wickDownColor: "#f6465d",
     });
     densitySeries = chart.addHistogramSeries({
       color: "rgba(56,189,248,0.35)",
@@ -795,8 +805,16 @@
         loadedOhlcvFrom = 0;
         loadedOhlcvTo = 0;
         state.ohlcv = [];
+
+        // Auto-scale to 500 candles
+        const tfSecs = timeframeSeconds(state.baseTf) || 3600;
+        const nowTs = Math.floor(Date.now() / 1000);
+        state.toTs = nowTs;
+        state.fromTs = nowTs - tfSecs * 500;
+
         await loadViewportData(true);
         await loadScores();
+        if (chart) chart.timeScale().fitContent();
         startKlineWs();
       });
     });

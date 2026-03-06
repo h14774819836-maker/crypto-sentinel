@@ -24,6 +24,27 @@ SYSTEM_PROMPT = """你是 Crypto Sentinel 的专业市场分析模型。
 """
 
 
+THINKING_SUMMARY_PROMPT = """阅读以下市场分析思考过程，用10字以内概括当前在做什么。
+
+要求：用通俗中文，不要用英文专业术语。示例：正在分析交易信号、正在整理依据、正在核对数据、正在整理输出、正在判断市场状态。
+
+思考：{buffer_content}
+
+概括："""
+
+
+TELEGRAM_THINKING_SUMMARY_PROMPT = """阅读以下对话思考过程，用8字以内概括当前在做什么。
+
+要求：用通俗中文。示例：正在理解问题、正在检索信息、正在组织回答、正在整理输出、正在调用工具。
+
+思考：{buffer_content}
+
+概括："""
+
+
+# NVIDIA Nemotron 显式 CoT 模型：system prompt 必须以该句开头才能输出完整 <thinking> 流
+NEMOTRON_DETAILED_THINKING_PREFIX = "detailed thinking on"
+
 TELEGRAM_AGENT_PROMPT = """你是 Crypto Sentinel 的专业加密交易助手。
 
 行为规则：
