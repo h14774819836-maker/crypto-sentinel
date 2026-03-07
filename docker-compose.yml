@@ -52,6 +52,9 @@ services:
       context: .
       dockerfile: docker/Dockerfile
     environment:
+      APP_RUNTIME_MODE: docker_compose
+      APP_RUNTIME_HOST: 127.0.0.1
+      APP_RUNTIME_PORT: "8000"
       DATABASE_URL: postgresql+psycopg://sentinel:sentinel@db:5432/crypto_sentinel
       WORKER_ROLE: core
       WORKER_ID: worker-core-1
@@ -85,6 +88,7 @@ services:
       context: .
       dockerfile: docker/Dockerfile
     environment:
+      APP_RUNTIME_MODE: docker_compose
       DATABASE_URL: postgresql+psycopg://sentinel:sentinel@db:5432/crypto_sentinel
       WORKER_ROLE: core
       WORKER_ID: worker-core-1
@@ -116,6 +120,7 @@ services:
       context: .
       dockerfile: docker/Dockerfile
     environment:
+      APP_RUNTIME_MODE: docker_compose
       DATABASE_URL: postgresql+psycopg://sentinel:sentinel@db:5432/crypto_sentinel
       WORKER_ROLE: ai
       WORKER_ID: worker-ai-1

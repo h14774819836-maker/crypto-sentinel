@@ -230,10 +230,20 @@ call :detect_compose_command
 call :use_single_worker_action "%~1"
 set "USE_SINGLE_MODE=0"
 if not errorlevel 1 set "USE_SINGLE_MODE=1"
+set "EXPLICIT_DOCKER_MODE=0"
 call :use_docker_stack "%~1"
-if not errorlevel 1 (
+if not errorlevel 1 set "EXPLICIT_DOCKER_MODE=1"
+set "USE_DOCKER_MODE=%EXPLICIT_DOCKER_MODE%"
+if "%~1"=="" (
+    if defined COMPOSE_CMD set "USE_DOCKER_MODE=1"
+)
+if "%USE_DOCKER_MODE%"=="1" (
     if defined COMPOSE_CMD (
-        echo [INFO] Docker mode selected. Launching Docker multi-worker stack...
+        if "%EXPLICIT_DOCKER_MODE%"=="1" (
+            echo [INFO] Docker mode selected. Launching Docker multi-worker stack...
+        ) else (
+            echo [INFO] No mode specified. Defaulting to Docker multi-worker stack...
+        )
         call :docker_prepare_multi_worker
         if errorlevel 1 (
             echo [ERROR] Failed to prepare Docker dependencies.
@@ -260,9 +270,12 @@ if not errorlevel 1 (
         call :prompt_attach_logs
         exit /b 0
     )
-    echo [ERROR] Docker mode requested, but docker compose is unavailable.
-    pause
-    exit /b 1
+    if "%EXPLICIT_DOCKER_MODE%"=="1" (
+        echo [ERROR] Docker mode requested, but docker compose is unavailable.
+        pause
+        exit /b 1
+    )
+    echo [WARN] docker compose is unavailable. Falling back to local runtime mode.
 )
 
 if "%USE_SINGLE_MODE%"=="1" (

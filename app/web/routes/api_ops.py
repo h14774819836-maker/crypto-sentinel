@@ -1,16 +1,44 @@
 ﻿from __future__ import annotations
 
 import json
+import os
+import signal
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
 
 from app.config import get_settings
-from app.runtime_control import read_runtime_state, read_runtime_stop_request, request_runtime_stop
+from app.runtime_control import (
+    is_docker_compose_runtime,
+    read_runtime_state,
+    read_runtime_stop_request,
+    request_runtime_stop,
+)
 from app.web.auth import require_admin
 
 router = APIRouter()
+
+
+def _docker_runtime_payload() -> dict[str, Any]:
+    return {
+        "mode": "docker_compose",
+        "host": os.environ.get("APP_RUNTIME_HOST") or "127.0.0.1",
+        "port": int(os.environ.get("APP_RUNTIME_PORT") or "8000"),
+    }
+
+
+def _schedule_current_process_shutdown(delay_seconds: float) -> None:
+    def _worker() -> None:
+        time.sleep(max(0.0, float(delay_seconds)))
+        try:
+            os.kill(os.getpid(), signal.SIGTERM)
+        except Exception:
+            os._exit(0)
+
+    threading.Thread(target=_worker, name="runtime_shutdown", daemon=True).start()
 
 
 def _read_metrics_file(path_str: str, *, limit: int) -> tuple[list[dict[str, Any]], list[str]]:
@@ -98,8 +126,11 @@ def ops_jobs_api(
 
 @router.get("/api/ops/runtime")
 def ops_runtime_api(_admin: str = Depends(require_admin)):
-    runtime = read_runtime_state()
+    docker_mode = is_docker_compose_runtime()
+    runtime = None if docker_mode else read_runtime_state()
     stop_request = read_runtime_stop_request()
+    if docker_mode:
+        runtime = _docker_runtime_payload()
     return {
         "ok": True,
         "runtime": runtime,
@@ -113,8 +144,9 @@ def ops_runtime_shutdown_api(
     body: dict[str, Any] | None = Body(default=None),
     _admin: str = Depends(require_admin),
 ):
-    runtime = read_runtime_state()
-    if runtime is None:
+    docker_mode = is_docker_compose_runtime()
+    runtime = None if docker_mode else read_runtime_state()
+    if runtime is None and not docker_mode:
         raise HTTPException(status_code=409, detail="No supervised local runtime is registered")
 
     payload = body or {}
@@ -130,13 +162,17 @@ def ops_runtime_shutdown_api(
         requested_by="api",
         delay_seconds=delay_seconds,
     )
+    runtime_payload = runtime
+    if docker_mode:
+        runtime_payload = _docker_runtime_payload()
+        _schedule_current_process_shutdown(delay_seconds + 0.5)
     return {
         "ok": True,
         "message": "Shutdown requested",
         "runtime": {
-            "mode": runtime.get("mode"),
-            "host": runtime.get("host"),
-            "port": runtime.get("port"),
+            "mode": runtime_payload.get("mode"),
+            "host": runtime_payload.get("host"),
+            "port": runtime_payload.get("port"),
         },
         "stop_request": stop_request,
     }

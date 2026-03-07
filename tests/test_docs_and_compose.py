@@ -21,6 +21,7 @@ def test_root_compose_exists():
     assert "python -m alembic upgrade head" in content
     assert "LLM_HOT_RELOAD_USE_REDIS" in content
     assert '"6379:6379"' in content
+    assert "APP_RUNTIME_MODE: docker_compose" in content
     assert "HTTP_PROXY: ${HTTP_PROXY:-}" in content
     assert "HTTPS_PROXY: ${HTTPS_PROXY:-}" in content
     assert "scripts/init_db.py" not in content

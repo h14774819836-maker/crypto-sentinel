@@ -13,6 +13,12 @@ from app.db.guards import ensure_db_backend_allowed
 from app.db.session import SessionLocal
 from app.logging import logger, setup_logging
 from app.providers.binance_provider import BinanceProvider
+from app.runtime_control import (
+    clear_runtime_stop_request,
+    is_docker_compose_runtime,
+    read_runtime_stop_request,
+    should_honor_runtime_stop_request,
+)
 from app.scheduler.jobs import account_user_stream_job, startup_backfill_job, supervised_job, ws_consumer_job
 from app.scheduler.runtime import WorkerRuntime
 from app.scheduler.scheduler import build_scheduler
@@ -27,6 +33,9 @@ from app.worker.runtime_guard import (
 
 async def run_worker() -> None:
     setup_logging()
+
+    if is_docker_compose_runtime():
+        clear_runtime_stop_request()
 
     settings = get_settings()
     ensure_db_backend_allowed(settings)
@@ -168,6 +177,14 @@ async def run_worker() -> None:
         logger.info("Worker started role=%s worker_id=%s watchlist=%s", worker_role, settings.worker_id, settings.watchlist_symbols)
         try:
             while True:
+                stop_request = read_runtime_stop_request()
+                if should_honor_runtime_stop_request(stop_request):
+                    logger.warning(
+                        "Shutdown requested via runtime control requested_by=%s reason=%s",
+                        stop_request.get("requested_by"),
+                        stop_request.get("reason"),
+                    )
+                    break
                 if llm_reload_task is not None and llm_reload_task.done():
                     task_exc = llm_reload_task.exception()
                     if task_exc is not None:

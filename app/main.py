@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -9,6 +8,7 @@ from fastapi.staticfiles import StaticFiles
 from app.config import get_settings
 from app.db.guards import ensure_db_backend_allowed
 from app.logging import setup_logging
+from app.runtime_control import clear_runtime_state, is_docker_compose_runtime
 from app.web.api_telegram import router as telegram_router
 from app.web.router import router as web_router
 
@@ -17,6 +17,8 @@ from app.web.router import router as web_router
 async def lifespan(_: FastAPI):
     setup_logging()
     ensure_db_backend_allowed(get_settings())
+    if is_docker_compose_runtime():
+        clear_runtime_state()
     yield
 
 

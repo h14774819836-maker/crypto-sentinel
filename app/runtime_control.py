@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -10,6 +11,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = REPO_ROOT / "data"
 RUNTIME_STATE_PATH = DATA_DIR / "runtime_state.json"
 RUNTIME_STOP_SIGNAL_PATH = DATA_DIR / "runtime_stop_signal.json"
+DOCKER_COMPOSE_RUNTIME_MODE = "docker_compose"
 
 
 def _utc_now_iso() -> str:
@@ -111,3 +113,11 @@ def extract_runtime_pids(payload: dict[str, Any] | None) -> list[int]:
             if isinstance(child_pid, int) and child_pid > 0 and child_pid not in pids:
                 pids.append(child_pid)
     return pids
+
+
+def runtime_mode_from_env() -> str:
+    return str(os.environ.get("APP_RUNTIME_MODE", "") or "").strip().lower()
+
+
+def is_docker_compose_runtime() -> bool:
+    return runtime_mode_from_env() == DOCKER_COMPOSE_RUNTIME_MODE
