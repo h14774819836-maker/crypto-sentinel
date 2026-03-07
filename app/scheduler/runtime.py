@@ -41,4 +41,9 @@ class WorkerRuntime:
     job_metrics: list[dict[str, Any]] = field(default_factory=list)
     registered_job_ids: list[str] = field(default_factory=list)
     account_monitor_failed: bool = False
+    account_monitor_failure_count: int = 0
+    account_monitor_next_retry_at: datetime | None = None
+    account_monitor_last_error: str = ""
+    account_monitor_last_error_status: int | None = None
+    account_monitor_last_error_code: int | None = None
     account_user_stream_failed: bool = False

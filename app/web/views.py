@@ -17,6 +17,7 @@ from sqlalchemy import select, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session
 
+from app.asr_runtime import inspect_asr_runtime
 from app.config import LLMConfig, get_settings
 from app.ai.market_context_builder import build_market_analysis_context
 from app.ai.llm_runtime_reload import (
@@ -1162,6 +1163,7 @@ def health_api():
         "worker_last_seen": worker_last_seen,
         "server_time": datetime.now(timezone.utc),
         "db_probe_ms": elapsed_ms,
+        "asr": inspect_asr_runtime(settings),
         "ops": {
             "job_metrics_count": len(recent_jobs),
             "last_job": last_job,

@@ -30,6 +30,16 @@ YOUTUBE_RADAR_MAX_CHARS = 2600
 ALERTS_DIGEST_MAX_CHARS = 1000
 INTEL_DIGEST_MAX_CHARS = 1800
 ACCOUNT_SNAPSHOT_MAX_CHARS = 1000
+ALERT_AI_MAX_AGE_HOURS = 24.0
+ALERT_AI_MIN_SCORE = 0.9
+ACCOUNT_SNAPSHOT_TTL_HOURS = 2.0
+ALERT_SEVERITY_WEIGHTS = {
+    "critical": 4.0,
+    "high": 3.0,
+    "medium": 2.0,
+    "low": 1.0,
+    "info": 1.0,
+}
 
 
 def build_market_analysis_context(
@@ -53,6 +63,7 @@ def build_market_analysis_context(
         now = now.replace(tzinfo=timezone.utc)
 
     expected_tfs = expected_timeframes or EXPECTED_TFS_DEFAULT
+    analysis_window = build_analysis_window(snapshots, now=now)
     derived_by_tf: dict[str, Any] = {}
     for tf in expected_tfs:
         snap = snapshots.get(tf)
@@ -61,7 +72,8 @@ def build_market_analysis_context(
         derived_by_tf[tf] = _derive_tf_features(snap)
 
     cross_tf_summary = _build_cross_tf_summary(derived_by_tf)
-    alerts_digest = _build_alerts_digest(recent_alerts, now=now)
+    alerts_digest_full = _build_alerts_digest(recent_alerts, now=now, for_ai=False)
+    alerts_digest = _build_alerts_digest(recent_alerts, now=now, for_ai=True)
     funding_deltas = _build_funding_deltas(funding_current, funding_history, now=now)
     youtube_radar = _build_youtube_radar(
         symbol=symbol,
@@ -69,8 +81,19 @@ def build_market_analysis_context(
         youtube_insights=youtube_insights or [],
         now=now,
     )
-    account_snapshot_payload = _compact_account_snapshot(account_snapshot or {})
+    account_snapshot_full = _compact_account_snapshot(account_snapshot or {})
+    account_snapshot_payload = sanitize_account_snapshot_for_ai(account_snapshot or {}, now=now)
     input_budget_meta = _apply_context_clipping(alerts_digest, youtube_radar, intel_digest or {}, account_snapshot_payload)
+    input_budget_meta["alerts_digest_chars_before_filter"] = _dumps_len(alerts_digest_full)
+    input_budget_meta["alerts_digest_chars_after_filter"] = _dumps_len(alerts_digest)
+    input_budget_meta["account_snapshot_chars_before_filter"] = _dumps_len(account_snapshot_full)
+    input_budget_meta["account_snapshot_chars_after_filter"] = _dumps_len(account_snapshot_payload)
+    dropped_context_blocks = list(input_budget_meta.get("dropped_context_blocks") or [])
+    if _is_alerts_digest_empty(alerts_digest):
+        dropped_context_blocks.append("alerts_digest")
+    if not account_snapshot_payload:
+        dropped_context_blocks.append("account_snapshot")
+    input_budget_meta["dropped_context_blocks"] = sorted(set(dropped_context_blocks))
     data_quality = _build_data_quality(
         snapshots=snapshots,
         funding_current=funding_current,
@@ -96,9 +119,14 @@ def build_market_analysis_context(
             data_quality=data_quality,
             funding_deltas=funding_deltas,
             brief=brief,
+            analysis_window=analysis_window,
         )
 
     return {
+        "analysis_time_utc": analysis_window.get("analysis_time_utc"),
+        "data_asof": analysis_window.get("data_asof") or {},
+        "decision_ts": analysis_window.get("decision_ts"),
+        "valid_until_utc": analysis_window.get("valid_until_utc"),
         "brief": brief,
         "alerts_digest": alerts_digest,
         "youtube_radar": youtube_radar,
@@ -152,6 +180,10 @@ def to_minimal_context(full_context: dict[str, Any], *, symbol: str, snapshots: 
         "tradeable_gate": brief.get("tradeable_gate") or {"tradeable": True, "reasons": []},
     }
     return {
+        "analysis_time_utc": full_context.get("analysis_time_utc"),
+        "data_asof": full_context.get("data_asof") or {},
+        "decision_ts": full_context.get("decision_ts"),
+        "valid_until_utc": full_context.get("valid_until_utc"),
         "brief": brief_minimal,
         "alerts_digest": {"count_1h": 0, "count_4h": 0, "top_events": [], "dominant_types": [], "alerts_burst": False},
         "youtube_radar": {"available": False, "stale": True},
@@ -175,6 +207,7 @@ def _build_minimal_context(
     data_quality: dict[str, Any],
     funding_deltas: dict[str, Any],
     brief: dict[str, Any],
+    analysis_window: dict[str, Any],
 ) -> dict[str, Any]:
     """Build minimal context: only 1m/5m snapshots, funding, data_quality, tradeable_gate."""
     minimal_tfs = ["5m", "1m"]
@@ -188,6 +221,10 @@ def _build_minimal_context(
         "tradeable_gate": brief.get("tradeable_gate") or {"tradeable": True, "reasons": []},
     }
     return {
+        "analysis_time_utc": analysis_window.get("analysis_time_utc"),
+        "data_asof": analysis_window.get("data_asof") or {},
+        "decision_ts": analysis_window.get("decision_ts"),
+        "valid_until_utc": analysis_window.get("valid_until_utc"),
         "brief": brief_minimal,
         "alerts_digest": {"count_1h": 0, "count_4h": 0, "top_events": [], "dominant_types": [], "alerts_burst": False},
         "youtube_radar": {"available": False, "stale": True},
@@ -347,7 +384,88 @@ def _build_cross_tf_summary(derived_by_tf: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _build_alerts_digest(recent_alerts: list[dict[str, Any]], *, now: datetime) -> dict[str, Any]:
+def build_analysis_window(
+    snapshots: dict[str, dict[str, Any]] | None,
+    *,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    if now is None:
+        now = datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    data_asof = _build_data_asof_by_tf(snapshots or {})
+    now_ts = int(now.timestamp())
+    decision_ts = max(data_asof.values()) if data_asof else now_ts
+    valid_until_utc = max(decision_ts, now_ts) + 3600
+    return {
+        "analysis_time_utc": now.isoformat(),
+        "data_asof": data_asof,
+        "decision_ts": int(decision_ts),
+        "valid_until_utc": int(valid_until_utc),
+    }
+
+
+def sanitize_account_snapshot_for_ai(
+    account_snapshot: dict[str, Any] | None,
+    *,
+    now: datetime | None = None,
+    stale_after_hours: float = ACCOUNT_SNAPSHOT_TTL_HOURS,
+    liq_distance_risk_threshold_pct: float = 5.0,
+) -> dict[str, Any]:
+    compact = _compact_account_snapshot(account_snapshot or {})
+    if not compact:
+        return {}
+    if now is None:
+        now = datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+
+    as_of_dt = _coerce_datetime(compact.get("as_of_utc"))
+    age_hours = None
+    if as_of_dt is not None:
+        age_hours = max(0.0, (now - as_of_dt).total_seconds() / 3600.0)
+    stale = as_of_dt is None or age_hours is None or age_hours > max(0.0, float(stale_after_hours))
+
+    futures = compact.get("futures") if isinstance(compact.get("futures"), dict) else {}
+    margin = compact.get("margin") if isinstance(compact.get("margin"), dict) else {}
+    risk_flags = compact.get("risk_flags") if isinstance(compact.get("risk_flags"), dict) else {}
+    position_amt = _to_float(futures.get("position_amt"))
+    liq_distance_pct = _to_float(futures.get("liq_distance_pct"))
+    has_position = position_amt is not None and abs(position_amt) > 0
+    has_risk = bool(risk_flags.get("available_balance_low")) or bool(risk_flags.get("margin_near_call"))
+    if liq_distance_pct is not None and liq_distance_pct <= max(0.0, float(liq_distance_risk_threshold_pct)):
+        has_risk = True
+
+    if not stale:
+        return compact
+    if not (has_position or has_risk):
+        return {}
+
+    return {
+        "watch_symbol": compact.get("watch_symbol"),
+        "as_of_utc": compact.get("as_of_utc"),
+        "stale": True,
+        "age_hours": round(age_hours, 2) if isinstance(age_hours, (int, float)) else None,
+        "futures": {
+            "available_balance": _to_float(futures.get("available_balance")),
+            "total_margin_balance": _to_float(futures.get("total_margin_balance")),
+            "position_amt": position_amt,
+            "mark_price": _to_float(futures.get("mark_price")),
+            "liquidation_price": _to_float(futures.get("liquidation_price")),
+            "liq_distance_pct": liq_distance_pct,
+        },
+        "margin": {
+            "margin_level": _to_float(margin.get("margin_level")),
+            "margin_call_bar": _to_float(margin.get("margin_call_bar")),
+        },
+        "risk_flags": {
+            "available_balance_low": bool(risk_flags.get("available_balance_low", False)),
+            "margin_near_call": bool(risk_flags.get("margin_near_call", False)),
+        },
+    }
+
+
+def _build_alerts_digest(recent_alerts: list[dict[str, Any]], *, now: datetime, for_ai: bool) -> dict[str, Any]:
     normalized: list[dict[str, Any]] = []
     for alert in recent_alerts or []:
         ts = _coerce_datetime(alert.get("ts"))
@@ -364,15 +482,16 @@ def _build_alerts_digest(recent_alerts: list[dict[str, Any]], *, now: datetime) 
     count_15m = 0
     type_counts: dict[str, int] = {}
     top_events: list[dict[str, Any]] = []
-    severity_rank = {"critical": 4, "high": 3, "medium": 2, "low": 1}
 
     for a in normalized:
         ts = a.get("ts")
         age_min = None
+        age_hours = None
         if isinstance(ts, datetime):
             if ts.tzinfo is None:
                 ts = ts.replace(tzinfo=timezone.utc)
             age_min = max(0, int((now - ts).total_seconds() // 60))
+            age_hours = max(0.0, (now - ts).total_seconds() / 3600.0)
             if age_min <= 60:
                 count_1h += 1
             if age_min <= 240:
@@ -380,17 +499,29 @@ def _build_alerts_digest(recent_alerts: list[dict[str, Any]], *, now: datetime) 
             if age_min <= 15:
                 count_15m += 1
         a_type = a["alert_type"] or "UNKNOWN"
+        severity_norm = str(a["severity"] or "unknown").lower()
+        score = None
+        if age_hours is not None:
+            score = round(
+                ALERT_SEVERITY_WEIGHTS.get(severity_norm, 1.0) / math.log2(age_hours + 2.0),
+                3,
+            )
+        if for_ai and age_hours is not None and age_hours > ALERT_AI_MAX_AGE_HOURS:
+            continue
+        if for_ai and isinstance(score, (int, float)) and score < ALERT_AI_MIN_SCORE:
+            continue
         type_counts[a_type] = type_counts.get(a_type, 0) + 1
         top_events.append({
             "alert_type": a_type,
             "severity": a["severity"] or "unknown",
             "reason_short": _truncate(a["reason"], 90),
             "age_min": age_min,
+            "score": score,
         })
 
     top_events.sort(
         key=lambda x: (
-            -(severity_rank.get(str(x.get("severity") or "").lower(), 0)),
+            -(float(x.get("score") or 0.0)),
             x.get("age_min") if isinstance(x.get("age_min"), int) else 10**9,
         )
     )
@@ -576,6 +707,7 @@ def _apply_context_clipping(
     account_snapshot: dict[str, Any],
 ) -> dict[str, Any]:
     clip_steps: list[str] = []
+    dropped_context_blocks: list[str] = []
 
     if isinstance(alerts_digest.get("top_events"), list):
         alerts_digest["top_events"] = alerts_digest["top_events"][:3]
@@ -598,6 +730,8 @@ def _apply_context_clipping(
         alerts_digest["top_events"] = (alerts_digest.get("top_events") or [])[:2]
         clip_steps.append("alerts:top_events_2")
         alerts_chars = _dumps_len(alerts_digest)
+    if _is_alerts_digest_empty(alerts_digest):
+        dropped_context_blocks.append("alerts_digest")
 
     before = _dumps_len(youtube_radar)
     after = before
@@ -678,6 +812,8 @@ def _apply_context_clipping(
         }
         clip_steps.append("account:core_only")
         account_after = _dumps_len(account_snapshot)
+    if not account_snapshot:
+        dropped_context_blocks.append("account_snapshot")
 
     return {
         "youtube_radar_chars_before_clip": before,
@@ -688,6 +824,9 @@ def _apply_context_clipping(
         "account_snapshot_chars_after_clip": account_after,
         "clip_steps_applied": clip_steps,
         "alerts_digest_chars": alerts_chars,
+        "alerts_digest_chars_before_clip": alerts_chars,
+        "alerts_digest_chars_after_clip": alerts_chars,
+        "dropped_context_blocks": dropped_context_blocks,
     }
 
 
@@ -723,6 +862,29 @@ def _compact_account_snapshot(account_snapshot: dict[str, Any]) -> dict[str, Any
             "margin_near_call": bool(risk_flags.get("margin_near_call", False)),
         },
     }
+
+
+def _build_data_asof_by_tf(snapshots: dict[str, Any]) -> dict[str, int]:
+    out: dict[str, int] = {}
+    for tf, snap in (snapshots or {}).items():
+        latest = (snap or {}).get("latest") or {}
+        ts = _coerce_datetime(latest.get("ts"))
+        if ts is None:
+            continue
+        out[str(tf)] = int(ts.timestamp())
+    return out
+
+
+def _is_alerts_digest_empty(alerts_digest: dict[str, Any]) -> bool:
+    if not isinstance(alerts_digest, dict):
+        return True
+    return not any([
+        bool(alerts_digest.get("count_1h")),
+        bool(alerts_digest.get("count_4h")),
+        bool(alerts_digest.get("alerts_burst")),
+        bool(alerts_digest.get("dominant_types")),
+        bool(alerts_digest.get("top_events")),
+    ])
 
 
 def _build_data_quality(

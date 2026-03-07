@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
+import httpx
+
 from app.config import Settings
 from app.providers.binance_provider import BinanceProvider
 from app.signals.anomaly import evaluate_anomalies
@@ -88,3 +90,23 @@ def test_volatility_rule_warmup_and_fallback():
         settings=settings,
     )
     assert any(a.alert_type == "VOLATILITY_SURGE" for a in fallback_alerts)
+
+
+def test_summarize_request_failure_includes_url_status_and_response_text():
+    provider = BinanceProvider(Settings(_env_file=None))
+    request = httpx.Request("GET", "https://fapi.binance.test/fapi/v1/openInterest?symbol=BTCUSDT")
+    response = httpx.Response(
+        503,
+        request=request,
+        text='{"code":-1003,"msg":"Too many requests"}',
+    )
+    exc = httpx.HTTPStatusError("503 Service Unavailable", request=request, response=response)
+
+    summary = provider._summarize_request_failure(exc, response=response)
+
+    assert summary["url"] == "https://fapi.binance.test/fapi/v1/openInterest?symbol=BTCUSDT"
+    assert summary["status"] == 503
+    assert summary["code"] == -1003
+    assert summary["msg"] == "Too many requests"
+    assert summary["exception"] == "HTTPStatusError"
+    assert "Too many requests" in summary["response_text"]

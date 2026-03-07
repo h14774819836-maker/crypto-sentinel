@@ -18,11 +18,22 @@ def scanner_gate_passes(
     *,
     two_stage_enabled: bool = True,
     scan_threshold: int = 60,
+    skip_on_poor_data: bool = True,
+    skip_on_non_tradeable: bool = True,
 ) -> tuple[bool, str | None]:
-    """Return (passes, skip_reason). Rejects when 1h/4h alignment too low."""
+    """Return (passes, skip_reason) for the pre-LLM gate."""
+    data_quality = context.get("data_quality") or {}
+    if skip_on_poor_data and str(data_quality.get("overall") or "").upper() == "POOR":
+        return False, "poor_data"
+
+    brief = context.get("brief") or {}
+    tradeable_gate = brief.get("tradeable_gate") or {}
+    if skip_on_non_tradeable and not bool(tradeable_gate.get("tradeable", True)):
+        return False, "not_tradeable"
+
     if not two_stage_enabled:
         return True, None
-    brief = context.get("brief") or {}
+
     cross = brief.get("cross_tf_summary") or {}
     alignment = int(cross.get("alignment_score", 0) or 0)
     if alignment < scan_threshold:
@@ -35,7 +46,9 @@ def build_scanner_hold_signal(
     context: dict[str, Any],
     skip_reason: str,
 ) -> AiTradeSignal:
-    """Build synthetic HOLD signal when scanner gate rejects."""
+    """Build synthetic HOLD signal when the pre-LLM gate rejects."""
+    gate_label = "Scanner Gate" if str(skip_reason or "").startswith("alignment_low_") else "Pre-LLM Gate"
+    reasoning = f"{gate_label} failed ({skip_reason}); forced HOLD."
     analysis_json: dict[str, Any] = {
         "market_regime": "uncertain",
         "signal": {
@@ -45,7 +58,7 @@ def build_scanner_hold_signal(
             "take_profit": None,
             "stop_loss": None,
             "confidence": 35,
-            "reasoning": f"Scanner Gate 未通过（{skip_reason}），直接 HOLD。",
+            "reasoning": reasoning,
         },
         "trade_plan": {
             "market_type": "futures",
@@ -65,7 +78,7 @@ def build_scanner_hold_signal(
         "meta": {
             "base_timeframe": "1m",
             "confidence": 0.35,
-            "reason_brief": f"Scanner Gate: {skip_reason}",
+            "reason_brief": f"{gate_label}: {skip_reason}",
             "regime_calc_mode": "online",
         },
         "evidence": [],
@@ -85,7 +98,7 @@ def build_scanner_hold_signal(
         take_profit=None,
         stop_loss=None,
         confidence=35,
-        reasoning=f"Scanner Gate 未通过（{skip_reason}），直接 HOLD。",
+        reasoning=reasoning,
         model_requested=None,
         model_name="scanner_gate",
         market_regime="uncertain",

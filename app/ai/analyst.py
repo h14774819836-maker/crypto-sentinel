@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
 
 from app.ai.provider import LLMProvider, LLMRateLimitError, LLMTimeoutError
-from app.ai.prompts import SYSTEM_PROMPT, build_analysis_prompt
+from app.ai.prompts import SYSTEM_PROMPT, build_analysis_prompt_details
 from app.config import LLMConfig, Settings
 from app.ai.grounding.engine import DEFAULT_GROUNDING_MODE, GroundingEngine, build_facts_index, finding_to_dict
 from app.logging import logger, market_ai_logger
@@ -73,12 +73,13 @@ class MarketAnalyst:
         )
         include_external_views = not external_views_on_low_conf
 
-        user_prompt = build_analysis_prompt(
+        user_prompt, prompt_meta = build_analysis_prompt_details(
             symbol=symbol,
             snapshots=snapshots,
             context=context,
             include_external_views=include_external_views,
         )
+        prompt_chars_before_filter = self._estimate_prompt_chars_before_filter(user_prompt, context, prompt_meta)
         logger.info(
             "========== 发送给 AI 的 Prompt 开始 (%s / %s) ==========\n%s\n========== 发送给 AI 的 Prompt 结束 ==========",
             self.model,
@@ -93,6 +94,10 @@ class MarketAnalyst:
             use_reasoning=self.config.use_reasoning,
             snapshot_timeframes=sorted(list((snapshots or {}).keys())),
             prompt_chars=len(user_prompt),
+            prompt_chars_before_filter=prompt_chars_before_filter,
+            prompt_chars_after_filter=len(user_prompt),
+            external_views_block_included=bool(prompt_meta.get("external_views_block_included")),
+            dropped_context_blocks=list(prompt_meta.get("dropped_context_blocks") or []),
             prompt_excerpt=_clip_text(user_prompt, self._prompt_log_max_chars),
             system_prompt_excerpt=_clip_text(SYSTEM_PROMPT, min(3000, self._prompt_log_max_chars)),
         )
@@ -131,6 +136,14 @@ class MarketAnalyst:
             attempt = int(attempt_spec["attempt"])
             req_model = str(attempt_spec["model"] or self.model)
             attempt_reasoning = bool(attempt_spec["use_reasoning"])
+            if attempt > 1:
+                self._log_market_event(
+                    "model_retry_attempt_started",
+                    symbol=symbol,
+                    attempt=attempt,
+                    requested_model=req_model,
+                    reasoning=attempt_reasoning,
+                )
             self._log_market_event(
                 "attempt_started",
                 symbol=symbol,
@@ -160,6 +173,17 @@ class MarketAnalyst:
                 status = "429"
                 error_summary = str(exc)
                 logger.error("LLM RateLimit error (attempt=%s, model=%s): %s", attempt, req_model, exc)
+                if attempt > 1:
+                    self._log_market_event(
+                        "model_retry_attempt_finished",
+                        symbol=symbol,
+                        attempt=attempt,
+                        requested_model=req_model,
+                        actual_model=req_model,
+                        status="error",
+                        error_type="LLMRateLimitError",
+                        error=str(exc),
+                    )
                 self._log_market_event(
                     "upstream_error",
                     symbol=symbol,
@@ -186,6 +210,17 @@ class MarketAnalyst:
                 status = "timeout"
                 error_summary = str(exc)
                 logger.error("LLM Timeout error (attempt=%s, model=%s): %s", attempt, req_model, exc)
+                if attempt > 1:
+                    self._log_market_event(
+                        "model_retry_attempt_finished",
+                        symbol=symbol,
+                        attempt=attempt,
+                        requested_model=req_model,
+                        actual_model=req_model,
+                        status="error",
+                        error_type="LLMTimeoutError",
+                        error=str(exc),
+                    )
                 self._log_market_event(
                     "upstream_error",
                     symbol=symbol,
@@ -212,6 +247,17 @@ class MarketAnalyst:
                 status = "error"
                 error_summary = str(exc)
                 logger.error("LLM API call failed (attempt=%s, model=%s): %s", attempt, req_model, exc)
+                if attempt > 1:
+                    self._log_market_event(
+                        "model_retry_attempt_finished",
+                        symbol=symbol,
+                        attempt=attempt,
+                        requested_model=req_model,
+                        actual_model=req_model,
+                        status="error",
+                        error_type=type(exc).__name__,
+                        error=str(exc),
+                    )
                 self._log_market_event(
                     "upstream_error",
                     symbol=symbol,
@@ -243,9 +289,6 @@ class MarketAnalyst:
             completion_tokens = response.get("completion_tokens")
             actual_model = response.get("model", req_model)
 
-            if reasoning_content:
-                logger.info("LLM reasoning (CoT): %s", reasoning_content[:800])
-
             logger.info(
                 "LLM response received (symbol=%s, attempt=%s, model=%s, prompt_tokens=%s, completion_tokens=%s)",
                 symbol,
@@ -265,12 +308,22 @@ class MarketAnalyst:
                 completion_tokens=completion_tokens,
                 content_chars=len(str(content or "")),
                 content_excerpt=_clip_text(str(content or ""), self._response_log_max_chars),
-                reasoning_excerpt=_clip_text(str(reasoning_content or ""), min(3000, self._response_log_max_chars)),
+                reasoning_chars=len(str(reasoning_content or "")),
             )
 
             parsed, failure = self._parse_response_strict(content, symbol=symbol, snapshots=snapshots, context=context)
             if parsed:
                 final_signals = parsed
+                if attempt > 1:
+                    self._log_market_event(
+                        "model_retry_attempt_finished",
+                        symbol=symbol,
+                        attempt=attempt,
+                        requested_model=req_model,
+                        actual_model=actual_model,
+                        status="ok",
+                        signal_count=len(parsed),
+                    )
                 self._log_market_event(
                     "attempt_succeeded",
                     symbol=symbol,
@@ -313,6 +366,17 @@ class MarketAnalyst:
                 errors=errors[:8],
                 raw_excerpt=_clip_text(str(failure.get("raw_response_excerpt") or ""), 2000),
             )
+            if attempt > 1:
+                self._log_market_event(
+                    "model_retry_attempt_finished",
+                    symbol=symbol,
+                    attempt=attempt,
+                    requested_model=req_model,
+                    actual_model=actual_model,
+                    status="failed",
+                    phase=phase,
+                    errors=errors[:8],
+                )
 
             if attempt == 1 and phase in retryable_failure_phases:
                 logger.info("Scheduling retry for %s (failed phase: %s)", symbol, phase)
@@ -337,15 +401,34 @@ class MarketAnalyst:
                 sig0 = final_signals[0]
                 conf = sig0.confidence
                 direction = str(sig0.direction or "").upper()
-                has_ext = bool((context or {}).get("youtube_radar", {}).get("available")) or bool(
-                    (context or {}).get("intel_digest")
+                pass2_reason = self._pass2_skip_reason(
+                    signal=sig0,
+                    context=context,
+                    used_model_retry=len(model_attempts) > 1,
+                    scan_threshold=scan_threshold,
                 )
-                if has_ext and (conf < scan_threshold or direction == "HOLD"):
-                    pass2_prompt = build_analysis_prompt(
+                if pass2_reason is not None:
+                    self._log_market_event(
+                        "pass2_skipped",
+                        symbol=symbol,
+                        reason=pass2_reason,
+                        confidence_pass1=conf,
+                        direction_pass1=direction,
+                    )
+                else:
+                    pass2_prompt, pass2_prompt_meta = build_analysis_prompt_details(
                         symbol=symbol,
                         snapshots=snapshots,
                         context=context,
                         include_external_views=True,
+                    )
+                    self._log_market_event(
+                        "pass2_refinement_started",
+                        symbol=symbol,
+                        confidence_pass1=conf,
+                        direction_pass1=direction,
+                        external_views_block_included=bool(pass2_prompt_meta.get("external_views_block_included")),
+                        dropped_context_blocks=list(pass2_prompt_meta.get("dropped_context_blocks") or []),
                     )
                     pass2_messages = [
                         {"role": "system", "content": SYSTEM_PROMPT},
@@ -375,12 +458,29 @@ class MarketAnalyst:
                             prompt_tokens = (prompt_tokens or 0) + (pass2_resp.get("prompt_tokens") or 0)
                             completion_tokens = (completion_tokens or 0) + (pass2_resp.get("completion_tokens") or 0)
                             self._log_market_event(
-                                "pass2_with_external_views",
+                                "pass2_refinement_finished",
                                 symbol=symbol,
+                                status="ok",
+                                confidence_pass1=conf,
+                                direction_pass1=direction,
+                            )
+                        else:
+                            self._log_market_event(
+                                "pass2_refinement_finished",
+                                symbol=symbol,
+                                status="invalid_response",
                                 confidence_pass1=conf,
                                 direction_pass1=direction,
                             )
                     except Exception as exc:
+                        self._log_market_event(
+                            "pass2_refinement_finished",
+                            symbol=symbol,
+                            status="error",
+                            confidence_pass1=conf,
+                            direction_pass1=direction,
+                            error=str(exc),
+                        )
                         logger.warning("Pass2 with external views failed for %s: %s", symbol, exc)
         else:
             status = "error"
@@ -449,6 +549,74 @@ class MarketAnalyst:
         if provider == "openrouter":
             return "deepseek/deepseek-chat"
         return model
+
+    def _estimate_prompt_chars_before_filter(
+        self,
+        prompt: str,
+        context: dict[str, Any] | None,
+        prompt_meta: dict[str, Any] | None,
+    ) -> int:
+        meta = (context or {}).get("input_budget_meta") if isinstance(context, dict) else {}
+        meta = meta if isinstance(meta, dict) else {}
+        external_before = int((prompt_meta or {}).get("external_views_chars_before_filter") or 0)
+        external_after = int((prompt_meta or {}).get("external_views_chars_after_filter") or 0)
+        extra = 0
+        extra += max(
+            0,
+            int(meta.get("alerts_digest_chars_before_filter") or 0)
+            - int(meta.get("alerts_digest_chars_after_filter") or 0),
+        )
+        extra += max(
+            0,
+            int(meta.get("account_snapshot_chars_before_filter") or 0)
+            - int(meta.get("account_snapshot_chars_after_filter") or 0),
+        )
+        extra += max(0, external_before - external_after)
+        return len(prompt) + extra
+
+    def _pass2_skip_reason(
+        self,
+        *,
+        signal: AiTradeSignal,
+        context: dict[str, Any] | None,
+        used_model_retry: bool,
+        scan_threshold: int,
+    ) -> str | None:
+        confidence = int(signal.confidence or 0)
+        direction = str(signal.direction or "").upper()
+        if used_model_retry:
+            return "already_used_model_retry"
+        if confidence >= int(scan_threshold or 0) and direction != "HOLD":
+            return "pass1_good_enough"
+        if not self._has_fresh_external_views(context):
+            return "no_fresh_external_views"
+        validation = (signal.analysis_json or {}).get("validation") if isinstance(signal.analysis_json, dict) else {}
+        validation = validation if isinstance(validation, dict) else {}
+        grounding = validation.get("grounding") if isinstance(validation.get("grounding"), dict) else {}
+        hard_codes = {
+            str(code or "").upper()
+            for code in (grounding.get("non_blocking_hard_codes") or [])
+        }
+        if {"CROSS_FIELD_RR_LOW", "CROSS_FIELD_SL_ATR_EXTREME"} & hard_codes:
+            return "non_repairable_trade_quality_failure"
+        if str(validation.get("status") or "").lower() == "downgraded":
+            return "quality_downgraded_by_backend"
+        return None
+
+    def _has_fresh_external_views(self, context: dict[str, Any] | None) -> bool:
+        if not isinstance(context, dict):
+            return False
+        youtube = context.get("youtube_radar")
+        if isinstance(youtube, dict) and youtube.get("available") and not youtube.get("stale", True):
+            return True
+        intel = context.get("intel_digest")
+        if not isinstance(intel, dict) or not intel:
+            return False
+        generated_at = intel.get("generated_at")
+        generated_dt = _coerce_datetime(generated_at)
+        if generated_dt is None:
+            return False
+        return (datetime.now(timezone.utc) - generated_dt).total_seconds() <= 6 * 3600
 
     def _build_failure_event(
         self,
@@ -1380,6 +1548,23 @@ def _safe_float(value: Any) -> float | None:
         return None
 
 
+def _coerce_datetime(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    if isinstance(value, str):
+        try:
+            text = value.strip()
+            if text.endswith("Z"):
+                text = text[:-1] + "+00:00"
+            dt = datetime.fromisoformat(text)
+            return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+        except Exception:
+            return None
+    return None
+
+
 def _clip_text(text: str, max_chars: int) -> str:
     if not isinstance(text, str):
         text = str(text)
@@ -1445,12 +1630,17 @@ def attach_context_digest_to_analysis_json(
     input_budget_meta = context.get("input_budget_meta")
     if isinstance(input_budget_meta, dict):
         context_digest["input_budget_meta"] = {
+            "alerts_digest_chars_before_filter": input_budget_meta.get("alerts_digest_chars_before_filter"),
+            "alerts_digest_chars_after_filter": input_budget_meta.get("alerts_digest_chars_after_filter"),
             "youtube_radar_chars_before_clip": input_budget_meta.get("youtube_radar_chars_before_clip"),
             "youtube_radar_chars_after_clip": input_budget_meta.get("youtube_radar_chars_after_clip"),
             "intel_digest_chars_before_clip": input_budget_meta.get("intel_digest_chars_before_clip"),
             "intel_digest_chars_after_clip": input_budget_meta.get("intel_digest_chars_after_clip"),
+            "account_snapshot_chars_before_filter": input_budget_meta.get("account_snapshot_chars_before_filter"),
+            "account_snapshot_chars_after_filter": input_budget_meta.get("account_snapshot_chars_after_filter"),
             "alerts_digest_chars": input_budget_meta.get("alerts_digest_chars"),
             "clip_steps_applied": list(input_budget_meta.get("clip_steps_applied") or [])[:8],
+            "dropped_context_blocks": list(input_budget_meta.get("dropped_context_blocks") or [])[:8],
         }
 
     tradeable_gate = (((context.get("brief") or {}) if isinstance(context.get("brief"), dict) else {}).get("tradeable_gate"))

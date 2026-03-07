@@ -481,7 +481,7 @@ async def _process_analyze_signal(
 ):
     from sqlalchemy import select
     from app.db.session import SessionLocal
-    from app.ai.market_context_builder import build_market_analysis_context
+    from app.ai.market_context_builder import build_market_analysis_context, sanitize_account_snapshot_for_ai
     from app.db.repository import (
         get_latest_market_metric,
         get_recent_market_metrics,
@@ -629,6 +629,10 @@ async def _process_analyze_signal(
                 ),
             },
         }
+        account_snapshot = sanitize_account_snapshot_for_ai(
+            account_snapshot,
+            liq_distance_risk_threshold_pct=float(settings.account_alert_liq_distance_pct),
+        )
         
     if not tf_data:
         await client._post("sendMessage", {"chat_id": chat_id, "text": f"❌ 数据库中没有 `{symbol}` 的行情数据，无法分析。", "parse_mode": "Markdown"})

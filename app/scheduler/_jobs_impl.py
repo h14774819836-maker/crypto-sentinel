@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import httpx
 import json
 import math
 import os
@@ -644,6 +645,13 @@ async def account_monitor_job(runtime: WorkerRuntime) -> dict[str, Any]:
         return {"rows_read": 0, "rows_written": 0}
     if runtime.account_monitor_failed:
         return {"rows_read": 0, "rows_written": 0}
+    next_retry_at = getattr(runtime, "account_monitor_next_retry_at", None)
+    if isinstance(next_retry_at, datetime):
+        now = datetime.now(timezone.utc)
+        if next_retry_at.tzinfo is None:
+            next_retry_at = next_retry_at.replace(tzinfo=timezone.utc)
+        if now < next_retry_at:
+            return {"rows_read": 0, "rows_written": 0}
     if not runtime.settings.binance_api_key or not runtime.settings.binance_api_secret:
         logger.warning("account_monitor_job skipped: BINANCE_API_KEY/SECRET not configured")
         runtime.account_monitor_failed = True
@@ -665,6 +673,12 @@ async def account_monitor_job(runtime: WorkerRuntime) -> dict[str, Any]:
 
         deleted_rows = _maybe_cleanup_account_snapshots(runtime, ts)
 
+        runtime.account_monitor_failure_count = 0
+        runtime.account_monitor_next_retry_at = None
+        runtime.account_monitor_last_error = ""
+        runtime.account_monitor_last_error_status = None
+        runtime.account_monitor_last_error_code = None
+
         return {
             "rows_read": 5,
             "rows_written": int(snap.get("rows_written") or 0),
@@ -673,7 +687,70 @@ async def account_monitor_job(runtime: WorkerRuntime) -> dict[str, Any]:
             "alerts_sent": alerts_sent,
         }
     except Exception as exc:
-        logger.warning("account_monitor_job failed, disabling further retries: %s", exc)
+        status: int | None = None
+        code: int | None = None
+        msg = ""
+        request_url = ""
+        exception_name = type(exc).__name__
+        response_excerpt = ""
+        retryable = False
+        try:
+            summary = runtime.provider._summarize_request_failure(exc)  # type: ignore[attr-defined]
+        except Exception:
+            summary = None
+        if isinstance(summary, dict):
+            status = summary.get("status")
+            code = summary.get("code")
+            msg = str(summary.get("msg") or "")
+            request_url = str(summary.get("url") or "")
+            exception_name = str(summary.get("exception") or exception_name)
+            response_excerpt = str(summary.get("response_text") or "")
+        if isinstance(exc, httpx.HTTPStatusError):
+            if code == -1021:
+                retryable = True
+            elif status is not None and runtime.provider._is_retryable_http_status(status):  # type: ignore[attr-defined]
+                retryable = True
+            elif status is not None and status >= 500:
+                retryable = True
+            elif code in {-2015, -2014, -1022, -1102, -1100}:
+                retryable = False
+            else:
+                retryable = False
+        elif isinstance(exc, httpx.RequestError):
+            retryable = True
+
+        runtime.account_monitor_last_error = f"{exception_name}: {msg or str(exc)}"[:500]
+        runtime.account_monitor_last_error_status = status
+        runtime.account_monitor_last_error_code = code
+
+        if retryable:
+            runtime.account_monitor_failure_count = int(getattr(runtime, "account_monitor_failure_count", 0) or 0) + 1
+            delay = min(900, 10 * (2 ** max(0, runtime.account_monitor_failure_count - 1)))
+            now = datetime.now(timezone.utc)
+            runtime.account_monitor_next_retry_at = now + timedelta(seconds=delay)
+            logger.warning(
+                "account_monitor_job transient failure; pause retries for %ss url=%s exception=%s status=%s code=%s msg=%s response=%s err=%s",
+                delay,
+                request_url,
+                exception_name,
+                status,
+                code,
+                (msg or "")[:120],
+                response_excerpt,
+                str(exc)[:200],
+            )
+            return {"rows_read": 0, "rows_written": 0}
+
+        logger.warning(
+            "account_monitor_job failed, disabling further retries url=%s exception=%s status=%s code=%s msg=%s response=%s err=%s",
+            request_url,
+            exception_name,
+            status,
+            code,
+            (msg or "")[:160],
+            response_excerpt,
+            str(exc)[:200],
+        )
         runtime.account_monitor_failed = True
         return {"rows_read": 0, "rows_written": 0}
 
@@ -2705,7 +2782,7 @@ async def ai_analysis_job(runtime: WorkerRuntime) -> None:
         prepare_context_and_snapshots,
         scanner_gate_passes,
     )
-    from app.ai.market_context_builder import build_market_analysis_context
+    from app.ai.market_context_builder import build_market_analysis_context, sanitize_account_snapshot_for_ai
     from app.ai.analyst import attach_context_digest_to_analysis_json
 
     two_stage_enabled = bool(getattr(settings, "ai_two_stage_enabled", True))
@@ -2755,6 +2832,10 @@ async def ai_analysis_job(runtime: WorkerRuntime) -> None:
                 futures_payload=futures_ctx_payload,
                 margin_payload=margin_ctx_payload,
                 min_balance_threshold=float(settings.account_alert_min_available_balance),
+            )
+            account_context_payload = sanitize_account_snapshot_for_ai(
+                account_context_payload,
+                liq_distance_risk_threshold_pct=float(settings.account_alert_liq_distance_pct),
             )
 
     for symbol, symbol_snapshots in multi_tf_snapshots.items():

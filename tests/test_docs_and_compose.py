@@ -22,9 +22,17 @@ def test_root_compose_exists():
     assert "LLM_HOT_RELOAD_USE_REDIS" in content
     assert '"6379:6379"' in content
     assert "APP_RUNTIME_MODE: docker_compose" in content
+    assert "ASR_DEVICE: ${ASR_DEVICE:-cpu}" in content
+    assert "ASR_COMPUTE_TYPE: ${ASR_COMPUTE_TYPE:-int8}" in content
     assert "HTTP_PROXY: ${HTTP_PROXY:-}" in content
     assert "HTTPS_PROXY: ${HTTPS_PROXY:-}" in content
+    assert content.count("DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://sentinel:sentinel@db:5432/crypto_sentinel}") == 4
     assert "scripts/init_db.py" not in content
+
+
+def test_dockerfile_installs_ffmpeg():
+    content = (PROJECT_ROOT / "docker" / "Dockerfile").read_text(encoding="utf-8")
+    assert "ffmpeg" in content
 
 
 def test_docker_subdir_compose_is_redirect_notice():
@@ -39,6 +47,7 @@ def test_docker_subdir_compose_is_redirect_notice():
 def test_readme_mentions_new_quick_start_paths():
     readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
     assert "docker compose up --build" in readme
+    assert "Docker Compose 会优先使用 `.env` 里的 `DATABASE_URL`" in readme
     assert "run.bat" in readme
     assert "run.ps1" in readme
     assert "127.0.0.1" in readme
@@ -47,6 +56,7 @@ def test_readme_mentions_new_quick_start_paths():
 def test_templates_default_to_chinese():
     overview = (PROJECT_ROOT / "app" / "web" / "templates" / "overview.html").read_text(encoding="utf-8")
     alerts = (PROJECT_ROOT / "app" / "web" / "templates" / "alerts.html").read_text(encoding="utf-8")
+    assert "/api/ai-analyze/last-error" in overview
     assert "市场总览" in overview
     assert ("告警中心" in alerts) or ("Alerts Center" in alerts)
 

@@ -8,6 +8,7 @@ from app.ai.market_context_builder import (
     build_market_analysis_context,
     filter_snapshots_for_context_mode,
     resolve_context_mode,
+    sanitize_account_snapshot_for_ai,
     to_minimal_context,
 )
 
@@ -67,6 +68,8 @@ def test_market_context_builder_handles_missing_youtube_without_crashing():
     assert ctx["data_quality"]["youtube_stale"] is True
     assert ctx["brief"]["symbol"] == "BTCUSDT"
     assert "tradeable_gate" in ctx["brief"]
+    assert isinstance(ctx["decision_ts"], int)
+    assert ctx["valid_until_utc"] >= int(now.timestamp())
 
 
 def test_market_context_builder_clips_youtube_radar_deterministically():
@@ -222,6 +225,107 @@ def test_market_context_builder_injects_compact_account_snapshot():
     budget = ctx.get("input_budget_meta") or {}
     assert "account_snapshot_chars_before_clip" in budget
     assert "account_snapshot_chars_after_clip" in budget
+
+
+def test_market_context_builder_uses_latest_market_ts_for_decision_window():
+    now = datetime(2026, 3, 1, 12, 0, tzinfo=timezone.utc)
+    snapshots = _snapshots(now)
+    snapshots["1h"]["latest"]["ts"] = now - timedelta(hours=2)
+    snapshots["1m"]["latest"]["ts"] = now - timedelta(seconds=30)
+
+    ctx = build_market_analysis_context(
+        symbol="BTCUSDT",
+        snapshots=snapshots,
+        recent_alerts=[],
+        funding_current={"ts": now - timedelta(minutes=20), "last_funding_rate": 0.0002, "open_interest": 1200},
+        funding_history=[],
+        youtube_consensus=None,
+        youtube_insights=None,
+        now=now,
+    )
+
+    assert ctx["decision_ts"] == int((now - timedelta(seconds=30)).timestamp())
+    assert ctx["valid_until_utc"] >= int(now.timestamp())
+
+
+def test_market_context_builder_filters_old_alerts_for_ai_context():
+    now = datetime(2026, 3, 1, 12, 0, tzinfo=timezone.utc)
+    ctx = build_market_analysis_context(
+        symbol="BTCUSDT",
+        snapshots=_snapshots(now),
+        recent_alerts=[
+            {
+                "symbol": "BTCUSDT",
+                "alert_type": "ACCOUNT_LIQUIDATION_RISK",
+                "severity": "CRITICAL",
+                "reason": "old risk",
+                "ts": (now - timedelta(hours=36)).isoformat(),
+            },
+            {
+                "symbol": "BTCUSDT",
+                "alert_type": "MOMENTUM",
+                "severity": "HIGH",
+                "reason": "fresh momentum",
+                "ts": (now - timedelta(minutes=30)).isoformat(),
+            },
+        ],
+        funding_current={"ts": now - timedelta(minutes=20), "last_funding_rate": 0.0002, "open_interest": 1200},
+        funding_history=[],
+        youtube_consensus=None,
+        youtube_insights=None,
+        now=now,
+    )
+
+    top_events = ctx["alerts_digest"]["top_events"]
+    assert len(top_events) == 1
+    assert top_events[0]["alert_type"] == "MOMENTUM"
+    assert top_events[0]["score"] >= 0.9
+
+
+def test_sanitize_account_snapshot_for_ai_drops_stale_zero_position():
+    now = datetime(2026, 3, 1, 12, 0, tzinfo=timezone.utc)
+    snapshot = sanitize_account_snapshot_for_ai(
+        {
+            "watch_symbol": "BTCUSDT",
+            "as_of_utc": (now - timedelta(hours=27)).isoformat(),
+            "futures": {
+                "available_balance": 88.2,
+                "total_margin_balance": 120.5,
+                "position_amt": 0.0,
+                "mark_price": 100.0,
+                "liquidation_price": 90.0,
+                "liq_distance_pct": 18.0,
+            },
+            "margin": {"margin_level": 1.5, "margin_call_bar": 1.1},
+            "risk_flags": {"available_balance_low": False, "margin_near_call": False},
+        },
+        now=now,
+    )
+    assert snapshot == {}
+
+
+def test_sanitize_account_snapshot_for_ai_keeps_stale_risky_summary():
+    now = datetime(2026, 3, 1, 12, 0, tzinfo=timezone.utc)
+    snapshot = sanitize_account_snapshot_for_ai(
+        {
+            "watch_symbol": "BTCUSDT",
+            "as_of_utc": (now - timedelta(hours=5)).isoformat(),
+            "futures": {
+                "available_balance": 88.2,
+                "total_margin_balance": 120.5,
+                "position_amt": 0.02,
+                "mark_price": 100.0,
+                "liquidation_price": 98.0,
+                "liq_distance_pct": 2.0,
+            },
+            "margin": {"margin_level": 1.05, "margin_call_bar": 1.1},
+            "risk_flags": {"available_balance_low": False, "margin_near_call": True},
+        },
+        now=now,
+    )
+    assert snapshot["stale"] is True
+    assert snapshot["futures"]["position_amt"] == 0.02
+    assert snapshot["risk_flags"]["margin_near_call"] is True
 
 
 def test_market_context_builder_minimal_mode():

@@ -31,7 +31,7 @@ services:
       context: .
       dockerfile: docker/Dockerfile
     environment:
-      DATABASE_URL: postgresql+psycopg://sentinel:sentinel@db:5432/crypto_sentinel
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://sentinel:sentinel@db:5432/crypto_sentinel}
       HTTP_PROXY: ${HTTP_PROXY:-}
       HTTPS_PROXY: ${HTTPS_PROXY:-}
       ALL_PROXY: ${ALL_PROXY:-}
@@ -55,11 +55,13 @@ services:
       APP_RUNTIME_MODE: docker_compose
       APP_RUNTIME_HOST: 127.0.0.1
       APP_RUNTIME_PORT: "8000"
-      DATABASE_URL: postgresql+psycopg://sentinel:sentinel@db:5432/crypto_sentinel
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://sentinel:sentinel@db:5432/crypto_sentinel}
       WORKER_ROLE: core
       WORKER_ID: worker-core-1
       LLM_HOT_RELOAD_USE_REDIS: "true"
       REDIS_URL: redis://redis:6379/0
+      ASR_DEVICE: ${ASR_DEVICE:-cpu}
+      ASR_COMPUTE_TYPE: ${ASR_COMPUTE_TYPE:-int8}
       AI_MANUAL_PREFLIGHT_MODE: stale_guarded
       AI_MANUAL_PREFLIGHT_STALE_SECONDS: "300"
       AI_MANUAL_PREFLIGHT_LOCK_SECONDS: "120"
@@ -89,12 +91,14 @@ services:
       dockerfile: docker/Dockerfile
     environment:
       APP_RUNTIME_MODE: docker_compose
-      DATABASE_URL: postgresql+psycopg://sentinel:sentinel@db:5432/crypto_sentinel
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://sentinel:sentinel@db:5432/crypto_sentinel}
       WORKER_ROLE: core
       WORKER_ID: worker-core-1
       WORKER_ID_STRICT_UNIQUE: "true"
       LLM_HOT_RELOAD_USE_REDIS: "true"
       REDIS_URL: redis://redis:6379/0
+      ASR_DEVICE: ${ASR_DEVICE:-cpu}
+      ASR_COMPUTE_TYPE: ${ASR_COMPUTE_TYPE:-int8}
       OPS_JOB_METRICS_FILE: data/job_metrics_core.json
       LANG: C.UTF-8
       PYTHONIOENCODING: utf-8
@@ -121,12 +125,14 @@ services:
       dockerfile: docker/Dockerfile
     environment:
       APP_RUNTIME_MODE: docker_compose
-      DATABASE_URL: postgresql+psycopg://sentinel:sentinel@db:5432/crypto_sentinel
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://sentinel:sentinel@db:5432/crypto_sentinel}
       WORKER_ROLE: ai
       WORKER_ID: worker-ai-1
       WORKER_ID_STRICT_UNIQUE: "true"
       LLM_HOT_RELOAD_USE_REDIS: "true"
       REDIS_URL: redis://redis:6379/0
+      ASR_DEVICE: ${ASR_DEVICE:-cpu}
+      ASR_COMPUTE_TYPE: ${ASR_COMPUTE_TYPE:-int8}
       OPS_JOB_METRICS_FILE: data/job_metrics_ai.json
       LANG: C.UTF-8
       PYTHONIOENCODING: utf-8

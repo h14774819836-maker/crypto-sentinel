@@ -201,9 +201,13 @@ def build_scheduler(runtime) -> AsyncIOScheduler:
                 )
 
     ai_gate_enabled = False
+    market_profile_enabled = None
+    market_analyst_ready = None
     if is_ai_worker:
         market_config = runtime.settings.resolve_llm_config("market")
-        ai_gate_enabled = bool(market_config.enabled and getattr(runtime, "market_analyst", None) is not None)
+        market_profile_enabled = bool(market_config.enabled)
+        market_analyst_ready = getattr(runtime, "market_analyst", None) is not None
+        ai_gate_enabled = bool(market_profile_enabled and market_analyst_ready)
         if ai_gate_enabled:
             _add_supervised_job(
                 job_id="ai_analysis_job",
@@ -250,11 +254,14 @@ def build_scheduler(runtime) -> AsyncIOScheduler:
 
     runtime.registered_job_ids = list(registered_job_ids)
     logger.info(
-        "Scheduler built role=%s jobs=%s core_enabled=%s ai_enabled=%s ai_gate=%s",
+        "Scheduler built role=%s jobs=%s core_enabled=%s ai_enabled=%s ai_gate=%s "
+        "market_profile_enabled=%s market_analyst_ready=%s",
         worker_role,
         registered_job_ids,
         is_core_worker,
         is_ai_worker,
         ai_gate_enabled,
+        market_profile_enabled,
+        market_analyst_ready,
     )
     return scheduler

@@ -29,6 +29,10 @@ METRIC_ALIASES: dict[str, str] = {
     "bb_bandwidth": "bb_bandwidth",
     "funding": "funding_rate",
     "funding_rate": "funding_rate",
+    "momentum_alignment": "momentum_alignment",
+    "momentum_alignment_score": "momentum_alignment",
+    "range_position": "range_position",
+    "snapshot_age_sec": "snapshot_age_sec",
 }
 
 
@@ -89,7 +93,7 @@ def resolve_dot_path(payload: dict[str, Any], path: str) -> tuple[bool, Any, str
 
     def _resolve(full_path: str) -> tuple[bool, Any]:
         current: Any = payload
-        for seg in full_path.split("."):
+        for seg in _tokenize_dot_path(full_path):
             if isinstance(current, dict):
                 if seg not in current:
                     return False, None
@@ -119,6 +123,38 @@ def resolve_dot_path(payload: dict[str, Any], path: str) -> tuple[bool, Any, str
     return False, None, raw
 
 
+def _tokenize_dot_path(path: str) -> list[str]:
+    tokens: list[str] = []
+    current = ""
+    idx = 0
+    while idx < len(path):
+        ch = path[idx]
+        if ch == ".":
+            if current:
+                tokens.append(current)
+                current = ""
+            idx += 1
+            continue
+        if ch == "[":
+            if current:
+                tokens.append(current)
+                current = ""
+            end = path.find("]", idx + 1)
+            if end == -1:
+                current += path[idx:]
+                break
+            bracket_token = path[idx + 1 : end].strip()
+            if bracket_token:
+                tokens.append(bracket_token)
+            idx = end + 1
+            continue
+        current += ch
+        idx += 1
+    if current:
+        tokens.append(current)
+    return tokens
+
+
 @dataclass(slots=True)
 class Tolerance:
     soft_abs: float
@@ -135,7 +171,7 @@ def metric_group(metric: str) -> str:
         return "oscillator"
     if key in {"atr_14", "rolling_vol_20", "bb_bandwidth"}:
         return "volatility"
-    if key in {"ret_1m", "ret_10m", "funding_rate", "funding_delta_24h"}:
+    if key in {"ret_1m", "ret_10m", "funding_rate", "funding_delta_24h", "snapshot_age_sec"}:
         return "rate"
     if key in {"bb_zscore", "zscore", "volume_zscore"}:
         return "zscore"

@@ -98,6 +98,57 @@ class BinanceProvider(ExchangeProvider):
     def _is_retryable_http_status(status_code: int) -> bool:
         return status_code in {418, 429, 500, 502, 503, 504}
 
+    @staticmethod
+    def _clip_text(value: Any, limit: int = 240) -> str:
+        text = str(value or "").strip()
+        if len(text) <= limit:
+            return text
+        return text[: max(0, limit - 3)] + "..."
+
+    def _summarize_request_failure(
+        self,
+        exc: Exception,
+        *,
+        response: httpx.Response | None = None,
+        url: str = "",
+    ) -> dict[str, Any]:
+        resp = response
+        if resp is None and isinstance(exc, httpx.HTTPStatusError):
+            resp = exc.response
+
+        status = resp.status_code if resp is not None else None
+        code = None
+        msg = ""
+        response_text = ""
+        if resp is not None:
+            try:
+                code, msg = self._parse_binance_error(resp)
+            except Exception:
+                code, msg = None, ""
+            try:
+                response_text = self._clip_text(resp.text, 240)
+            except Exception:
+                response_text = ""
+
+        request = getattr(exc, "request", None)
+        request_url = ""
+        if request is not None and getattr(request, "url", None) is not None:
+            request_url = str(request.url)
+        elif resp is not None and getattr(resp, "request", None) is not None and getattr(resp.request, "url", None) is not None:
+            request_url = str(resp.request.url)
+        else:
+            request_url = str(url or "")
+
+        message = msg or self._clip_text(str(exc), 240)
+        return {
+            "url": request_url,
+            "status": status,
+            "code": code,
+            "msg": message,
+            "exception": type(exc).__name__,
+            "response_text": response_text,
+        }
+
     async def _signed_request(
         self,
         method: str,
@@ -345,13 +396,24 @@ class BinanceProvider(ExchangeProvider):
     async def fetch_premium_index(self, symbol: str) -> FundingRateData | None:
         """GET /fapi/v1/premiumIndex — returns mark price, last funding rate, etc."""
         url = f"{self.futures_base}/fapi/v1/premiumIndex"
+        resp: httpx.Response | None = None
         try:
             async with httpx.AsyncClient(timeout=self._http_timeout, trust_env=False) as client:
                 resp = await client.get(url, params={"symbol": symbol.upper()})
                 resp.raise_for_status()
                 data = resp.json()
         except Exception as exc:
-            logger.warning("fetch_premium_index failed for %s: %s", symbol, exc)
+            summary = self._summarize_request_failure(exc, response=resp, url=url)
+            logger.warning(
+                "fetch_premium_index failed symbol=%s url=%s exception=%s status=%s code=%s msg=%s response=%s",
+                symbol,
+                summary["url"],
+                summary["exception"],
+                summary["status"],
+                summary["code"],
+                summary["msg"],
+                summary["response_text"],
+            )
             return None
 
         nft = data.get("nextFundingTime")
@@ -371,6 +433,7 @@ class BinanceProvider(ExchangeProvider):
     async def fetch_open_interest(self, symbol: str) -> float | None:
         """GET /fapi/v1/openInterest — returns current open interest."""
         url = f"{self.futures_base}/fapi/v1/openInterest"
+        resp: httpx.Response | None = None
         try:
             async with httpx.AsyncClient(timeout=self._http_timeout, trust_env=False) as client:
                 resp = await client.get(url, params={"symbol": symbol.upper()})
@@ -378,7 +441,17 @@ class BinanceProvider(ExchangeProvider):
                 data = resp.json()
             return _safe_float(data.get("openInterest"))
         except Exception as exc:
-            logger.warning("fetch_open_interest failed for %s: %s", symbol, exc)
+            summary = self._summarize_request_failure(exc, response=resp, url=url)
+            logger.warning(
+                "fetch_open_interest failed symbol=%s url=%s exception=%s status=%s code=%s msg=%s response=%s",
+                symbol,
+                summary["url"],
+                summary["exception"],
+                summary["status"],
+                summary["code"],
+                summary["msg"],
+                summary["response_text"],
+            )
             return None
 
     async def get_margin_account(self, client: httpx.AsyncClient | None = None) -> dict[str, Any]:

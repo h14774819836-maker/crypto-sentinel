@@ -162,6 +162,34 @@ def build_facts_index(facts: dict[str, Any]) -> FactsIndex:
     reference_price: float | None = None
 
     root = facts.get("facts") if isinstance(facts, dict) else {}
+
+    def _add_metric(raw_key: str, raw_value: Any, *, tf: str | None = None) -> None:
+        key = normalize_metric_key(raw_key)
+        num = parse_number(raw_value)
+        if num is None:
+            if isinstance(raw_value, str) and raw_value.strip():
+                text_blobs.append(raw_value.strip())
+            return
+        by_metric_key.setdefault(key, []).append(num)
+        if tf:
+            tf_bucket = by_timeframe.setdefault(tf, {})
+            tf_bucket.setdefault(key, []).append(num)
+
+    def _index_nested_metrics(node: Any, *, tf: str | None = None) -> None:
+        if isinstance(node, dict):
+            for raw_key, raw_value in node.items():
+                if isinstance(raw_value, dict):
+                    _index_nested_metrics(raw_value, tf=tf)
+                    continue
+                if isinstance(raw_value, list):
+                    for item in raw_value:
+                        if isinstance(item, dict):
+                            _index_nested_metrics(item, tf=tf)
+                        else:
+                            _add_metric(raw_key, item, tf=tf)
+                    continue
+                _add_metric(raw_key, raw_value, tf=tf)
+
     snapshots = (root or {}).get("multi_tf_snapshots") if isinstance(root, dict) else {}
     if isinstance(snapshots, dict):
         for raw_tf, snap in snapshots.items():
@@ -190,6 +218,36 @@ def build_facts_index(facts: dict[str, Any]) -> FactsIndex:
                 close_vals = tf_bucket.get("close", [])
                 if close_vals:
                     reference_price = float(close_vals[-1])
+
+    brief = (root or {}).get("brief") if isinstance(root, dict) else {}
+    derived_by_tf = (brief or {}).get("derived_features_by_tf") if isinstance(brief, dict) else {}
+    if isinstance(derived_by_tf, dict):
+        for raw_tf, payload in derived_by_tf.items():
+            tf = normalize_timeframe(raw_tf)
+            if not tf:
+                continue
+            available_timeframes.add(tf)
+            _index_nested_metrics(payload, tf=tf)
+
+    cross_tf = (root or {}).get("cross_tf_summary") if isinstance(root, dict) else None
+    if not isinstance(cross_tf, dict) and isinstance(brief, dict):
+        cross_tf = brief.get("cross_tf_summary")
+    if isinstance(cross_tf, dict):
+        _index_nested_metrics(cross_tf, tf=None)
+
+    data_quality = (root or {}).get("data_quality") if isinstance(root, dict) else {}
+    snapshot_age_sec = (data_quality or {}).get("snapshot_age_sec") if isinstance(data_quality, dict) else {}
+    if isinstance(snapshot_age_sec, dict):
+        for raw_tf, age in snapshot_age_sec.items():
+            tf = normalize_timeframe(raw_tf)
+            if not tf:
+                continue
+            available_timeframes.add(tf)
+            _add_metric("snapshot_age_sec", age, tf=tf)
+
+    funding_deltas = (root or {}).get("funding_deltas") if isinstance(root, dict) else {}
+    if isinstance(funding_deltas, dict):
+        _index_nested_metrics(funding_deltas, tf=None)
 
     for pref_tf in ("1m", "5m", "15m", "1h", "4h"):
         if reference_price is not None:

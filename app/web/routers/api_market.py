@@ -12,6 +12,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
+from app.asr_runtime import inspect_asr_runtime
 from app.db.repository import (
     get_strategy_decision_detail,
     list_account_stats_daily,
@@ -530,6 +531,7 @@ def health_api():
         "worker_last_seen": worker_last_seen,
         "server_time": datetime.now(timezone.utc),
         "db_probe_ms": elapsed_ms,
+        "asr": inspect_asr_runtime(settings),
         "ops": {
             "job_metrics_count": len(recent_jobs),
             "last_job": last_job,

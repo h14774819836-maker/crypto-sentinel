@@ -4,59 +4,41 @@ import json
 from datetime import datetime, timezone
 from typing import Any
 
+from app.ai.market_context_builder import build_analysis_window
+
 
 SYSTEM_PROMPT = """你是 Crypto Sentinel 的专业市场分析模型。
-
-【绝对格式禁止令】
-你必须且只能输出一个合法的 JSON 对象。绝对禁止输出任何 JSON 以外的内容！
-- 禁止包含任何自然语言解释、补充说明、免责声明。
-- 禁止输出任何 Markdown 代码围栏符号（如 ```json 等）。
-- 绝对禁止在输出一个完整的 {} 对象后，紧接着再输出多余的 JSON 或任何字符。
-- 绝不允许“先文本分析再输出 JSON”的思维链泄露。你的整个回复必须能被原生 json.loads 解析。
-
-【核心事实与业务规则】
-1. 事实源优先：输入提供的数据（价格、指标、资金费率、OI、时间周期）是你唯一的客观依据。
-2. 观点源降权：输入中的 YouTube 解析仅仅是外部参考观点，绝不能覆盖事实源。
-3. 冲突降级法：若观点源与事实源出现冲突，必须在 youtube_reflection 写出 conflicted，并且自动降低 confidence，优先强制输出方向为 HOLD（或者带条件的保守计划）。
-4. 数据真实性底线：禁止捏造、编造、强行计算输入 JSON 没有提供的数值、均线或结构位数据。
-4.1 绝对禁止生成、计算、或篡改输入 JSON 中不存在的数值。
-5. 数据关联要求：evidence / anchors 中使用的指标必须在输入中能逐字找到，数值必须严格字符级等价。
+【绝对格式约束】你必须且只能输出一个合法的 JSON 对象。
+- 禁止输出任何 JSON 以外的内容。
+- 禁止输出 Markdown 代码块。
+- 绝对禁止生成、计算、或篡改输入 JSON 中不存在的数值。
+- evidence / anchors 中使用的指标，必须能在输入事实源中逐字找到。
 """
 
 
-THINKING_SUMMARY_PROMPT = """阅读以下市场分析思考过程，用10字以内概括当前在做什么。
-
-要求：用通俗中文，不要用英文专业术语。示例：正在分析交易信号、正在整理依据、正在核对数据、正在整理输出、正在判断市场状态。
-
+THINKING_SUMMARY_PROMPT = """阅读以下市场分析思考过程，用 20 字以内概括当前在做什么。
+要求：用通俗中文，不要泄露详细推理。
 思考：{buffer_content}
 
 概括："""
 
 
-TELEGRAM_THINKING_SUMMARY_PROMPT = """阅读以下对话思考过程，用8字以内概括当前在做什么。
-
-要求：用通俗中文。示例：正在理解问题、正在检索信息、正在组织回答、正在整理输出、正在调用工具。
-
+TELEGRAM_THINKING_SUMMARY_PROMPT = """阅读以下对话思考过程，用 20 字以内概括当前在做什么。
+要求：用通俗中文，不要泄露详细推理。
 思考：{buffer_content}
 
 概括："""
 
 
-# NVIDIA Nemotron 显式 CoT 模型：system prompt 必须以该句开头才能输出完整 <thinking> 流
 NEMOTRON_DETAILED_THINKING_PREFIX = "detailed thinking on"
 
-TELEGRAM_AGENT_PROMPT = """你是 Crypto Sentinel 的专业加密交易助手。
 
-行为规则：
-1. 不编造行情数据；涉及行情/信号时优先调用工具或引用系统已给出的数据。
-2. 解释告警或信号时要引用关键依据（例如 RSI / MACD / 趋势状态 / 告警原因）。
-3. 输出尽量清晰、简洁、结构化；当涉及策略建议时优先给出风险提示。
-4. 若缺少数据，请明确说明“当前无法获取最新数据”，不要猜测。
-5. 【Telegram排版要求】你的输出将被发送到 Telegram，为了保持版面整洁并避免解析错误：
-   - 绝不要使用粗体（**）或斜体（*）等强调符号。
-   - 尽量不用无序/有序列表结构（如 - 或 *），直接用分段或简单的中文破折号（——）。
-   - 停止使用过多 Emoji 堆砌，通篇最多保留一到两个关键 Emoji 即可。
-   - 采用纯文本式的清爽段落排版，关键字段使用冒号（如“当前价格: 72,766.31”）直接排布。
+TELEGRAM_AGENT_PROMPT = """你是 Crypto Sentinel 的专业加密交易助手。
+要求：
+1. 不编造行情数据。
+2. 解释信号时引用关键依据。
+3. 输出简洁、结构化、适合 Telegram。
+4. 数据缺失时明确说无法获取，不要猜测。
 """
 
 
@@ -68,43 +50,44 @@ def build_analysis_prompt(
     *,
     include_external_views: bool = True,
 ) -> str:
+    prompt, _meta = build_analysis_prompt_details(
+        symbol=symbol,
+        snapshots=snapshots,
+        context=context,
+        current_time=current_time,
+        include_external_views=include_external_views,
+    )
+    return prompt
+
+
+def build_analysis_prompt_details(
+    symbol: str,
+    snapshots: dict[str, Any],
+    context: dict[str, Any] | None = None,
+    current_time: datetime | None = None,
+    *,
+    include_external_views: bool = True,
+) -> tuple[str, dict[str, Any]]:
     if current_time is None:
         current_time = datetime.now(timezone.utc)
+    if current_time.tzinfo is None:
+        current_time = current_time.replace(tzinfo=timezone.utc)
 
     if context is None:
-        return _build_analysis_prompt_legacy(symbol, snapshots, current_time)
-
-    data_asof = _build_data_asof_by_tf(snapshots)
-    decision_ts = _pick_decision_ts(data_asof=data_asof, fallback_ts=current_time)
-    valid_until = int(decision_ts + 3600)
-
-    facts_payload = {
-        "symbol": symbol,
-        "current_time_utc": current_time.isoformat(),
-        "data_asof": data_asof,
-        "decision_ts": decision_ts,
-        "valid_until_utc": valid_until,
-        "multi_tf_snapshots": _sanitize_snapshots_for_prompt(snapshots),
-        "brief": context.get("brief") or {},
-        "funding_deltas": context.get("funding_deltas") or {},
-        "alerts_digest": context.get("alerts_digest") or {},
-        "data_quality": context.get("data_quality") or {},
-        "input_budget_meta": context.get("input_budget_meta") or {},
-        "account_snapshot": context.get("account_snapshot") or {},
-        "constraints": context.get("constraints")
-        or {
-            "market_type": "futures",
-            "max_leverage": 50,
-            "requires_margin_mode": True,
-        },
-    }
-    if include_external_views:
-        external_views = {
-            "youtube_radar": context.get("youtube_radar") or {"available": False},
-            "intel_digest": context.get("intel_digest") or {"available": False},
+        return _build_analysis_prompt_legacy(symbol, snapshots, current_time), {
+            "external_views_block_included": False,
+            "external_views_chars_before_filter": 0,
+            "external_views_chars_after_filter": 0,
+            "dropped_context_blocks": [],
         }
-    else:
-        external_views = {"youtube_radar": {"available": False}, "intel_digest": {"available": False}}
+
+    analysis_window = _resolve_analysis_window(context, snapshots, current_time)
+    facts_payload = _build_facts_payload(symbol, snapshots, context, analysis_window)
+    external_views, external_meta = _resolve_external_views_payload(
+        context=context,
+        current_time=current_time,
+        include_external_views=include_external_views,
+    )
 
     schema = {
         "market_regime": "trending_up|trending_down|ranging|volatile|uncertain",
@@ -115,7 +98,7 @@ def build_analysis_prompt(
             "take_profit": "number|null",
             "stop_loss": "number|null",
             "confidence": "0-100",
-            "reasoning": "一句简洁中文总结（给首页展示）",
+            "reasoning": "一句中文总结",
         },
         "trade_plan": {
             "market_type": "futures",
@@ -141,68 +124,76 @@ def build_analysis_prompt(
         "evidence": [
             {
                 "timeframe": "4h|1h|15m|5m|1m",
-                "point": "证据描述，必须引用给定数值",
+                "point": "证据描述",
                 "metrics": {"name": "value"},
             }
         ],
         "anchors": [
             {
                 "path": "facts.path.to.scalar.value",
-                "value": "必须与事实源原值字符级一致",
+                "value": "必须与事实源原值一致",
             }
         ],
-        "levels": {
-            "supports": ["number"],
-            "resistances": ["number"],
-        },
+        "levels": {"supports": ["number"], "resistances": ["number"]},
         "risk": {
             "rr": "number|null",
             "sl_atr_multiple": "number|null",
-            "invalidations": ["条件1", "条件2"]
+            "invalidations": ["条件1", "条件2"],
         },
-        "scenarios": {
-            "base": "一句话",
-            "bull": "一句话",
-            "bear": "一句话"
-        },
+        "scenarios": {"base": "一句话", "bull": "一句话", "bear": "一句话"},
         "youtube_reflection": {
             "status": "aligned|conflicted|ignored|unavailable",
-            "note": "一句话说明 YouTube 观点如何被使用"
+            "note": "一句话说明外部观点如何使用",
         },
-        "validation_notes": ["可选，自查备注"]
+        "validation_notes": ["可选，自查备注"],
     }
 
     prompt = [
-        f"当前时间 (UTC): {current_time.isoformat()}",
+        f"当前时间 (UTC): {analysis_window['analysis_time_utc']}",
         "",
         "# 输出要求（严格 JSON）",
-        "你必须且只能输出严格符合以下结构的 JSON 对象。每个字段必须满足对应注释类型的期望制约条件：",
+        "你必须且只能输出严格符合以下结构的 JSON 对象。",
         _json_block(schema),
         "",
         "# 冲突处理规则",
-        "1. direction=HOLD 时，entry_price/take_profit/stop_loss 这三个字段必须原样输出 null，禁止给 0 或占位符。",
-        "2. 当 direction 是 LONG 或 SHORT 时，请务必检验你的止盈止损方向相对入场价数学关系合法。",
-        "3. evidence 至少包含 2 条对系统传入指标数据的提炼引用。",
-        "4. anchors 至少包含 2 条；锚定路径 path 必须指向事实源中的具体标量路径（例如 'facts.brief.tradeable_gate.tradeable'）。",
+        "1. direction=HOLD 时，entry_price/take_profit/stop_loss 必须输出 null。",
+        "2. LONG/SHORT 时，必须保证 TP/Entry/SL 的数学关系正确。",
+        "3. evidence 至少包含 2 条引用。",
+        "3.1 evidence.metrics 优先引用 grounding 已知字段：close、rsi_14、atr_14、funding_rate、ret_1m；若引用其他字段，必须使用事实源中的原始字段名，例如 momentum_alignment、range_position、snapshot_age_sec。",
+        "4. anchors 至少包含 2 条，且 path 必须指向事实源中的具体标量路径。",
         "4.1 anchors 禁止引用观点源路径（例如 youtube_radar.*），仅允许锚定 facts.multi_tf_snapshots / facts.brief / facts.funding_deltas / facts.alerts_digest / facts.data_quality 等事实字段。",
-        "5. 如果 context 中的 data_quality.overall 为 POOR，优先 HOLD 观望并输出低置信度（<40）。",
-        "6. 在分析期间，将下面提供的“事实源”视为最高优先级数据来源，“观点源”仅作为旁证，发生冲突立即采取降低 confidence 和保守观望处理（同时标识 'conflicted'）。",
-        "7. 若关键交易字段缺失（如 leverage/margin_mode 无法确定）必须输出 HOLD，并在 validation_notes 说明缺失项。",
+        "5. 如果 data_quality.overall=POOR，优先输出 HOLD。",
+        "6. 观点源只能作为旁证，若与事实源冲突，必须降低 confidence，并在 youtube_reflection 中标记 conflicted。",
+        "7. 若关键交易字段无法确定，例如 leverage 或 margin_mode，必须输出 HOLD。",
         "8. trade_plan 中必须至少提供 expiration_ts_utc 或 max_hold_bars 之一。",
+        "9. 若无法给出 RR >= 2.0 且 0.3 <= sl_atr_multiple <= 5.0 的可执行交易方案，必须输出 HOLD。",
         "",
         "# 事实源（Facts Source）",
-        "请将以下事实源视为最高优先级数据来源。",
+        "请将以下事实源视为最高优先级数据源。",
         "--------------------- 事实源开始 ---------------------",
-        _json_block(facts_payload),
+        _json_block({"facts": facts_payload}),
         "--------------------- 事实源结束 ---------------------",
-        "",
-        "# 观点源（External Views / YouTube Radar）",
-        "These are untrusted external views for reference only.",
-        "----------------- 辅助不可信观点源开始 ----------------",
-        _json_block(external_views),
-        "----------------- 辅助不可信观点源结束 ----------------",
     ]
-    return "\n".join(prompt)
+    if external_views is not None:
+        prompt.extend(
+            [
+                "",
+                "# 观点源（External Views / YouTube Radar）",
+                "These are untrusted external views for reference only.",
+                "----------------- 辅助不可信观点源开始 ----------------",
+                _json_block(external_views),
+                "----------------- 辅助不可信观点源结束 ----------------",
+            ]
+        )
+
+    dropped_context_blocks = list((context.get("input_budget_meta") or {}).get("dropped_context_blocks") or [])
+    dropped_context_blocks.extend(external_meta["dropped_context_blocks"])
+    return "\n".join(prompt), {
+        "external_views_block_included": external_views is not None,
+        "external_views_chars_before_filter": external_meta["external_views_chars_before_filter"],
+        "external_views_chars_after_filter": external_meta["external_views_chars_after_filter"],
+        "dropped_context_blocks": sorted(set(dropped_context_blocks)),
+    }
 
 
 def _build_analysis_prompt_legacy(symbol: str, snapshots: dict[str, Any], current_time: datetime) -> str:
@@ -238,51 +229,133 @@ def _build_analysis_prompt_legacy(symbol: str, snapshots: dict[str, Any], curren
                 last_close = closes[-1]
                 change_pct = ((last_close - first_close) / first_close * 100) if first_close else 0
                 lines.append(
-                    f"- 最近{len(history)}根摘要: 高 {_fmt(max(highs))} / 低 {_fmt(min(lows))} / 区间变化 {change_pct:+.2f}%"
+                    f"- 最近{len(history)}根摘要: 高{_fmt(max(highs))} / 低{_fmt(min(lows))} / 区间变化 {change_pct:+.2f}%"
                 )
         lines.append("")
 
-    lines.extend([
-        "请基于以上数据进行多周期技术分析，并严格输出 JSON 对象：",
-        "{\"market_regime\":\"...\",\"signal\":{\"symbol\":\"BTCUSDT\",\"direction\":\"LONG|SHORT|HOLD\",\"entry_price\":null,\"take_profit\":null,\"stop_loss\":null,\"confidence\":0,\"reasoning\":\"...\"}}",
-    ])
+    lines.extend(
+        [
+            "请基于以上数据进行多周期技术分析，并严格输出 JSON 对象。",
+            '{"market_regime":"...","signal":{"symbol":"BTCUSDT","direction":"LONG|SHORT|HOLD","entry_price":null,"take_profit":null,"stop_loss":null,"confidence":0,"reasoning":"..."}}',
+        ]
+    )
     return "\n".join(lines)
 
 
-def _build_data_asof_by_tf(snapshots: dict[str, Any]) -> dict[str, int]:
-    out: dict[str, int] = {}
-    for tf, snap in (snapshots or {}).items():
-        latest = (snap or {}).get("latest") or {}
-        ts = latest.get("ts")
-        if isinstance(ts, datetime):
-            ts_utc = ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
-            out[str(tf)] = int(ts_utc.timestamp())
-    return out
+def _resolve_analysis_window(
+    context: dict[str, Any],
+    snapshots: dict[str, Any],
+    current_time: datetime,
+) -> dict[str, Any]:
+    if (
+        isinstance(context.get("analysis_time_utc"), str)
+        and isinstance(context.get("decision_ts"), (int, float))
+        and isinstance(context.get("valid_until_utc"), (int, float))
+    ):
+        return {
+            "analysis_time_utc": context.get("analysis_time_utc"),
+            "data_asof": dict(context.get("data_asof") or {}),
+            "decision_ts": int(context.get("decision_ts")),
+            "valid_until_utc": int(context.get("valid_until_utc")),
+        }
+    return build_analysis_window(snapshots, now=current_time)
 
 
-def _pick_decision_ts(*, data_asof: dict[str, int], fallback_ts: datetime) -> int:
-    base_pref = ["1h", "15m", "5m", "1m", "4h"]
-    for tf in base_pref:
-        if tf in data_asof:
-            return int(data_asof[tf])
-    if data_asof:
-        return int(max(data_asof.values()))
-    ts = fallback_ts if fallback_ts.tzinfo else fallback_ts.replace(tzinfo=timezone.utc)
-    return int(ts.timestamp())
+def _build_facts_payload(
+    symbol: str,
+    snapshots: dict[str, Any],
+    context: dict[str, Any],
+    analysis_window: dict[str, Any],
+) -> dict[str, Any]:
+    facts_payload = {
+        "symbol": symbol,
+        "current_time_utc": analysis_window["analysis_time_utc"],
+        "analysis_time_utc": analysis_window["analysis_time_utc"],
+        "data_asof": analysis_window["data_asof"],
+        "decision_ts": analysis_window["decision_ts"],
+        "valid_until_utc": analysis_window["valid_until_utc"],
+        "multi_tf_snapshots": _sanitize_snapshots_for_prompt(snapshots),
+        "brief": context.get("brief") or {},
+        "funding_deltas": context.get("funding_deltas") or {},
+        "data_quality": context.get("data_quality") or {},
+        "input_budget_meta": context.get("input_budget_meta") or {},
+        "constraints": context.get("constraints")
+        or {
+            "market_type": "futures",
+            "max_leverage": 50,
+            "requires_margin_mode": True,
+        },
+    }
+    alerts_digest = context.get("alerts_digest") or {}
+    account_snapshot = context.get("account_snapshot") or {}
+    if _is_meaningful_payload(alerts_digest):
+        facts_payload["alerts_digest"] = alerts_digest
+    if _is_meaningful_payload(account_snapshot):
+        facts_payload["account_snapshot"] = account_snapshot
+    return facts_payload
+
+
+def _resolve_external_views_payload(
+    *,
+    context: dict[str, Any],
+    current_time: datetime,
+    include_external_views: bool,
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    empty_meta = {
+        "external_views_chars_before_filter": 0,
+        "external_views_chars_after_filter": 0,
+        "dropped_context_blocks": [],
+    }
+    if not include_external_views:
+        return None, empty_meta
+
+    youtube_radar = context.get("youtube_radar") or {}
+    intel_digest = context.get("intel_digest") or {}
+    full_payload = {
+        "youtube_radar": youtube_radar or {"available": False},
+        "intel_digest": intel_digest or {"available": False},
+    }
+    filtered: dict[str, Any] = {}
+    dropped: list[str] = []
+
+    if isinstance(youtube_radar, dict) and youtube_radar.get("available") and not youtube_radar.get("stale", True):
+        filtered["youtube_radar"] = youtube_radar
+    else:
+        dropped.append("youtube_radar")
+
+    intel_generated_at = _coerce_datetime((intel_digest or {}).get("generated_at"))
+    intel_fresh = False
+    if intel_generated_at is not None:
+        intel_fresh = (current_time - intel_generated_at).total_seconds() <= 6 * 3600
+    if isinstance(intel_digest, dict) and intel_digest and intel_fresh:
+        filtered["intel_digest"] = intel_digest
+    elif intel_digest:
+        dropped.append("intel_digest")
+
+    if not filtered:
+        return None, {
+            "external_views_chars_before_filter": _json_len(full_payload),
+            "external_views_chars_after_filter": 0,
+            "dropped_context_blocks": dropped + ["external_views"],
+        }
+    return filtered, {
+        "external_views_chars_before_filter": _json_len(full_payload),
+        "external_views_chars_after_filter": _json_len(filtered),
+        "dropped_context_blocks": dropped,
+    }
 
 
 def _sanitize_snapshots_for_prompt(snapshots: dict[str, Any]) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for tf, snap in snapshots.items():
         latest = dict((snap or {}).get("latest") or {})
-        # Keep prompt compact and serializable
-        hist = (snap or {}).get("history") or []
+        history = (snap or {}).get("history") or []
         latest_ts = latest.get("ts")
         if isinstance(latest_ts, datetime):
             latest["ts"] = latest_ts.isoformat()
         out[tf] = {
             "latest": latest,
-            "history_summary": _history_summary(hist),
+            "history_summary": _history_summary(history),
         }
     return out
 
@@ -307,6 +380,41 @@ def _history_summary(history: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _is_meaningful_payload(payload: Any) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    if not payload:
+        return False
+    if set(payload.keys()) <= {"count_1h", "count_4h", "top_events", "dominant_types", "alerts_burst"}:
+        return any(
+            [
+                bool(payload.get("count_1h")),
+                bool(payload.get("count_4h")),
+                bool(payload.get("alerts_burst")),
+                bool(payload.get("top_events")),
+                bool(payload.get("dominant_types")),
+            ]
+        )
+    return True
+
+
+def _coerce_datetime(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    if isinstance(value, str):
+        try:
+            text = value.strip()
+            if text.endswith("Z"):
+                text = text[:-1] + "+00:00"
+            dt = datetime.fromisoformat(text)
+            return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+        except Exception:
+            return None
+    return None
+
+
 def _json_block(obj: Any) -> str:
     return json.dumps(obj, ensure_ascii=False, indent=2, default=_json_default)
 
@@ -317,6 +425,10 @@ def _json_default(value: Any) -> Any:
             value = value.replace(tzinfo=timezone.utc)
         return value.isoformat()
     return str(value)
+
+
+def _json_len(obj: Any) -> int:
+    return len(json.dumps(obj, ensure_ascii=False, separators=(",", ":"), default=_json_default))
 
 
 def _fmt(value: float | None, decimals: int = 2) -> str:

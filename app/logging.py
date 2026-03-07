@@ -1,5 +1,6 @@
 import logging
 import os
+import sys
 import time
 from logging.config import dictConfig
 from logging.handlers import TimedRotatingFileHandler
@@ -39,7 +40,46 @@ class SafeTimedRotatingFileHandler(TimedRotatingFileHandler):
             )
 
 
+class UnicodeSafeStreamHandler(logging.StreamHandler):
+    """Console handler that escapes non-encodable characters on legacy consoles."""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        msg = self.format(record)
+        stream = self.stream
+        if stream is None:
+            return
+        try:
+            stream.write(msg + self.terminator)
+            self.flush()
+        except UnicodeEncodeError:
+            try:
+                encoding = getattr(stream, "encoding", None) or "utf-8"
+                safe_msg = msg.encode(encoding, errors="backslashreplace").decode(encoding, errors="ignore")
+                stream.write(safe_msg + self.terminator)
+                self.flush()
+            except Exception:
+                self.handleError(record)
+        except RecursionError:
+            raise
+        except Exception:
+            self.handleError(record)
+
+
+def _reconfigure_standard_streams() -> None:
+    for name in ("stdout", "stderr"):
+        stream = getattr(sys, name, None)
+        if stream is None:
+            continue
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            try:
+                reconfigure(encoding="utf-8", errors="backslashreplace")
+            except Exception:
+                pass
+
+
 def setup_logging() -> None:
+    _reconfigure_standard_streams()
     settings = get_settings()
     market_ai_log_file = settings.market_ai_log_file or "data/logs/market_ai.log"
     market_ai_log_dir = os.path.dirname(market_ai_log_file)
@@ -59,7 +99,7 @@ def setup_logging() -> None:
             },
             "handlers": {
                 "default": {
-                    "class": "logging.StreamHandler",
+                    "class": "app.logging.UnicodeSafeStreamHandler",
                     "formatter": "default",
                 },
                 "market_ai_file": {

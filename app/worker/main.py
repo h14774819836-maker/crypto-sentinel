@@ -8,6 +8,7 @@ import httpx
 from app.alerts.telegram import TelegramClient
 from app.alerts.telegram_dispatcher import process_telegram_update
 from app.alerts.telegram_poller import TelegramPoller
+from app.asr_runtime import log_asr_runtime_status
 from app.config import get_settings
 from app.db.guards import ensure_db_backend_allowed
 from app.db.session import SessionLocal
@@ -42,6 +43,7 @@ async def run_worker() -> None:
     worker_role = settings.worker_role_normalized
     is_core_worker = worker_role in {"core", "all"}
     is_ai_worker = worker_role in {"ai", "all"}
+    log_asr_runtime_status(settings, component=f"worker:{worker_role}")
     await ensure_split_worker_runtime_constraints(settings)
     await reserve_worker_identity_lease(settings)
 
@@ -49,6 +51,7 @@ async def run_worker() -> None:
         market_analyst = None
         market_config = settings.resolve_llm_config("market")
         market_profile_name = settings.resolve_llm_profile_name("market")
+        market_analyst_inactive_reason = ""
         if is_ai_worker and market_config.enabled and market_config.api_key:
             from app.ai.analyst import MarketAnalyst
             from app.ai.openai_provider import OpenAICompatibleProvider
@@ -63,9 +66,20 @@ async def run_worker() -> None:
                 market_config.base_url,
             )
         else:
+            if not is_ai_worker:
+                market_analyst_inactive_reason = (
+                    f"worker_role={worker_role} does not host automatic market AI jobs"
+                )
+            elif not market_config.enabled:
+                market_analyst_inactive_reason = "market profile disabled"
+            else:
+                market_analyst_inactive_reason = "market profile API key missing"
             logger.info(
-                "Market Analyst disabled (task=market, profile=%s, enabled=%s, api_key_present=%s)",
+                "Market Analyst inactive (task=market, profile=%s, worker_role=%s, reason=%s, "
+                "enabled=%s, api_key_present=%s)",
                 market_profile_name,
+                worker_role,
+                market_analyst_inactive_reason,
                 market_config.enabled,
                 bool(market_config.api_key),
             )
@@ -137,14 +151,14 @@ async def run_worker() -> None:
             )
             tg_poller_task = asyncio.create_task(tg_poller.run_forever(), name="telegram_poller")
             logger.warning(
-                "[TG杞] 宸插湪 Worker 鍚姩 Telegram 杞浠诲姟 mode=%s timeout=%s interval=%s",
+                "[TG轮询] 已在 Worker 启动 Telegram 轮询任务 mode=%s timeout=%s interval=%s",
                 inbound_mode,
                 settings.telegram_polling_timeout_seconds,
                 settings.telegram_polling_interval_seconds,
             )
         else:
             logger.warning(
-                "[TG杞] 鏈惎鍔?Telegram 杞浠诲姟 enabled=%s token_present=%s mode=%s",
+                "[TG轮询] 未启动 Telegram 轮询任务 enabled=%s token_present=%s mode=%s",
                 settings.telegram_enabled,
                 bool(settings.telegram_bot_token),
                 inbound_mode,

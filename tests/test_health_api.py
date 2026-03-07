@@ -36,4 +36,6 @@ def test_health_endpoint_returns_fast_on_sqlite_operational_error(monkeypatch):
     payload = response.json()
     assert payload["api_ok"] is True
     assert payload["db_ok"] is False
+    assert "asr" in payload
+    assert payload["asr"]["status"] in {"disabled", "ready", "degraded"}
     assert elapsed < 1.0

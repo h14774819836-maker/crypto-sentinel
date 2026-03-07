@@ -5,6 +5,7 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
+from app.asr_runtime import log_asr_runtime_status
 from app.config import get_settings
 from app.db.guards import ensure_db_backend_allowed
 from app.logging import setup_logging
@@ -14,11 +15,13 @@ from app.web.router import router as web_router
 
 
 @asynccontextmanager
-async def lifespan(_: FastAPI):
+async def lifespan(app: FastAPI):
     setup_logging()
-    ensure_db_backend_allowed(get_settings())
+    settings = get_settings()
+    ensure_db_backend_allowed(settings)
     if is_docker_compose_runtime():
         clear_runtime_state()
+    app.state.asr_status = log_asr_runtime_status(settings, component="api")
     yield
 
 

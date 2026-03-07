@@ -1548,6 +1548,7 @@
       firstChunkSeen: false,
       symbolDoneCount: 0,
       runFinished: false,
+      resolvingError: false,
       progress: 0,
     };
 
@@ -1635,6 +1636,7 @@
     const handleFailure = (message) => {
       const msg = message || 'Analysis failed';
       runState.runFinished = true;
+      runState.resolvingError = false;
       persistConsoleMeta({ status: "failed" });
       stopPseudoProgress();
       clearSilenceWatchdog();
@@ -1650,6 +1652,21 @@
       resetAnalyzeButton('<i data-lucide="cpu" class="w-4 h-4 mr-2"></i> Retry');
       aiConsoleState.streaming = false;
       if (evtSource) evtSource.close();
+    };
+
+    const resolveStreamFailureMessage = async (fallbackMessage) => {
+      try {
+        const response = await adminFetch(
+          `/api/ai-analyze/last-error?model=${encodedModel}&symbol=${encodedSymbol}`,
+          { method: 'GET' }
+        );
+        if (!response.ok) return fallbackMessage;
+        const payload = await response.json().catch(() => null);
+        const detailed = payload && payload.error ? String(payload.error).trim() : '';
+        return detailed || fallbackMessage;
+      } catch (_err) {
+        return fallbackMessage;
+      }
     };
 
     if (ui && ui.clearError) ui.clearError(aiPanel);
@@ -1900,9 +1917,11 @@
       }
     };
 
-    evtSource.onerror = function (err) {
-      if (runState.runFinished) return;
-      const msg = (err && err.message) ? err.message : 'Stream disconnected. Please retry or switch model.';
+    evtSource.onerror = async function (err) {
+      if (runState.runFinished || runState.resolvingError) return;
+      runState.resolvingError = true;
+      const fallbackMsg = (err && err.message) ? err.message : 'Stream disconnected. Please retry or switch model.';
+      const msg = await resolveStreamFailureMessage(fallbackMsg);
       handleFailure(msg);
     };
   }

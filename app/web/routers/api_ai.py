@@ -6,13 +6,15 @@ import json
 import time
 from dataclasses import dataclass, is_dataclass, replace as dc_replace
 from datetime import datetime, timezone
+from threading import Lock
 from typing import Any
 
+from fastapi.encoders import jsonable_encoder
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
-from app.ai.market_context_builder import build_market_analysis_context
+from app.ai.market_context_builder import build_market_analysis_context, sanitize_account_snapshot_for_ai
 from app.config import LLMConfig, get_settings
 from app.db.repository import (
     get_latest_futures_account_snapshot,
@@ -36,6 +38,9 @@ from app.web.utils import _json_datetime, _liquidation_distance_pct, _to_float
 
 # 与 run_ai.py 一致：大模型如 Kimi K2.5 / 豆包 首 token 较慢
 _ANALYZE_TIMEOUT_SECONDS = 420.0
+_AI_STREAM_ERROR_TTL_SECONDS = 900.0
+_AI_STREAM_ERROR_LOCK = Lock()
+_AI_STREAM_ERRORS: dict[tuple[str, str], dict[str, Any]] = {}
 
 
 @dataclass(slots=True)
@@ -43,6 +48,83 @@ class MarketAIRequestOptions:
     requested_model: str | None
     effective_model: str
     llm_config: LLMConfig
+
+
+def _json_dumps_safe(payload: Any) -> str:
+    encoded = jsonable_encoder(
+        payload,
+        custom_encoder={
+            datetime: lambda value: _json_datetime(value).isoformat() if _json_datetime(value) is not None else None,
+        },
+    )
+    return json.dumps(encoded, ensure_ascii=False)
+
+
+def _normalize_ai_stream_error_key_part(value: str | None, *, uppercase: bool = False) -> str:
+    text = str(value or "").strip()
+    if uppercase:
+        text = text.upper()
+    return text or "*"
+
+
+def _prune_ai_stream_errors(now_ts: float | None = None) -> None:
+    cutoff = float(now_ts if now_ts is not None else time.time()) - _AI_STREAM_ERROR_TTL_SECONDS
+    expired = [
+        key for key, payload in _AI_STREAM_ERRORS.items()
+        if float(payload.get("recorded_at_epoch") or 0.0) < cutoff
+    ]
+    for key in expired:
+        _AI_STREAM_ERRORS.pop(key, None)
+
+
+def _record_ai_stream_error(
+    *,
+    model: str | None,
+    symbol: str | None,
+    error: str,
+    phase: str,
+) -> dict[str, Any]:
+    payload = {
+        "model": _normalize_ai_stream_error_key_part(model),
+        "symbol": _normalize_ai_stream_error_key_part(symbol, uppercase=True),
+        "error": str(error or "AI stream failed").strip()[:800] or "AI stream failed",
+        "phase": str(phase or "stream").strip()[:80] or "stream",
+        "recorded_at": datetime.now(timezone.utc).isoformat(),
+        "recorded_at_epoch": round(time.time(), 3),
+    }
+    key = (payload["model"], payload["symbol"])
+    with _AI_STREAM_ERROR_LOCK:
+        _prune_ai_stream_errors()
+        _AI_STREAM_ERRORS[key] = payload
+    return payload
+
+
+def _clear_ai_stream_error(*, model: str | None, symbol: str | None) -> None:
+    key = (
+        _normalize_ai_stream_error_key_part(model),
+        _normalize_ai_stream_error_key_part(symbol, uppercase=True),
+    )
+    with _AI_STREAM_ERROR_LOCK:
+        _prune_ai_stream_errors()
+        _AI_STREAM_ERRORS.pop(key, None)
+
+
+def _get_ai_stream_error(*, model: str | None, symbol: str | None) -> dict[str, Any] | None:
+    norm_model = _normalize_ai_stream_error_key_part(model)
+    norm_symbol = _normalize_ai_stream_error_key_part(symbol, uppercase=True)
+    keys = [
+        (norm_model, norm_symbol),
+        (norm_model, "*"),
+        ("*", norm_symbol),
+        ("*", "*"),
+    ]
+    with _AI_STREAM_ERROR_LOCK:
+        _prune_ai_stream_errors()
+        for key in keys:
+            payload = _AI_STREAM_ERRORS.get(key)
+            if payload is not None:
+                return dict(payload)
+    return None
 
 
 def _clone_llm_config_with_model(config: LLMConfig, model: str) -> LLMConfig:
@@ -201,7 +283,7 @@ def _build_account_snapshot_context_for_ai(db: Session) -> dict[str, Any] | None
         as_of = _json_datetime(futures_row.ts)
     if as_of is None and margin_row is not None and margin_row.ts is not None:
         as_of = _json_datetime(margin_row.ts)
-    return {
+    snapshot = {
         "watch_symbol": settings.account_watch_symbol.upper(),
         "as_of_utc": as_of,
         "futures": futures_payload,
@@ -215,6 +297,10 @@ def _build_account_snapshot_context_for_ai(db: Session) -> dict[str, Any] | None
             ),
         },
     }
+    return sanitize_account_snapshot_for_ai(
+        snapshot,
+        liq_distance_risk_threshold_pct=float(settings.account_alert_liq_distance_pct),
+    )
 
 
 def _build_market_ai_symbol_snapshots(db: Session, symbol: str) -> dict[str, Any]:
@@ -222,25 +308,35 @@ def _build_market_ai_symbol_snapshots(db: Session, symbol: str) -> dict[str, Any
     all_tfs = ["1m"] + settings.multi_tf_interval_list
     for tf in all_tfs:
         latest = get_latest_market_metric(db, symbol=symbol, timeframe=tf)
-        if latest is None:
+        latest_candle = get_latest_ohlcv(db, symbol=symbol, timeframe=tf)
+        if latest is None and latest_candle is None:
             continue
 
         recent_candles = list_recent_ohlcv(db, symbol=symbol, timeframe=tf, limit=settings.ai_history_candles)
+        latest_ts = getattr(latest, "ts", None)
+        latest_close = getattr(latest, "close", None)
+        if latest_candle is not None and (
+            latest_ts is None or (latest_candle.ts is not None and latest_candle.ts >= latest_ts)
+        ):
+            latest_ts = latest_candle.ts
+            latest_close = latest_candle.close
         tf_data[tf] = {
             "latest": {
-                "ts": latest.ts,
-                "close": latest.close,
-                "ret_1m": latest.ret_1m,
-                "ret_10m": latest.ret_10m,
-                "rolling_vol_20": latest.rolling_vol_20,
-                "volume_zscore": latest.volume_zscore,
-                "rsi_14": latest.rsi_14,
+                "ts": latest_ts,
+                "metric_ts": getattr(latest, "ts", None),
+                "candle_ts": getattr(latest_candle, "ts", None),
+                "close": latest_close,
+                "ret_1m": getattr(latest, "ret_1m", None),
+                "ret_10m": getattr(latest, "ret_10m", None),
+                "rolling_vol_20": getattr(latest, "rolling_vol_20", None),
+                "volume_zscore": getattr(latest, "volume_zscore", None),
+                "rsi_14": getattr(latest, "rsi_14", None),
                 "stoch_rsi_k": getattr(latest, "stoch_rsi_k", None),
                 "stoch_rsi_d": getattr(latest, "stoch_rsi_d", None),
-                "macd_hist": latest.macd_hist,
-                "bb_zscore": latest.bb_zscore,
-                "bb_bandwidth": latest.bb_bandwidth,
-                "atr_14": latest.atr_14,
+                "macd_hist": getattr(latest, "macd_hist", None),
+                "bb_zscore": getattr(latest, "bb_zscore", None),
+                "bb_bandwidth": getattr(latest, "bb_bandwidth", None),
+                "atr_14": getattr(latest, "atr_14", None),
                 "obv": getattr(latest, "obv", None),
                 "ema_ribbon_trend": getattr(latest, "ema_ribbon_trend", None),
             },
@@ -250,6 +346,34 @@ def _build_market_ai_symbol_snapshots(db: Session, symbol: str) -> dict[str, Any
             ],
         }
     return tf_data
+
+
+async def _run_feature_refresh_with_catchup(
+    *,
+    runtime: Any,
+    steps: list[dict[str, Any]],
+    feature_job_fn: Any,
+    max_runs: int = 8,
+) -> dict[str, Any] | None:
+    latest_result: dict[str, Any] | None = None
+    for run_idx in range(max(1, int(max_runs or 1))):
+        step_start = time.perf_counter()
+        step_result = await feature_job_fn(runtime)
+        latest_result = step_result if isinstance(step_result, dict) else None
+        step_name = "feature" if run_idx == 0 else f"feature_catchup_{run_idx + 1}"
+        step_payload: dict[str, Any] = {
+            "step": step_name,
+            "duration_ms": int((time.perf_counter() - step_start) * 1000),
+        }
+        if isinstance(step_result, dict):
+            step_payload["result"] = step_result
+        steps.append(step_payload)
+
+        backlog = int((latest_result or {}).get("backlog") or 0)
+        if backlog <= 0:
+            break
+
+    return latest_result
 
 
 def _build_market_ai_symbol_inputs(
@@ -456,7 +580,6 @@ async def _run_refresh_steps(*, include_backfill: bool, mode: str) -> dict[str, 
             for step_name, step_coro in (
                 ("gap_fill", gap_fill_job),
                 ("multi_tf_sync", multi_tf_sync_job),
-                ("feature", feature_job),
                 ("funding_rate", funding_rate_job),
             ):
                 step_start = time.perf_counter()
@@ -468,6 +591,12 @@ async def _run_refresh_steps(*, include_backfill: bool, mode: str) -> dict[str, 
                 if isinstance(step_result, dict):
                     step_payload["result"] = step_result
                 steps.append(step_payload)
+
+            await _run_feature_refresh_with_catchup(
+                runtime=runtime,
+                steps=steps,
+                feature_job_fn=feature_job,
+            )
 
             total_duration_ms = int((time.perf_counter() - total_start) * 1000)
             logger.info("[AI_ANALYZE] pre-refresh completed in %d ms mode=%s steps=%s", total_duration_ms, mode, steps)
@@ -579,6 +708,7 @@ async def ai_analyze_now(
 ):
     """Trigger an on-demand AI analysis and return the results."""
     request_opts = _resolve_market_ai_request_options(model)
+    _clear_ai_stream_error(model=request_opts.effective_model, symbol=symbol)
     if dry_run:
         return {
             "ok": True,
@@ -625,6 +755,12 @@ async def ai_analyze_now(
     }
     available_symbols = [s for s, (snaps, _ctx) in symbol_inputs.items() if snaps]
     if not available_symbols:
+        _record_ai_stream_error(
+            model=request_opts.effective_model,
+            symbol=symbol,
+            error="暂无市场数据",
+            phase="data",
+        )
         return {"ok": False, "error": "暂无市场数据，请等待数据采集"}
 
     async def analyze_symbol(sym: str):
@@ -723,11 +859,28 @@ async def ai_analyze_stream(
     """Streaming endpoint for AI analysis using Server-Sent Events (SSE)."""
     try:
         return await _ai_analyze_stream_impl(model, symbol)
-    except HTTPException:
+    except HTTPException as exc:
+        detail = exc.detail if isinstance(exc.detail, str) else _json_dumps_safe(exc.detail)
+        _record_ai_stream_error(model=model, symbol=symbol, error=detail, phase="http")
         raise
     except Exception as e:
         logger.exception("ai_analyze_stream failed: %s", e)
+        _record_ai_stream_error(model=model, symbol=symbol, error=str(e), phase="http")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/api/ai-analyze/last-error")
+def ai_analyze_last_error(
+    model: str | None = Query(default=None),
+    symbol: str | None = Query(default=None),
+    _admin: str = Depends(require_admin),
+):
+    item = _get_ai_stream_error(model=model, symbol=symbol)
+    return {
+        "ok": True,
+        "error": item.get("error") if item else None,
+        "item": item,
+    }
 
 
 async def _ai_analyze_stream_impl(
@@ -736,8 +889,15 @@ async def _ai_analyze_stream_impl(
 ):
     """Inner implementation of ai_analyze_stream."""
     request_opts = _resolve_market_ai_request_options(model)
+    _clear_ai_stream_error(model=request_opts.effective_model, symbol=symbol)
     market_config = request_opts.llm_config
     if not market_config.enabled or not market_config.api_key:
+        _record_ai_stream_error(
+            model=request_opts.effective_model,
+            symbol=symbol,
+            error="市场分析 LLM 未启用或未配置 API Key",
+            phase="config",
+        )
         async def err_gen():
             yield 'data: {"type": "error", "error": "市场分析 LLM 未启用或未配置 API Key"}\n\n'
         return StreamingResponse(err_gen(), media_type="text/event-stream")
@@ -746,15 +906,28 @@ async def _ai_analyze_stream_impl(
     if not refresh_report.get("ok"):
         http_exc = _refresh_report_to_http_exception(refresh_report)
         if http_exc is not None:
+            detail = http_exc.detail if isinstance(http_exc.detail, str) else _json_dumps_safe(http_exc.detail)
+            _record_ai_stream_error(
+                model=request_opts.effective_model,
+                symbol=symbol,
+                error=detail,
+                phase="refresh",
+            )
             raise http_exc
-        refresh_error = json.dumps(
+        refresh_error_text = f"Pre-analysis data refresh failed: {refresh_report.get('error') or 'unknown error'}"
+        _record_ai_stream_error(
+            model=request_opts.effective_model,
+            symbol=symbol,
+            error=refresh_error_text,
+            phase="refresh",
+        )
+        refresh_error = _json_dumps_safe(
             {
                 "type": "error",
-                "error": f"Pre-analysis data refresh failed: {refresh_report.get('error') or 'unknown error'}",
+                "error": refresh_error_text,
                 "code": refresh_report.get("code"),
                 "refresh": refresh_report,
-            },
-            ensure_ascii=False
+            }
         )
 
         async def err_gen():
@@ -821,6 +994,12 @@ async def _ai_analyze_stream_impl(
         }
     available_symbols = [s for s, (snaps, _ctx) in symbol_inputs.items() if snaps]
     if not available_symbols:
+        _record_ai_stream_error(
+            model=request_opts.effective_model,
+            symbol=symbol,
+            error="暂无市场数据",
+            phase="data",
+        )
         async def err_gen():
             yield 'data: {"type": "error", "error": "暂无市场数据"}\n\n'
         return StreamingResponse(err_gen(), media_type="text/event-stream")
@@ -1037,12 +1216,20 @@ async def _ai_analyze_stream_impl(
                     ]
                 })
 
+            _clear_ai_stream_error(model=request_opts.effective_model, symbol=symbol)
             await queue.put({"type": "done", "count": len(available_symbols), "refresh": refresh_report})
         except asyncio.CancelledError:
             logger.info("ai_analyze_stream worker cancelled")
         except Exception as e:
             logger.exception("ai_analyze_stream worker error: %s", e)
-            await queue.put({"type": "error", "error": f"Analysis Error: {str(e)}"})
+            error_text = f"Analysis Error: {str(e)}"
+            _record_ai_stream_error(
+                model=request_opts.effective_model,
+                symbol=symbol,
+                error=error_text,
+                phase="worker",
+            )
+            await queue.put({"type": "error", "error": error_text})
 
     worker_task = asyncio.create_task(worker())
 
@@ -1062,7 +1249,7 @@ async def _ai_analyze_stream_impl(
                         last_heartbeat = now_mono
                     continue
 
-                yield f"data: {json.dumps(msg, ensure_ascii=False)}\n\n"
+                yield f"data: {_json_dumps_safe(msg)}\n\n"
                 if msg["type"] in ("done", "error"):
                     break
         finally:

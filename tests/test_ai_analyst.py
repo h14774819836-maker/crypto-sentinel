@@ -5,6 +5,8 @@ import json
 from types import SimpleNamespace
 
 from app.ai.analyst import MarketAnalyst, _extract_json
+from app.ai.grounding.engine import build_facts_index
+from app.ai.grounding.utils import resolve_dot_path
 from app.ai.provider import LLMCapabilities
 from app.config import LLMConfig
 
@@ -84,6 +86,54 @@ def test_parse_old_schema_compatible_and_hold_prices_cleared():
     assert sig.entry_price is None and sig.take_profit is None and sig.stop_loss is None
     assert isinstance(sig.analysis_json, dict)
     assert sig.analysis_json["signal"]["direction"] == "HOLD"
+
+
+def test_build_facts_index_includes_context_metrics_for_grounding():
+    facts = {
+        "facts": {
+            "multi_tf_snapshots": {
+                "1m": {
+                    "latest": {"close": 100.0, "atr_14": 1.2, "rsi_14": 55.0},
+                }
+            },
+            "brief": {
+                "derived_features_by_tf": {
+                    "1m": {
+                        "momentum_alignment": 0.73,
+                        "range_stats": {"range_position": 0.91},
+                    }
+                },
+                "cross_tf_summary": {"alignment_score": 72},
+            },
+            "data_quality": {"snapshot_age_sec": {"1m": 45}},
+            "funding_deltas": {"funding_rate": 0.0001},
+        }
+    }
+
+    index = build_facts_index(facts)
+
+    assert index.by_timeframe["1m"]["momentum_alignment"] == [0.73]
+    assert index.by_timeframe["1m"]["range_position"] == [0.91]
+    assert index.by_timeframe["1m"]["snapshot_age_sec"] == [45.0]
+    assert index.by_metric_key["funding_rate"] == [0.0001]
+
+
+def test_resolve_dot_path_supports_array_index_segments():
+    ok, actual, resolved = resolve_dot_path(
+        {
+            "facts": {
+                "brief": {
+                    "tradeable_gate": {
+                        "reasons": ["价格处于近端区间边缘，追价风险较高"],
+                    }
+                }
+            }
+        },
+        "facts.brief.tradeable_gate.reasons[0]",
+    )
+    assert ok is True
+    assert actual == "价格处于近端区间边缘，追价风险较高"
+    assert resolved == "facts.brief.tradeable_gate.reasons[0]"
 
 
 def test_validate_and_sanitize_downgrades_low_rr_and_marks_validation():
@@ -357,3 +407,173 @@ def test_parse_response_strict_allows_anchor_without_facts_prefix_and_categorica
     )
     assert failure is None
     assert len(signals) == 1
+
+
+def test_analyze_skips_pass2_when_trade_quality_is_non_repairable():
+    cfg = LLMConfig(
+        enabled=True,
+        provider="deepseek",
+        api_key="x",
+        base_url="https://api.deepseek.com",
+        model="deepseek-chat",
+        use_reasoning="false",
+        max_concurrency=1,
+        max_retries=1,
+    )
+    low_quality = {
+        "content": json.dumps(
+            {
+                "market_regime": "trending_up",
+                "signal": {
+                    "symbol": "BTCUSDT",
+                    "direction": "LONG",
+                    "entry_price": 100.0,
+                    "take_profit": 100.5,
+                    "stop_loss": 90.0,
+                    "confidence": 40,
+                    "reasoning": "quality too low",
+                },
+                "trade_plan": {
+                    "expiration_ts_utc": 9999999999,
+                    "max_hold_bars": 60,
+                    "leverage": 5,
+                    "margin_mode": "isolated",
+                },
+                "evidence": [
+                    {"timeframe": "1m", "point": "close=100", "metrics": {"close": 100.0}},
+                    {"timeframe": "1m", "point": "atr=1", "metrics": {"atr_14": 1.0}},
+                ],
+                "anchors": [
+                    {"path": "facts.multi_tf_snapshots.1m.latest.close", "value": "100"},
+                    {"path": "facts.multi_tf_snapshots.1m.latest.atr_14", "value": "1"},
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        "model": "deepseek-chat",
+        "prompt_tokens": 10,
+        "completion_tokens": 20,
+    }
+    provider = _RetryProvider([low_quality])
+    analyst = MarketAnalyst(
+        SimpleNamespace(ai_external_views_on_low_conf_only=True, ai_scan_confidence_threshold=60),
+        provider,
+        cfg,
+    )
+    events: list[tuple[str, dict]] = []
+    analyst._log_market_event = lambda event, **payload: events.append((event, payload))  # type: ignore[method-assign]
+
+    signals, meta = asyncio.run(
+        analyst.analyze(
+            "BTCUSDT",
+            _snapshots(atr=1.0),
+            context={
+                "data_quality": {"overall": "GOOD"},
+                "youtube_radar": {"available": True, "stale": False},
+                "intel_digest": {},
+            },
+        )
+    )
+
+    assert len(signals) == 1
+    assert signals[0].direction == "HOLD"
+    assert len(provider.calls) == 1
+    assert meta is not None and meta["status"] == "ok"
+    assert any(event == "pass2_skipped" and payload.get("reason") == "non_repairable_trade_quality_failure" for event, payload in events)
+
+
+def test_analyze_runs_pass2_only_with_fresh_external_views_and_no_retry():
+    cfg = LLMConfig(
+        enabled=True,
+        provider="deepseek",
+        api_key="x",
+        base_url="https://api.deepseek.com",
+        model="deepseek-chat",
+        use_reasoning="false",
+        max_concurrency=1,
+        max_retries=1,
+    )
+    pass1 = {
+        "content": json.dumps(
+            {
+                "market_regime": "ranging",
+                "signal": {
+                    "symbol": "BTCUSDT",
+                    "direction": "HOLD",
+                    "entry_price": None,
+                    "take_profit": None,
+                    "stop_loss": None,
+                    "confidence": 45,
+                    "reasoning": "need external views",
+                },
+                "trade_plan": {"expiration_ts_utc": 9999999999, "max_hold_bars": 60},
+                "evidence": [
+                    {"timeframe": "1m", "point": "close=100", "metrics": {"close": 100.0}},
+                    {"timeframe": "1m", "point": "atr=1", "metrics": {"atr_14": 1.0}},
+                ],
+                "anchors": [
+                    {"path": "facts.multi_tf_snapshots.1m.latest.close", "value": "100"},
+                    {"path": "facts.multi_tf_snapshots.1m.latest.atr_14", "value": "1"},
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        "model": "deepseek-chat",
+        "prompt_tokens": 10,
+        "completion_tokens": 20,
+    }
+    pass2 = {
+        "content": json.dumps(
+            {
+                "market_regime": "trending_down",
+                "signal": {
+                    "symbol": "BTCUSDT",
+                    "direction": "HOLD",
+                    "entry_price": None,
+                    "take_profit": None,
+                    "stop_loss": None,
+                    "confidence": 55,
+                    "reasoning": "refined",
+                },
+                "trade_plan": {"expiration_ts_utc": 9999999999, "max_hold_bars": 60},
+                "evidence": [
+                    {"timeframe": "1m", "point": "close=100", "metrics": {"close": 100.0}},
+                    {"timeframe": "1m", "point": "atr=1", "metrics": {"atr_14": 1.0}},
+                ],
+                "anchors": [
+                    {"path": "facts.multi_tf_snapshots.1m.latest.close", "value": "100"},
+                    {"path": "facts.multi_tf_snapshots.1m.latest.atr_14", "value": "1"},
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        "model": "deepseek-chat",
+        "prompt_tokens": 8,
+        "completion_tokens": 12,
+    }
+    provider = _RetryProvider([pass1, pass2])
+    analyst = MarketAnalyst(
+        SimpleNamespace(ai_external_views_on_low_conf_only=True, ai_scan_confidence_threshold=60),
+        provider,
+        cfg,
+    )
+    events: list[tuple[str, dict]] = []
+    analyst._log_market_event = lambda event, **payload: events.append((event, payload))  # type: ignore[method-assign]
+
+    signals, meta = asyncio.run(
+        analyst.analyze(
+            "BTCUSDT",
+            _snapshots(atr=1.0),
+            context={
+                "data_quality": {"overall": "GOOD"},
+                "youtube_radar": {"available": True, "stale": False},
+                "intel_digest": {},
+            },
+        )
+    )
+
+    assert len(provider.calls) == 2
+    assert signals[0].confidence == 55
+    assert meta is not None and meta["prompt_tokens"] == 18
+    assert any(event == "pass2_refinement_started" for event, _payload in events)
+    assert any(event == "pass2_refinement_finished" and payload.get("status") == "ok" for event, payload in events)

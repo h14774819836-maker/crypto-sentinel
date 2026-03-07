@@ -39,6 +39,8 @@ def _build_ctx(alignment_score: int = 80):
 
 def test_scanner_gate_passes_when_disabled():
     ctx = _build_ctx(alignment_score=30)
+    ctx["data_quality"] = {"overall": "GOOD"}
+    ctx.setdefault("brief", {})["tradeable_gate"] = {"tradeable": True, "reasons": []}
     ok, reason = scanner_gate_passes(ctx, two_stage_enabled=False, scan_threshold=60)
     assert ok is True
     assert reason is None
@@ -46,6 +48,8 @@ def test_scanner_gate_passes_when_disabled():
 
 def test_scanner_gate_rejects_low_alignment():
     ctx = _build_ctx(alignment_score=30)
+    ctx["data_quality"] = {"overall": "GOOD"}
+    ctx.setdefault("brief", {})["tradeable_gate"] = {"tradeable": True, "reasons": []}
     ok, reason = scanner_gate_passes(ctx, two_stage_enabled=True, scan_threshold=60)
     assert ok is False
     assert reason == "alignment_low_30"
@@ -53,9 +57,27 @@ def test_scanner_gate_rejects_low_alignment():
 
 def test_scanner_gate_passes_high_alignment():
     ctx = _build_ctx(alignment_score=80)
+    ctx["data_quality"] = {"overall": "GOOD"}
+    ctx.setdefault("brief", {})["tradeable_gate"] = {"tradeable": True, "reasons": []}
     ok, reason = scanner_gate_passes(ctx, two_stage_enabled=True, scan_threshold=60)
     assert ok is True
     assert reason is None
+
+
+def test_scanner_gate_rejects_poor_data_before_llm():
+    ctx = _build_ctx(alignment_score=95)
+    ctx["data_quality"] = {"overall": "POOR"}
+    ok, reason = scanner_gate_passes(ctx, two_stage_enabled=True, scan_threshold=60)
+    assert ok is False
+    assert reason == "poor_data"
+
+
+def test_scanner_gate_rejects_non_tradeable_before_llm():
+    ctx = _build_ctx(alignment_score=95)
+    ctx.setdefault("brief", {})["tradeable_gate"] = {"tradeable": False, "reasons": ["data quality"]}
+    ok, reason = scanner_gate_passes(ctx, two_stage_enabled=True, scan_threshold=60)
+    assert ok is False
+    assert reason == "not_tradeable"
 
 
 def test_build_scanner_hold_signal():
